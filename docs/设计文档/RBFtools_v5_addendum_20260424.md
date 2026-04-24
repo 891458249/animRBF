@@ -360,6 +360,11 @@ v4 rig 首次在 v5 binary 下加载：
 3. 手写 Cholesky 切换到 `Eigen::LLT`，旧实现删除或保留做回归对照
 4. `solverMethod` enum 扩展；`lastSolveMethod` 扩为 4 档
 5. Python 规约 + C++ 集成测试覆盖四层转移矩阵
+6. **`lastSolveMethod` 对 `kernel` 变化敏感**：M1.4 实现仅对 `solverMethod` 切换重置缓存。
+   用户从非 SPD kernel（Thin Plate / Linear，缓存 sticky 到 GE=1）切到 SPD kernel（Gaussian 类）后，
+   `lastSolveMethod` 仍保持 1，Cholesky 永远不重试——数学上仍正确（GE 能解 λI 后的任意矩阵），
+   但性能永久停在慢路径。**非 correctness bug，是性能债**。M4.5 solver 路径重写时追加
+   `prevKernelVal` 成员 + "kernel 变化 → 清 `lastSolveMethod`" 契约一并处理。
 
 **明确不在 M4.5 scope 内**：性能优化（对称存储、SIMD、分块）——M5.1；`solverStats` 只读属性——M5.2。
 
