@@ -87,6 +87,8 @@ MObject RBFtools::clampInflation;
 MObject RBFtools::outputIsScale;
 MObject RBFtools::regularization;
 MObject RBFtools::solverMethod;
+MObject RBFtools::inputEncoding;
+MObject RBFtools::driverInputRotateOrder;
 MObject RBFtools::radiusType;
 MObject RBFtools::radius;
 MObject RBFtools::distanceType;
@@ -126,8 +128,10 @@ MObject RBFtools::exposeData;
 // ---------------------------------------------------------------------
 
 RBFtools::RBFtools()
-    : lastSolveMethod(0),      // M1.4: Cholesky tried first on fresh node.
-      prevSolverMethodVal(0)   // M1.4: Auto; matches solverMethod default.
+    : lastSolveMethod(0),              // M1.4: Cholesky tried first on fresh node.
+      prevSolverMethodVal(0),          // M1.4: Auto; matches solverMethod default.
+      inputEncodingWarningIssued(false), // M2.1a: fresh warning on first fall-back.
+      prevInputEncodingVal(0)          // M2.1a: Raw; matches inputEncoding default.
 {}
 
 RBFtools::~RBFtools()
@@ -237,6 +241,38 @@ MStatus RBFtools::initialize()
     eAttr.addField("Auto", 0);
     eAttr.addField("ForceGE", 1);
     eAttr.setKeyable(true);
+    eAttr.setStorable(true);
+
+    // M2.1a: input encoding for Generic mode. Field values aligned to
+    // v5 PART C.2.2. Default Raw for zero regression on v4 rigs.
+    // BendRoll (2) and Swing-Twist (4) are declared but placeholder —
+    // compute() falls back to Raw with a once-per-rig warning until
+    // M2.1b lands their actual encode paths. Matrix mode ignores this
+    // attribute entirely (see addendum §M2.1a item 8).
+    inputEncoding = eAttr.create("inputEncoding", "ienc", 0);
+    eAttr.addField("Raw",        0);
+    eAttr.addField("Quaternion", 1);
+    eAttr.addField("BendRoll",   2);
+    eAttr.addField("ExpMap",     3);
+    eAttr.addField("SwingTwist", 4);
+    eAttr.setKeyable(true);
+    eAttr.setStorable(true);
+
+    // M2.1a: per-driver-group rotate order. Multi enum aligned to Maya's
+    // native rotateOrder enum so users may connect
+    //   driver.rotateOrder → RBFtools.driverInputRotateOrder[k]
+    // directly. Missing indices default to XYZ(0). Ignored when
+    // inputEncoding == Raw.
+    driverInputRotateOrder = eAttr.create("driverInputRotateOrder", "diro", 0);
+    eAttr.addField("xyz", 0);
+    eAttr.addField("yzx", 1);
+    eAttr.addField("zxy", 2);
+    eAttr.addField("xzy", 3);
+    eAttr.addField("yxz", 4);
+    eAttr.addField("zyx", 5);
+    eAttr.setArray(true);
+    eAttr.setUsesArrayDataBuilder(true);
+    eAttr.setKeyable(false);
     eAttr.setStorable(true);
 
     //
@@ -658,6 +694,8 @@ MStatus RBFtools::initialize()
     addAttribute(clampInflation);
     addAttribute(regularization);
     addAttribute(solverMethod);
+    addAttribute(inputEncoding);
+    addAttribute(driverInputRotateOrder);
     addAttribute(poseMode);
     addAttribute(twistAxis);
     addAttribute(opposite);
@@ -702,6 +740,8 @@ MStatus RBFtools::initialize()
     attributeAffects(RBFtools::clampInflation, RBFtools::output);
     attributeAffects(RBFtools::regularization, RBFtools::output);
     attributeAffects(RBFtools::solverMethod, RBFtools::output);
+    attributeAffects(RBFtools::inputEncoding, RBFtools::output);
+    attributeAffects(RBFtools::driverInputRotateOrder, RBFtools::output);
     attributeAffects(RBFtools::radius, RBFtools::output);
     attributeAffects(RBFtools::centerAngle, RBFtools::output);
     attributeAffects(RBFtools::curveRamp, RBFtools::output);
@@ -879,6 +919,40 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
     MPlug solverMethodPlug(thisNode, RBFtools::solverMethod);
     double regularizationVal = regularizationPlug.asDouble();
     short  solverMethodVal   = solverMethodPlug.asShort();
+    // M2.1a: inputEncoding + per-driver-group rotate order. Read early
+    // so the safety net can remap BendRoll/SwingTwist -> Raw with a
+    // single warning before any encoding math runs.
+    MPlug inputEncodingPlug(thisNode, RBFtools::inputEncoding);
+    short inputEncodingVal = inputEncodingPlug.asShort();
+    std::vector<short> driverRotateOrders;
+    {
+        MStatus dstat;
+        MArrayDataHandle droHandle =
+            data.inputArrayValue(driverInputRotateOrder, &dstat);
+        if (dstat == MStatus::kSuccess)
+        {
+            unsigned cnt = droHandle.elementCount();
+            for (unsigned k = 0; k < cnt; ++k)
+            {
+                if (droHandle.jumpToArrayElement(k) == MStatus::kSuccess)
+                {
+                    unsigned idx = droHandle.elementIndex();
+                    if (idx >= driverRotateOrders.size())
+                        driverRotateOrders.resize(idx + 1, 0);
+                    driverRotateOrders[idx] =
+                        droHandle.inputValue().asShort();
+                }
+            }
+        }
+    }
+    // Reset the once-per-rig warning flag whenever the user changes
+    // encoding — they should get a fresh warning if the new mode also
+    // trips the safety net.
+    if (inputEncodingVal != prevInputEncodingVal)
+    {
+        inputEncodingWarningIssued = false;
+        prevInputEncodingVal = inputEncodingVal;
+    }
     angleVal = anglePlug.asDouble();
     radiusVal = radiusPlug.asDouble();
     centerAngleVal = centerAnglePlug.asDouble();
@@ -1120,11 +1194,56 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
             // get the pose data based on the mode
             // ---------------------------------------------------------
 
+            // M2.1a: resolve effective encoding via safety net BEFORE
+            // calling getPoseData. BendRoll (2) / SwingTwist (4) are
+            // declared but not implemented — they fall back to Raw with
+            // a once-per-rig warning. A non-Raw encoding on inDim that
+            // is not a multiple of 3 also falls back to Raw with a
+            // distinct warning. This preserves the v5 contract that the
+            // rig never stops DG evaluation due to an unimplemented /
+            // misconfigured encoding; users see a loud warning in the
+            // Script Editor and can correct or accept the Raw fallback.
+            //
+            // Declared at the outer (RBF else-branch) scope so the later
+            // getDistances / getPoseWeights call sites can see it.
+            short effectiveEncoding = inputEncodingVal;
             if (genericMode)
             {
-                unsigned int driverSize = inputIds.length();
+                const unsigned rawInDim = inputIds.length();
+                const bool wantsEncoded = (inputEncodingVal != 0);
+                const bool placeholder = (inputEncodingVal == 2 ||
+                                          inputEncodingVal == 4);
+                const bool nonTriple = (wantsEncoded && rawInDim % 3 != 0);
+
+                if (placeholder)
+                {
+                    if (!inputEncodingWarningIssued)
+                    {
+                        MGlobal::displayWarning(thisName + MString(
+                            ": inputEncoding ") +
+                            (inputEncodingVal == 2 ? "BendRoll" : "SwingTwist") +
+                            " lands in M2.1b; falling back to Raw.");
+                        inputEncodingWarningIssued = true;
+                    }
+                    effectiveEncoding = 0;
+                }
+                else if (nonTriple)
+                {
+                    if (!inputEncodingWarningIssued)
+                    {
+                        MGlobal::displayWarning(thisName + MString(
+                            ": inputEncoding requires driver inputs in "
+                            "(rx, ry, rz) triples; inDim=") + int(rawInDim) +
+                            " is not a multiple of 3. Falling back to Raw.");
+                        inputEncodingWarningIssued = true;
+                    }
+                    effectiveEncoding = 0;
+                }
+
+                unsigned driverSize = rawInDim;
                 driver.resize(driverSize);
 
+                unsigned effInDim = 0;
                 status = getPoseData(data,
                                      driver,
                                      poseCount,
@@ -1132,7 +1251,10 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                      matPoses,
                                      matValues,
                                      poseModes,
-                                     inputNorms);
+                                     inputNorms,
+                                     (int)effectiveEncoding,
+                                     driverRotateOrders,
+                                     effInDim);
                 CHECK_MSTATUS_AND_RETURN_IT(status);
             }
             else
@@ -1158,10 +1280,17 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                         inputNorms);
                 CHECK_MSTATUS_AND_RETURN_IT(status);
 
-                // Override the distance type for the matrix mode to
-                // euclidean which makes it easier to calculate rotation
-                // and twist.
-                distanceTypeVal = 0;
+                // M2.1a Bug 2 fix: honour the user's distanceType choice
+                // in Matrix mode. The former `distanceTypeVal = 0` override
+                // silently forced Euclidean; now Angle routes through
+                // getMatrixModeAngleDistance via getPoseDelta's
+                // isMatrixMode branch (M1.1 addendum §Bug 2).
+
+                // Matrix mode ignores inputEncoding per (F)① contract.
+                // Normalise effectiveEncoding to 0 so the downstream
+                // getDistances / getPoseWeights calls never receive a
+                // mixed (isMatrixMode=true, encoding≠0) pair.
+                effectiveEncoding = 0;
 
                 solveCount = poseCount;
             }
@@ -1272,7 +1401,9 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     // calculate the mean and standard deviation for the
                     // rbf function.
                     BRMatrix linMat;
-                    linMat = getDistances(matPoses, distanceTypeVal);
+                    linMat = getDistances(matPoses, distanceTypeVal,
+                                          (int)effectiveEncoding,
+                                          /*isMatrixMode*/ !genericMode);
                     meanVal = linMat.mean();
                     varianceVal = linMat.variance();
                     
@@ -1438,6 +1569,8 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                wMat,
                                getRadiusValue(),
                                distanceTypeVal,
+                               (int)effectiveEncoding,
+                               /*isMatrixMode*/ !genericMode,
                                kernelVal);
 
                 if (exposeDataVal == 2 || exposeDataVal == 4)
@@ -1892,7 +2025,10 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
                                   BRMatrix &poseData,
                                   BRMatrix &poseVals,
                                   MIntArray &poseModes,
-                                  std::vector<double>&normFactors)
+                                  std::vector<double>&normFactors,
+                                  int inputEncoding,
+                                  const std::vector<short>& rotateOrders,
+                                  unsigned &effectiveInDim)
 {
     MStatus status = MStatus::kSuccess;
 
@@ -1999,17 +2135,20 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
     poseMatrixIds.clear();
 
     // -----------------------------------------------------------------
-    // fill the driver and rest vector
+    // fill the driver and rest vector (raw, pre-encoding)
     // -----------------------------------------------------------------
 
     std::vector<double> rest;
     rest.resize(inDim);
 
+    std::vector<double> rawDriver;
+    rawDriver.resize(inDim);
+
     for (i = 0; i < inDim; i ++)
     {
         status = inputHandle.jumpToArrayElement(i);
         CHECK_MSTATUS_AND_RETURN_IT(status);
-        driver[i] = inputHandle.inputValue().asDouble();
+        rawDriver[i] = inputHandle.inputValue().asDouble();
 
         // get the rest input
         if (i < restDim)
@@ -2022,9 +2161,80 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
             rest[i] = 0.0;
 
         if (distanceTypeVal)
-            driver[i] -= rest[i];
+            rawDriver[i] -= rest[i];
         else
             rest[i] = 0.0;
+    }
+
+    // -----------------------------------------------------------------
+    // M2.1a — encode driver vector
+    //
+    // Raw (0): pass-through, effectiveInDim = inDim.
+    // Quaternion (1): (rx, ry, rz) -> (qx, qy, qz, qw), 3-in/4-out per
+    //                 group; effectiveInDim = (inDim/3) * 4.
+    // ExpMap (3): (rx, ry, rz) -> log-quat ∈ ℝ³, 3-in/3-out per group;
+    //             effectiveInDim stays inDim (but values are transformed).
+    // BendRoll (2) / SwingTwist (4): caller (compute()) remaps encoding
+    //             to 0 via the safety net before we get here. If they
+    //             still reach, fall through to Raw semantics.
+    //
+    // Rest subtraction (distType==Angle) was already applied to rawDriver
+    // above; encoding consumes the rest-subtracted value.
+    //
+    // Lambda: encode a single (rx, ry, rz) group at (raw[off..off+2])
+    // into (out[offOut..offOut+k-1]) per the active encoding.
+    // -----------------------------------------------------------------
+
+    const bool encQuat   = (inputEncoding == 1);
+    const bool encExpMap = (inputEncoding == 3);
+    // Resolve effective dim. Non-3-divisible inDim is the caller's
+    // safety-net precondition; we still handle it defensively by
+    // falling back to Raw semantics.
+    const bool encActive = (encQuat || encExpMap) && (inDim % 3 == 0) && (inDim > 0);
+    const unsigned groups = encActive ? (inDim / 3) : 0;
+    if (encQuat && encActive)
+        effectiveInDim = groups * 4;
+    else
+        effectiveInDim = inDim;
+
+    auto groupRotateOrder = [&](unsigned g) -> short {
+        if (g < rotateOrders.size()) return rotateOrders[g];
+        return 0;  // XYZ default
+    };
+
+    driver.assign(effectiveInDim, 0.0);
+    if (encQuat && encActive)
+    {
+        for (unsigned g = 0; g < groups; ++g)
+        {
+            double qx, qy, qz, qw;
+            encodeEulerToQuaternion(rawDriver[g*3+0], rawDriver[g*3+1], rawDriver[g*3+2],
+                                    groupRotateOrder(g), qx, qy, qz, qw);
+            driver[g*4+0] = qx;
+            driver[g*4+1] = qy;
+            driver[g*4+2] = qz;
+            driver[g*4+3] = qw;
+        }
+    }
+    else if (encExpMap && encActive)
+    {
+        for (unsigned g = 0; g < groups; ++g)
+        {
+            double qx, qy, qz, qw;
+            encodeEulerToQuaternion(rawDriver[g*3+0], rawDriver[g*3+1], rawDriver[g*3+2],
+                                    groupRotateOrder(g), qx, qy, qz, qw);
+            double lx, ly, lz;
+            encodeQuaternionToExpMap(qx, qy, qz, qw, lx, ly, lz);
+            driver[g*3+0] = lx;
+            driver[g*3+1] = ly;
+            driver[g*3+2] = lz;
+        }
+    }
+    else
+    {
+        // Raw: pass-through.
+        for (unsigned k = 0; k < inDim; ++k)
+            driver[k] = rawDriver[k];
     }
 
     // -----------------------------------------------------------------
@@ -2037,8 +2247,10 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
 
         // Prepare the matrix to hold the pose vectors.
         // Assign an empty matrix to clear pre-existing data.
+        // M2.1a: sized to effective (post-encoding) dim so downstream
+        // solver/clamp consume encoded space consistently with driver.
         poseData = BRMatrix();
-        poseData.setSize(poseCount, inDim);
+        poseData.setSize(poseCount, effectiveInDim);
 
         // Prepare the matrix to hold the pose values.
         // Assign an empty matrix to clear pre-existing data.
@@ -2049,14 +2261,18 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
         poseModes.clear();
         poseModes.setLength(poseCount);
 
+        // M2.1a: temp row for raw values read before per-row encoding.
+        std::vector<double> rawRow;
+        rawRow.resize(inDim);
+
         for (i = 0; i < poseCount; i ++)
         {
             poseMatrixIds.append((int)i);
 
-            // Fill with zeros in case an array index is missing because
-            // of sparse arrays.
+            // M2.1a: pre-fill rawRow with the all-zero pose default
+            // (rest-subtracted), matching v4 semantics for sparse arrays.
             for (j = 0; j < inDim; j ++)
-                poseData(i, j) = 0.0 - rest[j];
+                rawRow[j] = 0.0 - rest[j];
             for (j = 0; j < solveCount; j ++)
                 poseVals(i, j) = 0.0;
 
@@ -2081,7 +2297,7 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
                     {
                         status = poseInputArrayHandle.jumpToElement(j);
                         if (status == MStatus::kSuccess)
-                            poseData(i, j) = poseInputArrayHandle.inputValue().asDouble() - rest[j];
+                            rawRow[j] = poseInputArrayHandle.inputValue().asDouble() - rest[j];
                     }
                 }
 
@@ -2108,6 +2324,49 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
             }
 
             // -----------------------------------------------
+            // M2.1a — write encoded row into poseData(i, :)
+            //
+            // Same encoding ladder as the driver block above. Encoded
+            // pose rows sit in the same space as the encoded driver, so
+            // bounds, normalization, kernel activation, and distance
+            // dispatch all operate in a single consistent coordinate
+            // system.
+            // -----------------------------------------------
+
+            if (encQuat && encActive)
+            {
+                for (unsigned g = 0; g < groups; ++g)
+                {
+                    double qx, qy, qz, qw;
+                    encodeEulerToQuaternion(rawRow[g*3+0], rawRow[g*3+1], rawRow[g*3+2],
+                                            groupRotateOrder(g), qx, qy, qz, qw);
+                    poseData(i, g*4+0) = qx;
+                    poseData(i, g*4+1) = qy;
+                    poseData(i, g*4+2) = qz;
+                    poseData(i, g*4+3) = qw;
+                }
+            }
+            else if (encExpMap && encActive)
+            {
+                for (unsigned g = 0; g < groups; ++g)
+                {
+                    double qx, qy, qz, qw;
+                    encodeEulerToQuaternion(rawRow[g*3+0], rawRow[g*3+1], rawRow[g*3+2],
+                                            groupRotateOrder(g), qx, qy, qz, qw);
+                    double lx, ly, lz;
+                    encodeQuaternionToExpMap(qx, qy, qz, qw, lx, ly, lz);
+                    poseData(i, g*3+0) = lx;
+                    poseData(i, g*3+1) = ly;
+                    poseData(i, g*3+2) = lz;
+                }
+            }
+            else
+            {
+                for (unsigned k = 0; k < inDim; ++k)
+                    poseData(i, k) = rawRow[k];
+            }
+
+            // -----------------------------------------------
             // pose modes
             // -----------------------------------------------
 
@@ -2118,14 +2377,16 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
         }
 
         // -------------------------------------------------
-        // M1.3: per-dimension bounds snapshot (raw space). Must run
-        // BEFORE normalizeColumns so inflation is in user scene units,
-        // not normalized units. Generic mode clamps all dims.
+        // M1.3: per-dimension bounds snapshot (effective/encoded space).
+        // Must run BEFORE normalizeColumns so inflation stays in the
+        // user-visible coord system for that encoding. For Raw this is
+        // user scene units; for Quaternion this is [-1, 1] quat space;
+        // for ExpMap this is rotation-vector radians.
         // -------------------------------------------------
 
-        poseMinVec.assign(inDim, 0.0);
-        poseMaxVec.assign(inDim, 0.0);
-        for (j = 0; j < inDim; j ++)
+        poseMinVec.assign(effectiveInDim, 0.0);
+        poseMaxVec.assign(effectiveInDim, 0.0);
+        for (j = 0; j < effectiveInDim; j ++)
         {
             double lo = poseData(0, j);
             double hi = lo;
@@ -2210,7 +2471,8 @@ double RBFtools::getTwistAngle(MQuaternion q, unsigned int axis)
 // Return Value:
 //      BRMatrix        The distance matrix.
 //
-BRMatrix RBFtools::getDistances(BRMatrix poseMat, int distType)
+BRMatrix RBFtools::getDistances(BRMatrix poseMat, int distType,
+                                int encoding, bool isMatrixMode)
 {
     unsigned count = poseMat.getRowSize();
 
@@ -2223,7 +2485,9 @@ BRMatrix RBFtools::getDistances(BRMatrix poseMat, int distType)
     {
         for (j = 0; j < count; j ++)
         {
-            double dist = getPoseDelta(poseMat.getRowVector(i), poseMat.getRowVector(j), distType);
+            double dist = getPoseDelta(poseMat.getRowVector(i),
+                                       poseMat.getRowVector(j),
+                                       distType, encoding, isMatrixMode);
             distMat(i, j) = dist;
         }
     }
@@ -2234,42 +2498,229 @@ BRMatrix RBFtools::getDistances(BRMatrix poseMat, int distType)
 
 //
 // Description:
-//      Return the distance between the two given vectors based on the
-//      distance type (linear/angle) or the vector components in case
-//      of the generic RBF mode.
+//      Return the distance between the two given vectors, dispatched by
+//      (isMatrixMode, encoding, distType) per v5 PART C.2.2 + addendum
+//      2026-04-24 §M2.1a. Matrix mode owns its dispatch (ignores the
+//      encoding arg, honours distType=0/1 via linear vs angle Matrix-mode
+//      helpers — the §Bug 2 fix). Generic mode dispatches on encoding:
+//      Raw preserves v4 legacy behaviour; Quaternion uses per-4-block
+//      1-|q1·q2| aggregated L2; ExpMap uses ℝ³ Euclidean. BendRoll and
+//      Swing-Twist are expected to be remapped to Raw by the caller
+//      BEFORE reaching this function (see compute() safety net).
 //
 // Input Arguments:
-//      vec1            The first vector.
-//      vec2            The second vector.
-//      distType        The distance type (linear/angle).
+//      vec1, vec2          Pose vectors.
+//      distType            0 = linear/euclidean, 1 = angle.
+//      encoding            v5 inputEncoding enum value (Generic mode).
+//      isMatrixMode        True when caller is in Matrix (blendShape) mode.
 //
-// Return Value:
-//      double          The distance value.
-//
-double RBFtools::getPoseDelta(std::vector<double> vec1, std::vector<double> vec2, int distType)
+double RBFtools::getPoseDelta(std::vector<double> vec1, std::vector<double> vec2,
+                              int distType, int encoding, bool isMatrixMode)
 {
-    double dist = 0.0;
     const size_t n = vec1.size();
+    if (n != vec2.size())
+        return getRadius(vec1, vec2);  // defensive
+
+    // -----------------------------------------------------------------
+    // Matrix mode: layout is [vx, vy, vz, twist] * driverCount. The
+    // encoding arg is ignored per (F)① contract.
+    // -----------------------------------------------------------------
+    if (isMatrixMode)
+    {
+        if (n >= 4 && n % 4 == 0)
+        {
+            // M2.1a Bug 2 fix: when the user selects distanceType == Angle
+            // on a Matrix-mode node, honour it — previously this path
+            // silently fell through to Euclidean because getPoseData
+            // forced distanceTypeVal = 0 and getPoseDelta had no angle
+            // branch for 4k vectors. See M1.1 addendum §Bug 2.
+            return (distType == 0)
+                ? getMatrixModeLinearDistance(vec1, vec2)
+                : getMatrixModeAngleDistance(vec1, vec2);
+        }
+        return getRadius(vec1, vec2);
+    }
+
+    // -----------------------------------------------------------------
+    // Generic mode: encoding owns the dispatch.
+    // -----------------------------------------------------------------
+
+    // Raw (v4 legacy + BendRoll/SwingTwist placeholder target).
+    if (encoding == 0)
+    {
+        if (distType == 0)
+            return getRadius(vec1, vec2);
+        if (n == 3)
+            return getAngle(vec1, vec2);
+        return getRadius(vec1, vec2);
+    }
+
+    // Quaternion: per-4-block 1-|dot| aggregated L2.
+    if (encoding == 1)
+    {
+        if (n >= 4 && n % 4 == 0)
+            return getQuatBlockDistance(vec1, vec2);
+        return getRadius(vec1, vec2);  // defensive
+    }
+
+    // ExpMap: per-3-block log-quat lives in ℝ³; plain Euclidean is the
+    // natural distance. (v5 PART G.5.)
+    if (encoding == 3)
+        return getRadius(vec1, vec2);
+
+    // BendRoll (2) and SwingTwist (4): caller MUST have remapped to Raw
+    // via the safety net. This branch is unreachable under a correct
+    // caller; fall back to Raw semantics to stay defensive.
     if (distType == 0)
+        return getRadius(vec1, vec2);
+    if (n == 3)
+        return getAngle(vec1, vec2);
+    return getRadius(vec1, vec2);
+}
+
+
+//
+// Description:
+//      Angle-based distance for Matrix-mode driver vectors packed as
+//      [vx, vy, vz, twist] * driverCount. Per-block: arc angle on the
+//      swing S² unit vector + wrap-aware twist delta, L2-combined. All
+//      blocks L2-aggregated. This is the Bug 2 fix — M1.1 addendum
+//      2026-04-24 defers this to M2.1, and here it lands.
+//
+double RBFtools::getMatrixModeAngleDistance(const std::vector<double> &vec1,
+                                            const std::vector<double> &vec2)
+{
+    double sumSq = 0.0;
+    const size_t blocks = vec1.size() / 4;
+    for (size_t k = 0; k < blocks; ++k)
     {
-        // Matrix-mode layout packs (vx, vy, vz, twist) per driver. Plain Euclidean on the
-        // twist scalar treats +179 deg vs -179 deg as ~358 deg apart, collapsing the kernel
-        // activation near the 2*pi seam. Route the 4k layout to a wrap-aware L2 distance that
-        // keeps xyz chord semantics (preserves existing radius calibration) and only folds
-        // the twist delta onto the 2*pi circle. See docs/设计文档/RBFtools_v5_addendum_20260424.md.
-        if (n >= 4 && n % 4 == 0 && n == vec2.size())
-            dist = getMatrixModeLinearDistance(vec1, vec2);
-        else
-            dist = getRadius(vec1, vec2);
+        const size_t base = k * 4;
+        // Swing block: take MVector::angle on the xyz triple (unsigned
+        // [0, pi]; numerically stable for unit vectors).
+        const std::vector<double> a = {vec1[base+0], vec1[base+1], vec1[base+2]};
+        const std::vector<double> b = {vec2[base+0], vec2[base+1], vec2[base+2]};
+        const double axisAngle = getAngle(a, b);
+        // Twist block: reuse M1.1's wrap helper.
+        const double w = twistWrap(vec1[base+3], vec2[base+3]);
+        sumSq += axisAngle * axisAngle + w * w;
     }
+    return sqrt(sumSq);
+}
+
+
+//
+// Description:
+//      Per-4-block quaternion distance for Generic mode with
+//      inputEncoding == Quaternion. Each block is treated as a unit
+//      quaternion (qx, qy, qz, qw); per-block distance is 1 - |q1·q2|
+//      (v5 PART G.2), aggregated as L2 across blocks. Mirrors the
+//      Matrix-mode angle aggregation shape but operates on 4D quat
+//      blocks instead of (axis,twist) pairs.
+//
+double RBFtools::getQuatBlockDistance(const std::vector<double> &v1,
+                                      const std::vector<double> &v2)
+{
+    double sumSq = 0.0;
+    const size_t blocks = v1.size() / 4;
+    for (size_t k = 0; k < blocks; ++k)
+    {
+        const size_t base = k * 4;
+        double dot = v1[base+0]*v2[base+0] + v1[base+1]*v2[base+1]
+                   + v1[base+2]*v2[base+2] + v1[base+3]*v2[base+3];
+        const double d = 1.0 - fabs(dot);
+        sumSq += d * d;
+    }
+    return sqrt(sumSq);
+}
+
+
+//
+// Description:
+//      Euler → Quaternion. rotateOrder matches Maya's native rotateOrder
+//      enum {XYZ=0, YZX=1, ZXY=2, XZY=3, YXZ=4, ZYX=5}. Output quaternion
+//      is right-handed (same convention as MTransformationMatrix::rotation).
+//      Implementation goes through per-axis unit quaternions and composes
+//      them in rotateOrder-appropriate order.
+//
+void RBFtools::encodeEulerToQuaternion(double rx, double ry, double rz,
+                                       short rotateOrder,
+                                       double &qx, double &qy, double &qz,
+                                       double &qw)
+{
+    const double hx = rx * 0.5, hy = ry * 0.5, hz = rz * 0.5;
+    const double cx = cos(hx), sx = sin(hx);
+    const double cy = cos(hy), sy = sin(hy);
+    const double cz = cos(hz), sz = sin(hz);
+
+    // Per-axis unit quaternions (w first for clarity in composition).
+    struct Q { double w, x, y, z; };
+    const Q qX = {cx, sx, 0.0, 0.0};
+    const Q qY = {cy, 0.0, sy, 0.0};
+    const Q qZ = {cz, 0.0, 0.0, sz};
+
+    auto mul = [](const Q &a, const Q &b) -> Q {
+        return {
+            a.w*b.w - a.x*b.x - a.y*b.y - a.z*b.z,
+            a.w*b.x + a.x*b.w + a.y*b.z - a.z*b.y,
+            a.w*b.y - a.x*b.z + a.y*b.w + a.z*b.x,
+            a.w*b.z + a.x*b.y - a.y*b.x + a.z*b.w,
+        };
+    };
+
+    // Maya applies rotations in the rotateOrder sequence; the resulting
+    // orientation equals the product in the SAME order (local-frame
+    // intrinsic: first letter applied first -> leftmost in product).
+    Q out{1.0, 0.0, 0.0, 0.0};
+    switch (rotateOrder)
+    {
+        case 1: out = mul(mul(qY, qZ), qX); break;  // YZX
+        case 2: out = mul(mul(qZ, qX), qY); break;  // ZXY
+        case 3: out = mul(mul(qX, qZ), qY); break;  // XZY
+        case 4: out = mul(mul(qY, qX), qZ); break;  // YXZ
+        case 5: out = mul(mul(qZ, qY), qX); break;  // ZYX
+        case 0:
+        default: out = mul(mul(qX, qY), qZ); break; // XYZ (Maya default)
+    }
+    qx = out.x; qy = out.y; qz = out.z; qw = out.w;
+}
+
+
+//
+// Description:
+//      Quaternion → log-map ∈ ℝ³ (v5 PART G.5). Canonicalises to the
+//      q_w ≥ 0 hemisphere internally so callers do not need to worry
+//      about the double cover. Uses a Taylor expansion for θ → 0 so
+//      log(identity) returns (0, 0, 0) without a divide-by-zero.
+//
+void RBFtools::encodeQuaternionToExpMap(double qx, double qy, double qz, double qw,
+                                        double &lx, double &ly, double &lz)
+{
+    // Canonicalise to q_w >= 0 — q and -q represent the same rotation,
+    // and the log map is odd, so flipping the sign chooses the shorter
+    // rotation.
+    if (qw < 0.0) { qx = -qx; qy = -qy; qz = -qz; qw = -qw; }
+
+    // Clamp q_w for safety before acos; tiny overshoots above 1.0 show
+    // up with non-normalised quaternions from upstream plugs.
+    if (qw > 1.0) qw = 1.0;
+    if (qw < -1.0) qw = -1.0;
+
+    const double sinHalf = sqrt(1.0 - qw * qw);       // = sin(theta/2)
+    const double halfTheta = acos(qw);                // = theta/2 in [0, pi]
+
+    // Near-identity branch: log(q) ≈ (qx, qy, qz). The full expression
+    // is (halfTheta / sinHalf) * (qx, qy, qz); as halfTheta -> 0 the
+    // ratio -> 1 (sinc-style), so the near-identity xyz IS the log.
+    const double EPS = 1.0e-8;
+    double scale;
+    if (sinHalf < EPS)
+        scale = 1.0;
     else
-    {
-        if (n == 3 && vec2.size() == 3)
-            dist = getAngle(vec1, vec2);
-        else
-            dist = getRadius(vec1, vec2);
-    }
-    return dist;
+        scale = halfTheta / sinHalf;
+
+    lx = scale * qx;
+    ly = scale * qy;
+    lz = scale * qz;
 }
 
 
@@ -2527,6 +2978,8 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
                                   BRMatrix weightMat,
                                   double width,
                                   int distType,
+                                  int encoding,
+                                  bool isMatrixMode,
                                   short kernelType)
 {
     unsigned int poseCount = poses.getRowSize();
@@ -2537,9 +2990,9 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
     // matrix mode.
     if (weightMat.getRowSize() != poseCount || weightMat.getColSize() != valueCount)
         return;
-    
+
     driver = normalizeVector(driver, norms);
-    
+
     unsigned int i, j;
 
     for (i = 0; i < poseCount; i ++)
@@ -2548,16 +3001,22 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
         std::vector<double> dv = driver;
         std::vector<double> ps = poses.getRowVector(i);
 
-        if (poseModes[i] == 1)
-            dv[3] = 0.0;
-        else if (poseModes[i] == 2)
+        // M2.1a: poseMode axis/twist masking is a Matrix-mode concept
+        // (layout guarantees indices 0..3 exist per driver). Skip it in
+        // Generic mode where the layout is encoding-dependent.
+        if (isMatrixMode && dv.size() >= 4)
         {
-            dv[0] = 0.0;
-            dv[1] = 0.0;
-            dv[2] = 0.0;
+            if (poseModes[i] == 1)
+                dv[3] = 0.0;
+            else if (poseModes[i] == 2)
+            {
+                dv[0] = 0.0;
+                dv[1] = 0.0;
+                dv[2] = 0.0;
+            }
         }
 
-        dist = getPoseDelta(dv, ps, distType);
+        dist = getPoseDelta(dv, ps, distType, encoding, isMatrixMode);
 
         for (j = 0; j < valueCount; j ++)
             out[j] += weightMat(i, j) * interpolateRbf(dist, width, kernelType);

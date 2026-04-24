@@ -362,6 +362,208 @@ class SolverDispatcher:
         return W
 
 
+# ----------------------------------------------------------------------
+# M2.1a — Input encoding (Raw, Quaternion, ExpMap) + dispatch
+# ----------------------------------------------------------------------
+
+# Encoding enum values (match C++ inputEncoding eAttr order).
+ENC_RAW        = 0
+ENC_QUATERNION = 1
+ENC_BENDROLL   = 2  # placeholder
+ENC_EXPMAP     = 3
+ENC_SWINGTWIST = 4  # placeholder
+
+# rotateOrder enum values (match Maya native + C++ driverInputRotateOrder).
+RO_XYZ = 0
+RO_YZX = 1
+RO_ZXY = 2
+RO_XZY = 3
+RO_YXZ = 4
+RO_ZYX = 5
+
+
+def _quat_mul(a, b):
+    """Hamilton product of two (w, x, y, z) quats."""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (
+        aw*bw - ax*bx - ay*by - az*bz,
+        aw*bx + ax*bw + ay*bz - az*by,
+        aw*by - ax*bz + ay*bw + az*bx,
+        aw*bz + ax*by - ay*bx + az*bw,
+    )
+
+
+def encode_euler_to_quaternion(rx, ry, rz, rotate_order):
+    """Euler → Quaternion. Mirrors C++ encodeEulerToQuaternion.
+
+    Returns (qx, qy, qz, qw).
+    """
+    hx, hy, hz = rx * 0.5, ry * 0.5, rz * 0.5
+    qX = (math.cos(hx), math.sin(hx), 0.0, 0.0)
+    qY = (math.cos(hy), 0.0, math.sin(hy), 0.0)
+    qZ = (math.cos(hz), 0.0, 0.0, math.sin(hz))
+
+    if rotate_order == RO_YZX:
+        out = _quat_mul(_quat_mul(qY, qZ), qX)
+    elif rotate_order == RO_ZXY:
+        out = _quat_mul(_quat_mul(qZ, qX), qY)
+    elif rotate_order == RO_XZY:
+        out = _quat_mul(_quat_mul(qX, qZ), qY)
+    elif rotate_order == RO_YXZ:
+        out = _quat_mul(_quat_mul(qY, qX), qZ)
+    elif rotate_order == RO_ZYX:
+        out = _quat_mul(_quat_mul(qZ, qY), qX)
+    else:  # RO_XYZ (Maya default)
+        out = _quat_mul(_quat_mul(qX, qY), qZ)
+    w, x, y, z = out
+    return (x, y, z, w)
+
+
+def encode_quaternion_to_expmap(qx, qy, qz, qw):
+    """Quaternion → log-map ∈ ℝ³. Mirrors C++ encodeQuaternionToExpMap.
+
+    Returns (lx, ly, lz). Canonicalises to q_w ≥ 0 hemisphere; uses
+    Taylor fallback for θ → 0 to avoid division by zero.
+    """
+    if qw < 0.0:
+        qx, qy, qz, qw = -qx, -qy, -qz, -qw
+    qw = max(-1.0, min(1.0, qw))
+
+    sin_half = math.sqrt(1.0 - qw * qw)
+    half_theta = math.acos(qw)
+    EPS = 1.0e-8
+    scale = 1.0 if sin_half < EPS else (half_theta / sin_half)
+    return (scale * qx, scale * qy, scale * qz)
+
+
+def encode_driver(raw_vec, encoding, rotate_orders):
+    """Encode a raw driver vector into the (effective) encoded vector.
+
+    `raw_vec` must be a list of scalars. Under Raw (0), returned as-is.
+    Under Quaternion (1), consumes (rx, ry, rz) triples → 4-tuples.
+    Under ExpMap (3), consumes (rx, ry, rz) triples → 3-tuples.
+    BendRoll / SwingTwist fall back to Raw (caller is expected to have
+    already remapped them via the safety net).
+    """
+    n = len(raw_vec)
+    if encoding == ENC_QUATERNION and n % 3 == 0 and n > 0:
+        out = []
+        for g in range(n // 3):
+            ro = rotate_orders[g] if g < len(rotate_orders) else RO_XYZ
+            q = encode_euler_to_quaternion(
+                raw_vec[g*3+0], raw_vec[g*3+1], raw_vec[g*3+2], ro)
+            out.extend(q)
+        return out
+    if encoding == ENC_EXPMAP and n % 3 == 0 and n > 0:
+        out = []
+        for g in range(n // 3):
+            ro = rotate_orders[g] if g < len(rotate_orders) else RO_XYZ
+            qx, qy, qz, qw = encode_euler_to_quaternion(
+                raw_vec[g*3+0], raw_vec[g*3+1], raw_vec[g*3+2], ro)
+            lx, ly, lz = encode_quaternion_to_expmap(qx, qy, qz, qw)
+            out.extend((lx, ly, lz))
+        return out
+    return list(raw_vec)
+
+
+def resolve_effective_encoding(encoding, raw_in_dim):
+    """Apply the M2.1a safety net. Returns (effective_encoding, warning).
+
+    `warning` is one of None / 'placeholder' / 'non_triple'.
+    Mirrors the compute() pre-getPoseData safety block.
+    """
+    if encoding in (ENC_BENDROLL, ENC_SWINGTWIST):
+        return ENC_RAW, 'placeholder'
+    if encoding != ENC_RAW and raw_in_dim % 3 != 0:
+        return ENC_RAW, 'non_triple'
+    return encoding, None
+
+
+def get_quat_block_distance(v1, v2):
+    """Per-4-block (1 - |q1·q2|) aggregated L2."""
+    assert len(v1) == len(v2)
+    n = len(v1)
+    blocks = n // 4
+    sum_sq = 0.0
+    for k in range(blocks):
+        base = k * 4
+        dot = sum(v1[base+i] * v2[base+i] for i in range(4))
+        d = 1.0 - abs(dot)
+        sum_sq += d * d
+    return math.sqrt(sum_sq)
+
+
+def get_matrix_mode_angle_distance(v1, v2):
+    """Bug 2 fix: Matrix-mode [vx, vy, vz, twist] arc angle + wrap twist, L2."""
+    assert len(v1) == len(v2)
+    n = len(v1)
+    blocks = n // 4
+    sum_sq = 0.0
+    for k in range(blocks):
+        base = k * 4
+        a = [v1[base+i] for i in range(3)]
+        b = [v2[base+i] for i in range(3)]
+        na = math.sqrt(sum(c*c for c in a))
+        nb = math.sqrt(sum(c*c for c in b))
+        if na > 0.0 and nb > 0.0:
+            dot = sum(a[i]*b[i] for i in range(3)) / (na * nb)
+            axis_angle = math.acos(max(-1.0, min(1.0, dot)))
+        else:
+            axis_angle = 0.0
+        w = twist_wrap(v1[base+3], v2[base+3])
+        sum_sq += axis_angle * axis_angle + w * w
+    return math.sqrt(sum_sq)
+
+
+def get_pose_delta(v1, v2, dist_type, encoding, is_matrix_mode):
+    """Mirror of RBFtools::getPoseDelta with (encoding, isMatrixMode)."""
+    n = len(v1)
+    if n != len(v2):
+        return get_radius(v1, v2)
+
+    if is_matrix_mode:
+        if n >= 4 and n % 4 == 0:
+            if dist_type == 0:
+                return get_matrix_mode_linear_distance(v1, v2)
+            return get_matrix_mode_angle_distance(v1, v2)
+        return get_radius(v1, v2)
+
+    # Generic mode
+    if encoding == ENC_RAW:
+        if dist_type == 0:
+            return get_radius(v1, v2)
+        if n == 3:
+            return get_angle(v1, v2)
+        return get_radius(v1, v2)
+    if encoding == ENC_QUATERNION:
+        if n >= 4 and n % 4 == 0:
+            return get_quat_block_distance(v1, v2)
+        return get_radius(v1, v2)
+    if encoding == ENC_EXPMAP:
+        return get_radius(v1, v2)
+    # BendRoll/SwingTwist should have been remapped by caller; defensive.
+    if dist_type == 0:
+        return get_radius(v1, v2)
+    if n == 3:
+        return get_angle(v1, v2)
+    return get_radius(v1, v2)
+
+
+# Clamp-skip rule matrix per v5 addendum §M2.1a item 7.
+# Returns the set of dimensions within an encoded vector that should NOT
+# participate in M1.3 Driver Clamp.
+def clamp_skip_dims(encoding, is_matrix_mode, effective_dim):
+    if is_matrix_mode:
+        # Matrix mode: skip every 4k+3 (twist slot), unchanged from M1.3.
+        return {j for j in range(effective_dim) if j % 4 == 3}
+    # Generic mode: Raw, Quaternion, ExpMap all clamp every dimension.
+    # BendRoll / SwingTwist land in M2.1b; placeholder falls back to Raw
+    # (handled by safety net), so they never reach this path with a
+    # distinct clamp-skip rule.
+    return set()
+
+
 def capture_output_baselines_pure(driven_attrs,
                                   pose0_inputs=None,
                                   pose0_values=None,

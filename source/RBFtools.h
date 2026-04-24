@@ -95,20 +95,51 @@ public:
                                 BRMatrix &poseData,
                                 BRMatrix &poseValues,
                                 MIntArray &poseModes,
-                                std::vector<double>&normFactors);
+                                std::vector<double>&normFactors,
+                                int inputEncoding,                 // M2.1a
+                                const std::vector<short>& rotateOrders,  // M2.1a
+                                unsigned &effectiveInDim);         // M2.1a output
 
     virtual double getRadiusValue();
     
     static double getTwistAngle(MQuaternion q, unsigned int axis);
-    static BRMatrix getDistances(BRMatrix poseMat, int distType);
-    static double getPoseDelta(std::vector<double> vec1, std::vector<double> vec2, int distType);
+    // M2.1a: getDistances + getPoseDelta now carry (encoding, isMatrixMode)
+    // so the kernel-matrix build and inference-time delta use the same
+    // encoding-aware distance dispatch. Legacy (encoding=0 Raw, isMatrixMode
+    // decided by caller) still reproduces v4 behaviour bit-for-bit.
+    static BRMatrix getDistances(BRMatrix poseMat, int distType,
+                                 int encoding, bool isMatrixMode);
+    static double getPoseDelta(std::vector<double> vec1, std::vector<double> vec2,
+                               int distType, int encoding, bool isMatrixMode);
     static double getRadius(std::vector<double> vec1, std::vector<double> vec2);
     static double getAngle(std::vector<double> vec1, std::vector<double> vec2);
     static double twistWrap(double tau1, double tau2);
     static double getMatrixModeLinearDistance(const std::vector<double> &vec1,
                                               const std::vector<double> &vec2);
+    // M2.1a: Bug 2 fix — Matrix mode with distanceType==Angle now actually
+    // uses arc angle on the xyz swing block (plus twist wrap), instead of
+    // being silently forced to Euclidean.
+    static double getMatrixModeAngleDistance(const std::vector<double> &vec1,
+                                             const std::vector<double> &vec2);
     static double getQuatDistance(const std::vector<double> &q1,
                                   const std::vector<double> &q2);
+    // M2.1a: per-4-block quaternion distance for Generic mode with
+    // inputEncoding=Quaternion. Returns L2 aggregation over all blocks of
+    // per-block (1 - |q1·q2|).
+    static double getQuatBlockDistance(const std::vector<double> &v1,
+                                       const std::vector<double> &v2);
+    // M2.1a: Euler → Quaternion. rotateOrder matches Maya's native
+    // rotateOrder enum {XYZ=0, YZX=1, ZXY=2, XZY=3, YXZ=4, ZYX=5}.
+    // Returns (qx, qy, qz, qw) in the order expected by getQuatDistance.
+    static void encodeEulerToQuaternion(double rx, double ry, double rz,
+                                        short rotateOrder,
+                                        double &qx, double &qy, double &qz,
+                                        double &qw);
+    // M2.1a: quaternion → log-map ∈ ℝ³ with Taylor fallback for θ → 0.
+    // Takes the q_w ≥ 0 hemisphere representative internally to avoid the
+    // double-cover discontinuity; caller does not need to canonicalize.
+    static void encodeQuaternionToExpMap(double qx, double qy, double qz, double qw,
+                                         double &lx, double &ly, double &lz);
     static void getActivations(BRMatrix &mat, double width, short kernelType);
     static double interpolateRbf(double value, double width, short kernelType);
     static std::vector<double> normalizeVector(std::vector<double> vec, std::vector<double> factors);
@@ -120,6 +151,8 @@ public:
                                BRMatrix weightMat,
                                double dist,
                                int distType,
+                               int encoding,           // M2.1a
+                               bool isMatrixMode,      // M2.1a
                                short kernelType);
 
     virtual double interpolateWeight(double value, int type);
@@ -173,6 +206,8 @@ public:
     static MObject radius;
     static MObject regularization;
     static MObject solverMethod;
+    static MObject inputEncoding;
+    static MObject driverInputRotateOrder;
     static MObject colorDriver;
     static MObject colorDriverR;
     static MObject colorDriverG;
@@ -271,6 +306,15 @@ private:
     // reset to 0 only when solverMethod enum changes.
     short lastSolveMethod;
     short prevSolverMethodVal;
+
+    // M2.1a: once-per-rig warning flag for the two safety-net fall-back
+    // paths (inDim not a multiple of 3 under a non-Raw encoding, or
+    // BendRoll / Swing-Twist placeholder hit before M2.1b lands). Reset
+    // when the user changes inputEncoding so each new configuration gets
+    // a fresh warning chance; otherwise a single rig would flood the log
+    // on every DG evaluation.
+    bool  inputEncodingWarningIssued;
+    short prevInputEncodingVal;
 };
 
 // ---------------------------------------------------------------------

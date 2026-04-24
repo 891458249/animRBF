@@ -370,4 +370,118 @@ v4 rig 首次在 v5 binary 下加载：
 
 ---
 
+## §M2.1a — Input Encoding (Raw / Quaternion / ExpMap) + Bug 2 Fix
+
+v5 PART C.2.2 定义了 5 档 `inputEncoding` 枚举；PART D.3 / M1.1 addendum §Bug 2 同时存在 "Matrix + Angle 静默退化到 Euclidean" 的遗留。本节落地 M2.1 的**拆分第一半（M2.1a）**，只交付 Raw + Quaternion + ExpMap 三档 + Bug 2 修复；BendRoll / Swing-Twist 推迟到 M2.1b。
+
+### M2.1a.1 — 决议日志
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | M2.1 拆分？ | **① 拆 M2.1a + M2.1b** | 单次吞下 5 档 + 维度级联 + 存储重构 + clamp 矩阵重写会让单 commit 巨大，回滚成本高 |
+| (B) | 驱动分组元数据 | **A 硬约定 + `driverInputRotateOrder[]`** | 最小侵入；复用 Maya 原生 rotateOrder enum，用户可直接 `driver.rotateOrder → node.driverInputRotateOrder[k]` |
+| (C) | M2.1a 覆盖档位 | **① Raw + Quaternion + ExpMap** | Quat/ExpMap 是无依赖的 3→3/3→4 映射；BendRoll 需 Swing-Twist 分解前置，耦合度高 |
+| (D) | `inputEncoding` 作用域 | **① 节点级单枚举** | per-source encoding 属"多源驱动"完整 vision，与 M2.1 核心数学正交 |
+| (E) | Bug 2 修复时机 | **① M2.1a 一起修** | Bug 2 是 dispatch 问题，与 encoding-aware dispatch 同源，同一 commit 里复用 isMatrixMode 分派最省 |
+| (F) | Matrix 模式交互 | **① 不交互** | Matrix 模式的打包语义（swing on S² + twist）独立演化；M4 Aim/Jiggle 重构时再议 |
+| (G) | clamp-skip 规则 | **① C++ 硬编码** | 规则简单（见 M2.1a.7 表）；暴露属性让用户覆盖会扩大表面积 |
+
+### M2.1a.2 — Per-encoding clamp-skip 规则矩阵
+
+| encoding | per-block 维 $k$ | 跳过 clamp 的维 | 理由 |
+|---|---|---|---|
+| Raw (Generic) | 1 (per scalar attr) | 无（全部参与） | 现状保持 |
+| Quaternion (Generic) | 4 | 无（所有分量天然 $\in [-1, 1]$，有界）| 线性 clamp 在 [-1,1] 内无害 |
+| ExpMap (Generic) | 3 | 无（$\mathbb{R}^3$ 连续） | 连续且无环绕 |
+| BendRoll (M2.1b 占位) | 3 | roll 维（wrap-aware）| 当前 fall-back 到 Raw → 走 Raw 规则 |
+| Swing-Twist (M2.1b 占位) | 5 | twist 维（wrap-aware）| 当前 fall-back 到 Raw → 走 Raw 规则 |
+| Matrix 模式（遗留）| 4 | `j % 4 == 3`（twist 槽，M1.3 现状）| **不变**，M2.1a 不动 Matrix 布局 |
+
+### M2.1a.3 — Bug 2 修复
+
+M1.1 addendum §Bug 2 挪到本节落地：**Matrix 模式 + `distanceType == Angle` 静默退化到 Euclidean**。
+
+修复两步：
+1. 删除 `compute()` Matrix 分支里的 `distanceTypeVal = 0;` 强制覆盖——用户选的 distanceType 现在生效
+2. 新增 `getMatrixModeAngleDistance(v1, v2)`：per-block `sqrt(arc_angle² + twistWrap²)`，跨 block L2 聚合；
+   `getPoseDelta` 在 `isMatrixMode==true` 分支按 `distType` 分派到 Linear 或 Angle 版本
+
+**Resolves M1.1 addendum §Bug 2 via encoding-aware dispatch.**
+
+### M2.1a.4 — 零回归契约
+
+v4 rig 在 v5-M2.1a binary 加载：
+
+- `inputEncoding` 默认 `0 (Raw)`
+- `driverInputRotateOrder[]` 默认空 multi
+- 结果：`effectiveEncoding = Raw`，`getPoseData` 走 Raw 直通分支，`getPoseDelta` 走 legacy Raw 分派
+- 与 v4 行为**逐字节等价**（规约测试 T2 守护）
+
+即便 Matrix 模式 Bug 2 修复，也属"修正语义错误"而非"改变正确行为"——v4 用户选 Angle 时拿到 Euclidean 是 bug，现在拿到 Angle 是正确行为。若老 rig 依赖 Euclidean 行为，用户可显式切 `distanceType = Euclidean` 恢复。
+
+### M2.1a.5 — BendRoll / Swing-Twist 占位契约
+
+**拒用 kFailure**（会停 DG，破坏 rig）；**拒绝返回 0.0**（让所有样本距离相同，kernel 矩阵退化）。
+
+落地策略：**Fall back to Raw with once-per-rig warning**：
+
+```
+MGlobal::displayWarning(thisName + ": inputEncoding BendRoll/SwingTwist
+    lands in M2.1b; falling back to Raw.");
+```
+
+`inputEncodingWarningIssued` 成员 flag 防止洪水告警；`prevInputEncodingVal` 变化时重置 flag，让用户切换编码时拿到新的一次 warning 机会。
+
+M2.1b 将这两档的实际 encode 实现替换到位后，占位 warning 自然消失。
+
+### M2.1a.6 — 安全网：inDim 非 3 的倍数
+
+用户选 `inputEncoding = Quaternion / ExpMap` 但 driver attr 数量不是 3 的倍数（例如 5 个 attr）：
+
+- 发一次性 warning：`"inputEncoding requires driver inputs in (rx, ry, rz) triples; inDim=N is not a multiple of 3. Falling back to Raw."`
+- `effectiveEncoding = 0 (Raw)`，getPoseData 走 Raw 直通
+- **不 kFailure**，不阻断 DG
+
+与占位 fall-back 共用 `inputEncodingWarningIssued` flag，但 warning 文案区分（"placeholder" 还是 "non_triple"），方便 Script Editor 诊断。
+
+### M2.1a.7 — M1.3 clamp 语义延续
+
+- **Matrix 模式**：`j % 4 == 3`（twist 槽）继续跳过，**一字不改**（M1.3 的不变量）
+- **Generic 模式 Raw**：全钳制（M1.3 现状）
+- **Generic 模式 Quaternion**：全钳制（分量 $\in [-1, 1]$ 有界）
+- **Generic 模式 ExpMap**：全钳制（$\mathbb{R}^3$ 连续）
+
+clamp-skip 判定硬编码于 C++ `compute()` 的 clamp 块里（沿用现有 `if (!genericMode && (j % 4 == 3))` 条件——M2.1a 没有其他 encoding 需要跳过的维，条件无需增补）。
+
+### M2.1a.8 — Matrix 模式与 `inputEncoding` 的互斥
+
+Matrix 模式**不读取** `inputEncoding` 的语义：
+- `compute()` 在 `!genericMode` 分支末尾强制 `effectiveEncoding = 0`，保证下游 `getDistances` / `getPoseWeights` 收到 `(isMatrixMode=true, encoding=0)` 组合
+- `getPoseDelta` 在 `isMatrixMode=true` 分支完全忽略 encoding 参数
+- 用户在 Matrix 模式 rig 上设置 `inputEncoding` 不会触发任何 warning（没有意义但也不出错）
+
+**Forward pointer**：M4 Aim/Jiggle solver 重构时，"Matrix 模式的打包（swing on S² + twist）是否统一归为 `inputEncoding` 的第 5 / 6 档"将再议；本 milestone 保持两者独立。
+
+### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
+
+```
+// 之前
+getPoseDelta(v1, v2, distType)
+getDistances(poseMat, distType)
+getPoseWeights(..., distType, kernelType)
+getPoseData(data, driver, poseCount, solveCount, poseData, poseValues,
+            poseModes, normFactors)
+
+// M2.1a 之后
+getPoseDelta(v1, v2, distType, encoding, isMatrixMode)
+getDistances(poseMat, distType, encoding, isMatrixMode)
+getPoseWeights(..., distType, encoding, isMatrixMode, kernelType)
+getPoseData(... + int inputEncoding, const std::vector<short>& rotateOrders,
+                   unsigned& effectiveInDim)
+```
+
+所有 caller 已同步更新。encoding 参数为内部值：0..4 对应 v5 PART C.2.2 用户可见档位，Matrix 模式调用方应显式传 0 + `isMatrixMode=true` 以明确语义。
+
+---
+
 **本文档结束。**
