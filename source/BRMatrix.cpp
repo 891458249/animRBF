@@ -357,6 +357,83 @@ bool BRMatrix::solve(std::vector<double> y, double w[], int &singularIndex)
 
 
 // ---------------------------------------------------------------------
+// M1.4 — Cholesky decomposition (A = L Lᵀ) for SPD matrices.
+//
+// Used as Tier-1 solver by RBFtools::compute() for the regularized RBF
+// training system (K + λI) W = Y. Cholesky is ~2× faster than the GE
+// fallback (O(N³/3) vs O(N³)) and numerically stable on SPD inputs;
+// a single decomposition amortizes across all m output dimensions
+// via choleskySolve, turning m·O(N³) into O(N³) + m·O(N²).
+//
+// In-place: the lower triangle is overwritten with L; the upper
+// triangle is explicitly zeroed so later operations cannot accidentally
+// consume stale A-upper data.
+//
+// Returns false at the first non-positive diagonal — matrix is not
+// SPD, fall back to GE. Callers must preserve a copy of the original
+// matrix if they intend to retry.
+// ---------------------------------------------------------------------
+
+bool BRMatrix::cholesky()
+{
+    if (rows != cols)
+        return false;
+
+    const unsigned n = rows;
+    for (unsigned i = 0; i < n; ++i)
+    {
+        for (unsigned j = 0; j <= i; ++j)
+        {
+            double sum = this->mat[i][j];
+            for (unsigned k = 0; k < j; ++k)
+                sum -= this->mat[i][k] * this->mat[j][k];
+
+            if (i == j)
+            {
+                if (sum <= 0.0)
+                    return false;
+                this->mat[i][i] = sqrt(sum);
+            }
+            else
+            {
+                this->mat[i][j] = sum / this->mat[j][j];
+            }
+        }
+        // Zero the upper triangle of row i so downstream code cannot
+        // misread residual A entries as part of L.
+        for (unsigned j = i + 1; j < n; ++j)
+            this->mat[i][j] = 0.0;
+    }
+    return true;
+}
+
+
+void BRMatrix::choleskySolve(const std::vector<double> &b,
+                             std::vector<double> &x) const
+{
+    const unsigned n = rows;
+    x.assign(n, 0.0);
+
+    // Forward substitution: L z = b, with z stored in x.
+    for (unsigned i = 0; i < n; ++i)
+    {
+        double sum = b[i];
+        for (unsigned k = 0; k < i; ++k)
+            sum -= this->mat[i][k] * x[k];
+        x[i] = sum / this->mat[i][i];
+    }
+    // Back substitution: Lᵀ x = z (z currently in x).
+    for (int i = (int)n - 1; i >= 0; --i)
+    {
+        double sum = x[(unsigned)i];
+        for (unsigned k = (unsigned)i + 1; k < n; ++k)
+            sum -= this->mat[k][(unsigned)i] * x[k];
+        x[(unsigned)i] = sum / this->mat[(unsigned)i][(unsigned)i];
+    }
+}
+
+
+// ---------------------------------------------------------------------
 // Helper functions which output the values of the matrix in a formatted
 // string.
 // ---------------------------------------------------------------------

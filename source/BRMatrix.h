@@ -46,6 +46,19 @@ public:
 
     bool solve(std::vector<double> y, double w[], int &singularIndex);
 
+    // M1.4: Cholesky A = L Lᵀ for SPD matrices. In-place on the lower
+    // triangle; the upper triangle is zeroed. Returns false as soon as
+    // a non-positive diagonal is encountered (matrix is not SPD — the
+    // caller is expected to fall back to the GE solver). See v5 PART
+    // D.1 / G.1 Step 2 and addendum 2026-04-24 §M1.4.
+    bool cholesky();
+
+    // Solve L Lᵀ x = b by two triangular sweeps (forward then back).
+    // PRECONDITION: cholesky() returned true on this matrix. Calling
+    // this on an un-decomposed matrix produces garbage.
+    void choleskySolve(const std::vector<double> &b,
+                       std::vector<double> &x) const;
+
     void show(MString node, MString dataName);
     void showVector(std::vector<double> v, MString name);
 

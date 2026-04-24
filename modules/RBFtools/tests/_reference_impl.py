@@ -222,6 +222,146 @@ def apply_clamp(driver, mins, maxs, inflation=0.0,
     return out
 
 
+# ----------------------------------------------------------------------
+# M1.4 — Regularized solver with Cholesky + GE fallback
+# ----------------------------------------------------------------------
+
+
+def cholesky_decompose(A):
+    """In-place-style Cholesky A = L Lᵀ.
+
+    Mirrors the C++ BRMatrix::cholesky. Returns ``(L, ok)``; ``L`` is
+    always a fresh lower-triangular numpy matrix (even on failure, for
+    callers that want to inspect partial progress). ``ok == False`` at
+    the first non-positive pivot.
+    """
+    import numpy as np
+    A = np.asarray(A, dtype=float)
+    n = A.shape[0]
+    L = np.zeros_like(A)
+    for i in range(n):
+        for j in range(i + 1):
+            s = A[i, j]
+            for k in range(j):
+                s -= L[i, k] * L[j, k]
+            if i == j:
+                if s <= 0.0:
+                    return L, False
+                L[i, i] = math.sqrt(s)
+            else:
+                L[i, j] = s / L[j, j]
+    return L, True
+
+
+def cholesky_solve_single(L, b):
+    """Solve L Lᵀ x = b given L from :func:`cholesky_decompose`."""
+    import numpy as np
+    L = np.asarray(L, dtype=float)
+    b = np.asarray(b, dtype=float)
+    n = len(b)
+    x = np.zeros(n)
+    # Forward: L z = b, z stored in x.
+    for i in range(n):
+        s = b[i]
+        for k in range(i):
+            s -= L[i, k] * x[k]
+        x[i] = s / L[i, i]
+    # Back: Lᵀ x = z (z currently in x).
+    for i in range(n - 1, -1, -1):
+        s = x[i]
+        for k in range(i + 1, n):
+            s -= L[k, i] * x[k]
+        x[i] = s / L[i, i]
+    return x
+
+
+def apply_absolute_lambda(K, lam):
+    """Add λI to the kernel matrix diagonal. Absolute λ per addendum §M1.4.
+
+    Returns a fresh numpy matrix — never mutates input.
+    """
+    import numpy as np
+    K = np.asarray(K, dtype=float).copy()
+    if lam > 0.0:
+        n = K.shape[0]
+        for i in range(n):
+            K[i, i] += lam
+    return K
+
+
+class SolverDispatcher:
+    """Pure-Python mirror of the RBFtools::compute() M1.4 solver path.
+
+    Tracks the ``lastSolveMethod`` cache (0 = Cholesky, 1 = GE) and the
+    ``prevSolverMethodVal`` used to detect Auto <-> ForceGE flips that
+    must reset the cache.
+    """
+
+    # Tier codes (match C++ lastSolveMethod semantics).
+    TIER_CHOLESKY = 0
+    TIER_GE       = 1
+
+    # solverMethod enum values (match C++ addField order).
+    MODE_AUTO     = 0
+    MODE_FORCE_GE = 1
+
+    def __init__(self):
+        self.last_solve_method = self.TIER_CHOLESKY
+        self.prev_solver_method_val = self.MODE_AUTO
+
+    def _observe_mode(self, solver_method_val):
+        """Mirror: reset cache when user flipped solverMethod."""
+        if solver_method_val != self.prev_solver_method_val:
+            self.last_solve_method = self.TIER_CHOLESKY
+            self.prev_solver_method_val = solver_method_val
+
+    def solve(self, K, Y, lam, solver_method_val, ge_solve):
+        """Solve (K + λI) W = Y with tiered dispatch.
+
+        Parameters
+        ----------
+        K : ndarray (N, N)
+            Kernel activation matrix (before λI).
+        Y : ndarray (N, m)
+            Per-output-dim RHS (baseline already subtracted by caller).
+        lam : float
+            Absolute Tikhonov regularization strength.
+        solver_method_val : int
+            0 = Auto (try Cholesky then GE), 1 = ForceGE.
+        ge_solve : callable (A, b) -> x
+            GE solver injected by the caller (in tests, numpy.linalg.solve
+            stands in for BRMatrix::solve — behaviour-equivalent for the
+            dispatch contract).
+
+        Returns
+        -------
+        W : ndarray (N, m)
+        """
+        import numpy as np
+        self._observe_mode(solver_method_val)
+
+        K_reg = apply_absolute_lambda(K, lam)
+        N, m = Y.shape
+        W = np.zeros((N, m))
+
+        used_cholesky = False
+        if solver_method_val == self.MODE_AUTO \
+                and self.last_solve_method == self.TIER_CHOLESKY:
+            L, ok = cholesky_decompose(K_reg)
+            if ok:
+                for c in range(m):
+                    W[:, c] = cholesky_solve_single(L, Y[:, c])
+                used_cholesky = True
+                self.last_solve_method = self.TIER_CHOLESKY
+
+        if not used_cholesky:
+            for c in range(m):
+                W[:, c] = ge_solve(K_reg, Y[:, c])
+            self.last_solve_method = self.TIER_GE
+
+        return W
+
+
 def capture_output_baselines_pure(driven_attrs,
                                   pose0_inputs=None,
                                   pose0_values=None,

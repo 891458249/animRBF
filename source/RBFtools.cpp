@@ -85,6 +85,8 @@ MObject RBFtools::baseValue;
 MObject RBFtools::clampEnabled;
 MObject RBFtools::clampInflation;
 MObject RBFtools::outputIsScale;
+MObject RBFtools::regularization;
+MObject RBFtools::solverMethod;
 MObject RBFtools::radiusType;
 MObject RBFtools::radius;
 MObject RBFtools::distanceType;
@@ -124,6 +126,8 @@ MObject RBFtools::exposeData;
 // ---------------------------------------------------------------------
 
 RBFtools::RBFtools()
+    : lastSolveMethod(0),      // M1.4: Cholesky tried first on fresh node.
+      prevSolverMethodVal(0)   // M1.4: Auto; matches solverMethod default.
 {}
 
 RBFtools::~RBFtools()
@@ -223,6 +227,17 @@ MStatus RBFtools::initialize()
     eAttr.addField("Standard Deviation", 2);
     eAttr.addField("Custom", 3);
     eAttr.setKeyable(true);
+
+    // M1.4: explicit solver selection. Auto runs Cholesky first and
+    // falls back to GE on non-SPD matrices; ForceGE is a debug escape
+    // hatch that bypasses Cholesky entirely. M4.5 will extend this enum
+    // to {Auto, ForceCholesky, ForceQR, ForceLU, ForceSVD} once Eigen
+    // integration lands the full four-tier chain (v5 PART D.1).
+    solverMethod = eAttr.create("solverMethod", "slvm", 0);
+    eAttr.addField("Auto", 0);
+    eAttr.addField("ForceGE", 1);
+    eAttr.setKeyable(true);
+    eAttr.setStorable(true);
 
     //
     // MFnNumericAttribute
@@ -406,6 +421,18 @@ MStatus RBFtools::initialize()
     nAttr.setDefault(0.0);
     nAttr.setMin(0.0);
     nAttr.setSoftMax(1.0);
+
+    // M1.4: Tikhonov regularization strength added directly to the kernel
+    // matrix diagonal before solve. Absolute units (not adapted to tr(K)/N)
+    // per addendum 2026-04-24 §M1.4 — scale-adaptive forms silently fail
+    // on Linear / Thin Plate kernels where K[i,i] = φ(0) = 0. Default 1e-8
+    // follows v5 PART G.1 Step 2 and Chad Vernon's reference solver.
+    regularization = nAttr.create("regularization", "reg", MFnNumericData::kDouble);
+    nAttr.setKeyable(true);
+    nAttr.setStorable(true);
+    nAttr.setDefault(1.0e-8);
+    nAttr.setMin(0.0);
+    nAttr.setSoftMax(1.0e-3);
 
     outWeight = nAttr.create("outWeight", "ow", MFnNumericData::kDouble);
     nAttr.setWritable(true);
@@ -629,6 +656,8 @@ MStatus RBFtools::initialize()
     addAttribute(outputIsScale);
     addAttribute(clampEnabled);
     addAttribute(clampInflation);
+    addAttribute(regularization);
+    addAttribute(solverMethod);
     addAttribute(poseMode);
     addAttribute(twistAxis);
     addAttribute(opposite);
@@ -671,6 +700,8 @@ MStatus RBFtools::initialize()
     attributeAffects(RBFtools::outputIsScale, RBFtools::output);
     attributeAffects(RBFtools::clampEnabled, RBFtools::output);
     attributeAffects(RBFtools::clampInflation, RBFtools::output);
+    attributeAffects(RBFtools::regularization, RBFtools::output);
+    attributeAffects(RBFtools::solverMethod, RBFtools::output);
     attributeAffects(RBFtools::radius, RBFtools::output);
     attributeAffects(RBFtools::centerAngle, RBFtools::output);
     attributeAffects(RBFtools::curveRamp, RBFtools::output);
@@ -841,6 +872,13 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
     MPlug clampInflationPlug(thisNode, RBFtools::clampInflation);
     bool clampEnabledVal = clampEnabledPlug.asBool();
     double clampInflationVal = clampInflationPlug.asDouble();
+    // M1.4: solver configuration. Both participate in the train path;
+    // regularization changes require a re-solve (attributeAffects handles
+    // this — λ is folded into linMat, which is a local, not a cache).
+    MPlug regularizationPlug(thisNode, RBFtools::regularization);
+    MPlug solverMethodPlug(thisNode, RBFtools::solverMethod);
+    double regularizationVal = regularizationPlug.asDouble();
+    short  solverMethodVal   = solverMethodPlug.asShort();
     angleVal = anglePlug.asDouble();
     radiusVal = radiusPlug.asDouble();
     centerAngleVal = centerAnglePlug.asDouble();
@@ -1263,57 +1301,125 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         linMat.show(thisName, "Activations");
 
                     // -------------------------------------------------
-                    // solve for each dimension
+                    // M1.4: Tikhonov regularization. Inject λI in place
+                    // into linMat BEFORE any solver copy, so both the
+                    // Cholesky probe and the GE fallback share the same
+                    // regularized operator. Absolute λ (addendum §M1.4):
+                    // scale-adaptive forms silently fail on Linear / TP
+                    // kernels where K[i,i] = φ(0) = 0.
                     // -------------------------------------------------
 
-                    // create the matrix to store the weights
-                    wMat = BRMatrix();
-                    wMat.setSize(poseCount, solveCount);
-                    
+                    if (regularizationVal > 0.0)
+                    {
+                        for (unsigned dd = 0; dd < poseCount; ++dd)
+                            linMat(dd, dd) += regularizationVal;
+                    }
+
+                    if (exposeDataVal > 2 && regularizationVal > 0.0)
+                        linMat.show(thisName, "Activations + λI");
+
+                    // -------------------------------------------------
+                    // M1.4: reset the solver-tier cache when the user
+                    // flipped Auto <-> ForceGE. Kernel SPD-ness is a
+                    // property of the kernel, not the solver selection,
+                    // so we do NOT clear this on evalInput==true alone.
+                    // -------------------------------------------------
+
+                    if (solverMethodVal != prevSolverMethodVal)
+                    {
+                        lastSolveMethod = 0;
+                        prevSolverMethodVal = solverMethodVal;
+                    }
+
+                    // -------------------------------------------------
+                    // Collect per-dimension target vectors with M1.2
+                    // baseline subtracted. Done once before solver
+                    // dispatch so Cholesky and GE paths share the same
+                    // RHS list.
+                    // -------------------------------------------------
+
+                    std::vector< std::vector<double> > yCols(solveCount);
                     for (c = 0; c < solveCount; c ++)
                     {
-                        // Get the pose values for each dimension.
-                        std::vector<double> y;
-                        y = matValues.getColumnVector(c);
-                        //BRMatrix().showVector(y, MString(MString("values ") + c));
-
-                        // M1.2: subtract per-dimension baseline. Scale
-                        // channels always anchor at 1.0 to defend against
-                        // t-pose mesh collapse when rest happens to be 0.
-                        // Matrix mode is one-hot and bypassed here.
+                        yCols[c] = matValues.getColumnVector(c);
                         if (genericMode)
                         {
                             const double anchor = outputIsScaleArr[c] ? 1.0 : baseValueArr[c];
                             if (anchor != 0.0)
                             {
-                                for (size_t yr = 0; yr < y.size(); ++yr)
-                                    y[yr] -= anchor;
+                                for (size_t yr = 0; yr < yCols[c].size(); ++yr)
+                                    yCols[c][yr] -= anchor;
                             }
                         }
+                    }
 
-                        // Copy the activation matrix because it gets
-                        // modified during the solving process.
-                        BRMatrix solveMat = linMat;
+                    // -------------------------------------------------
+                    // solve for each dimension (M1.4 tiered dispatch)
+                    // -------------------------------------------------
 
-                        double* w = new double [poseCount];
-                        int singularIndex;
-                        bool solved = solveMat.solve(y, w, singularIndex);
-                        if (!solved)
+                    wMat = BRMatrix();
+                    wMat.setSize(poseCount, solveCount);
+
+                    bool usedCholesky = false;
+
+                    // Tier 1 — Cholesky. Attempted only in Auto mode and
+                    // when the last successful method was Cholesky (or
+                    // this is the first train since solverMethod flipped).
+                    // One decomposition amortizes over all output dims:
+                    // O(N³/3) + m·O(N²), vs GE's m·O(N³).
+                    if (solverMethodVal == 0 && lastSolveMethod == 0)
+                    {
+                        BRMatrix chol = linMat;
+                        if (chol.cholesky())
                         {
-                            MGlobal::displayInfo("");
-                            MGlobal::displayInfo(thisName + MString(": RBF Error"));
-                            MGlobal::displayInfo(MString("Value error for pose at index: ") + singularIndex);
-                            MGlobal::displayInfo("The pose has no unique values and matches another pose.");
-                            matDebug.show(thisName, "Pose Input Values (Poses appear in rows)");
-                            MGlobal::displayError("RBF decomposition failed. See script editor for details.");
-                            return MStatus::kFailure;
+                            std::vector<double> x;
+                            for (c = 0; c < solveCount; c ++)
+                            {
+                                chol.choleskySolve(yCols[c], x);
+                                for (i = 0; i < poseCount; i ++)
+                                    wMat(i, c) = x[i];
+                            }
+                            usedCholesky = true;
+                            lastSolveMethod = 0;
+                            if (exposeDataVal > 2)
+                                MGlobal::displayInfo(
+                                    thisName + MString(": solver = Cholesky"));
                         }
+                    }
 
-                        // Store the weights in the weight matrix.
-                        for (i = 0; i < poseCount; i ++)
-                            wMat(i, c) = w[i];
+                    // Tier 2 — GE fallback. Triggered by ForceGE, a failed
+                    // Cholesky probe, or sticky lastSolveMethod == 1 on a
+                    // known non-SPD kernel. Per-dim solve is unavoidable
+                    // here because BRMatrix::solve is destructive.
+                    if (!usedCholesky)
+                    {
+                        for (c = 0; c < solveCount; c ++)
+                        {
+                            BRMatrix solveMat = linMat;
+                            double* w = new double[poseCount];
+                            int singularIndex;
+                            bool solved = solveMat.solve(yCols[c], w, singularIndex);
+                            if (!solved)
+                            {
+                                MGlobal::displayInfo("");
+                                MGlobal::displayInfo(thisName + MString(": RBF Error"));
+                                MGlobal::displayInfo(MString("Value error for pose at index: ") + singularIndex);
+                                MGlobal::displayInfo("The pose has no unique values and matches another pose.");
+                                matDebug.show(thisName, "Pose Input Values (Poses appear in rows)");
+                                MGlobal::displayError("RBF decomposition failed. See script editor for details.");
+                                delete[] w;
+                                return MStatus::kFailure;
+                            }
 
-                        delete [] w;
+                            for (i = 0; i < poseCount; i ++)
+                                wMat(i, c) = w[i];
+
+                            delete[] w;
+                        }
+                        lastSolveMethod = 1;
+                        if (exposeDataVal > 2)
+                            MGlobal::displayInfo(
+                                thisName + MString(": solver = GE (fallback)"));
                     }
 
                     if (exposeDataVal > 2)

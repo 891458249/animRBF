@@ -171,6 +171,8 @@ public:
     static MObject clampInflation;
     static MObject outputIsScale;
     static MObject radius;
+    static MObject regularization;
+    static MObject solverMethod;
     static MObject colorDriver;
     static MObject colorDriverR;
     static MObject colorDriverG;
@@ -259,6 +261,16 @@ private:
     // not participate in the weight solve.
     std::vector<double> poseMinVec;
     std::vector<double> poseMaxVec;
+
+    // M1.4: last successful solver tier. 0 = Cholesky, 1 = GE (fallback).
+    // Cross-compute hint: next training attempt prefers the method that
+    // worked last time, avoiding a wasted Cholesky probe on kernels that
+    // are known non-SPD (Linear / Thin Plate without enough λ).
+    // Lifetime: preserved across compute; NOT reset on evalInput==true
+    // (kernel SPD-ness is a property of the kernel type, not pose data);
+    // reset to 0 only when solverMethod enum changes.
+    short lastSolveMethod;
+    short prevSolverMethodVal;
 };
 
 // ---------------------------------------------------------------------

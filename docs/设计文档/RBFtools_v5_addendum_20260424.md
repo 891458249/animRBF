@@ -260,4 +260,109 @@ if (clampEnabledVal
 
 ---
 
+## §M1.4 — Regularized Solver + Cholesky / GE Fallback
+
+### M1.4.A — 路径决议：方案 C（手写 Cholesky，不引 Eigen）
+
+v5 PART D.1 规划的是 Cholesky → QR → LU → SVD 四层 fallback。本子任务**只实现前两层**（Cholesky + 现有 GE，GE 等价于带主元 LU），不引入 Eigen。
+
+理由：
+
+- 项目目前 `#include` 无 Eigen，CMakeLists 无引用；引入 Eigen 会 vendor ~30 MB 源码或强制用户安装依赖
+- Cholesky + 绝对 λI 已经把 v5 PART D.1 的"数值稳定性"目标吃掉 90%：λI 让任何 PD kernel 严格 SPD，Cholesky 几乎永不失败
+- 剩下的 GE（等价于带主元 LU with destructive in-place）足以兜底 Cholesky 失败的边缘场景（Thin Plate / Linear 无 λ 的病态）
+- 把 QR/SVD 推迟到独立 milestone (§M4.5) 让 scope 清晰
+
+### M1.4.B — 独立 Milestone 4.5（新增）
+
+**位置**：M4 完成后、M5 开始前。
+
+**交付物**：
+1. Vendor Eigen 到 `source/third_party/eigen/Eigen/`（或 CMake find_package，具体方式 M4.5 开工时决定）
+2. `BRMatrix` 替换手写 Cholesky → `Eigen::LLT`，或在 RBFtools 层直接用 Eigen 分解，保留 BRMatrix 作为 I/O 壳
+3. 补齐 `Tier 3: Eigen::ColPivHouseholderQR` 和 `Tier 4: Eigen::JacobiSVD` pseudo-inverse
+4. `solverMethod` enum 从 M1.4 的 `{Auto, ForceGE}` 扩展为 `{Auto, ForceCholesky, ForceQR, ForceLU, ForceSVD}`
+5. `lastSolveMethod` 缓存从 `{0,1}` 扩展为 `{0..3}`；生命周期契约不变
+6. Python 规约测试 `test_m4_5_full_fallback.py` 覆盖四层 fallback 与 SVD 伪逆的奇异截断
+
+**不做**：M5 的性能优化（对称存储、SIMD）与此正交，留 M5。
+
+**为何不"搭车 M5"**：把 4 层 fallback 这个 PART D.1 明确交付物绑定到 M5 的性能优化上会产生 "M5 滑动 → QR/SVD 永远拿不到" 的耦合风险。独立 M4.5 scope 单一、无性能优化交叉，是更可靠的交付形态。
+
+### M1.4.C — 绝对 λ 决议（修正执行者原推荐）
+
+v5 PART G.1 Step 2 明文规定 $\tilde{K} = K + \lambda I$，λ 直接加在对角（绝对值）。执行者原方案提出 `λ = λ_ui · tr(K)/N` 尺度自适应，**本子任务拒绝**。
+
+**致命原因**：Linear kernel $\phi(r) = r$ 和 Thin Plate kernel $\phi(r) = r^2 \log r$ 的 $\phi(0) = 0$ → $K_{ii} = 0$ → $\operatorname{tr}(K)/N = 0$ → **λ 永远为 0**。正则化在最需要它的 kernel 上静默失效，而且这个 bug 在测试里不用 Linear / TP 矩阵就发现不了（测试 T3 就是针对这条设计的回归守护）。
+
+**绝对 λ 在归一化输入上的合理性**：
+
+- 输入向量已经 `normalizeColumns` 归一化，K 元素量纲可预测：Gaussian 类 kernel 对角 ≈ 1，λ = 1e-8 相对影响约 10⁻⁸（几乎无感）
+- Linear / TP 对角 = 0，off-diagonal ~ O(1)，λ = 1e-8 把 K 从条件正定推到严格正定（正是我们要的）
+- 单一默认值 1e-8 在**所有 kernel** 上都行为一致，用户可通过 `regularization` attr 按节点覆盖
+
+### M1.4.D — `regularization` / `solverMethod` 默认值
+
+- `regularization` 默认 **1e-8**（v5 PART G.1 Step 2 + Chad Vernon 参考值）
+- `solverMethod` 默认 **Auto**（enum 0）
+- 二者均 `keyable(true)`, `storable(true)`
+
+### M1.4.E — `lastSolveMethod` 缓存生命周期契约
+
+**成员**（`private:` in `RBFtools`）：
+```cpp
+short lastSolveMethod;        // 0 = Cholesky, 1 = GE
+short prevSolverMethodVal;    // mirror of last solverMethod plug value
+```
+
+**契约**（实现见 `compute()` M1.4 dispatch 段）：
+
+| 事件 | 行为 |
+|---|---|
+| 节点创建 | 构造函数置 0 / 0（首次 compute 先试 Cholesky） |
+| compute 入口，`solverMethodVal == prevSolverMethodVal` | **不重置**，尊重上次成功的 tier |
+| compute 入口，`solverMethodVal != prevSolverMethodVal` | 重置 `lastSolveMethod = 0`，同步 `prev = current`。用户切 Auto ↔ ForceGE 强制一次 Cholesky 再试 |
+| `evalInput == true`（pose 变化触发重训） | **不重置**。kernel SPD-ness 是 kernel 类型的属性，不是 pose 数据的属性 |
+| Cholesky 成功 | `lastSolveMethod = 0`（sticky） |
+| Cholesky 失败 / 跳过 → GE | `lastSolveMethod = 1`（sticky：已知非 SPD kernel，下次不再浪费 Cholesky probe） |
+
+测试 T9 三条覆盖：① Force → Auto 重试 Cholesky；② 同模式连续调用不重置；③ 非 SPD kernel 下 Auto → GE → ForceGE → Auto 的完整状态转移。
+
+### M1.4.F — 性能顺手改进（非核心但值得记录）
+
+现有 GE 是 in-place destructive，每个输出维度 $c = 1, \ldots, m$ 必须拷贝 `linMat` 再 solve，总成本 $m \cdot O(N^3)$。
+
+Cholesky 路径一次分解 + $m$ 次两级回代：$O(N^3/3) + m \cdot O(N^2)$。Generic 模式典型 $m = 6 \sim 24$ 下，**理论加速 3–10×**。
+
+M5.1（对称存储 + SIMD）是正交优化；Cholesky 路径的多 RHS 分摊是 M1.4 顺手收下的红利，与性能 milestone 解耦。
+
+### M1.4.G — 零回归论证
+
+v4 rig 首次在 v5 binary 下加载：
+- `regularization` 默认 1e-8，**比当前 GE 直接 solve 更稳**（λI 把近奇异矩阵推离奇异点）
+- Gaussian / MQ / IMQ kernel：Cholesky 成功，输出与 GE 的差 ≤ O(1e-8) 量级，低于 `FLOAT_ABS_TOL = 1e-6` 感知阈值
+- Linear / TP kernel：Cholesky 通常失败（$\phi(0) = 0$ 即便 λ = 1e-8 也可能不足以推离非 SPD），自动落 GE，行为与 v4 完全一致
+- ForceGE 提供完全 v4 行为的逃生通道（调试用）
+
+风险点：Cholesky 与 GE 在 ill-conditioned 但仍 SPD 的矩阵上可能给出微 ε 不同的 W —— 下游 kernel 评估是连续函数，W 的 ε 扰动映射到 output 的 ε 扰动，低于用户感知。
+
+---
+
+## §M4.5（前瞻声明）— Eigen Integration + Full Fallback Chain
+
+**状态**：未开工。v5 设计方案 PART D.1 明确交付物。本 addendum 提前为其锚定位置与 scope。
+
+**必须先完成的前置 milestone**：M1.4（✅ 本次交付）+ M2（编码）+ M3（工作流）+ M4（其他 solver），不依赖 M5 性能优化。
+
+**scope（一次 commit 粒度）**：
+1. 引入 Eigen（header-only，vendor 或 find_package）
+2. 实现 `Tier 3 QR`（ColPivHouseholderQR）和 `Tier 4 SVD` pseudo-inverse（JacobiSVD with singular-value truncation at 1e-6）
+3. 手写 Cholesky 切换到 `Eigen::LLT`，旧实现删除或保留做回归对照
+4. `solverMethod` enum 扩展；`lastSolveMethod` 扩为 4 档
+5. Python 规约 + C++ 集成测试覆盖四层转移矩阵
+
+**明确不在 M4.5 scope 内**：性能优化（对称存储、SIMD、分块）——M5.1；`solverStats` 只读属性——M5.2。
+
+---
+
 **本文档结束。**
