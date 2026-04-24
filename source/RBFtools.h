@@ -167,6 +167,8 @@ public:
     // rbf attributes (sorted)
     static MObject allowNegative;
     static MObject baseValue;
+    static MObject clampEnabled;
+    static MObject clampInflation;
     static MObject outputIsScale;
     static MObject radius;
     static MObject colorDriver;
@@ -249,6 +251,14 @@ private:
     // so the weight matrix is re-solved against the shifted Y targets.
     std::vector<double> prevBaseValueArr;
     std::vector<bool>   prevOutputIsScaleArr;
+
+    // M1.3: per-dimension raw-space bounds snapshot. Refilled inside the
+    // evalInput==true training path in getPoseData / getPoseVectors, read
+    // by compute() on every tick to clip live driver values onto the
+    // training hull. No dirty tracker — clamp is inference-only and does
+    // not participate in the weight solve.
+    std::vector<double> poseMinVec;
+    std::vector<double> poseMaxVec;
 };
 
 // ---------------------------------------------------------------------

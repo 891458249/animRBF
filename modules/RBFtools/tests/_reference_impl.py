@@ -149,6 +149,79 @@ class BaselineDirtyTracker:
         return changed
 
 
+# ----------------------------------------------------------------------
+# M1.3 — Driver Clamp (per-dim bounding box + inflation)
+# ----------------------------------------------------------------------
+
+
+def compute_bounds(poses, skip_twist=False, block=4):
+    """Per-dim min/max over a batch of pose input vectors.
+
+    Parameters
+    ----------
+    poses : list[list[float]]
+        Rows = poses, columns = input dimensions. Must be rectangular.
+    skip_twist : bool
+        Matrix-mode flag. When True, indices where ``j % block == 3``
+        (the twist slot in each [vx, vy, vz, twist] block) get
+        ``(lo, hi) = (0.0, 0.0)`` as a sentinel that tells
+        :func:`apply_clamp` to pass the value through untouched.
+        Bounds on non-twist dims are populated normally.
+    block : int
+        Block stride for Matrix-mode layout. Ignored when
+        ``skip_twist=False``.
+
+    Returns
+    -------
+    (list[float], list[float])
+        ``(mins, maxs)``. Both length == column count.
+    """
+    if not poses:
+        return [], []
+    n = len(poses[0])
+    mins = [0.0] * n
+    maxs = [0.0] * n
+    for j in range(n):
+        is_twist = skip_twist and (j % block == 3)
+        if is_twist:
+            continue
+        col = [row[j] for row in poses]
+        mins[j] = min(col)
+        maxs[j] = max(col)
+    return mins, maxs
+
+
+def apply_clamp(driver, mins, maxs, inflation=0.0,
+                skip_twist=False, block=4):
+    """Clip *driver* per-dim to ``[min - alpha*r, max + alpha*r]``.
+
+    Mirrors the C++ compute() clamp block. When ``skip_twist`` is True,
+    indices where ``j % block == 3`` pass through untouched regardless
+    of the stored bounds (used by Matrix mode for the circular twist
+    scalar; see v5 addendum §M1.1 / §M1.3).
+
+    Defense (mirrors C++): when ``mins`` or ``maxs`` is empty or the
+    length does not match ``driver``, return ``driver`` unchanged
+    rather than raise.
+    """
+    if not mins or not maxs:
+        return list(driver)
+    if len(mins) != len(driver) or len(maxs) != len(driver):
+        return list(driver)
+    out = list(driver)
+    for j, x in enumerate(out):
+        if skip_twist and (j % block == 3):
+            continue
+        r = maxs[j] - mins[j]
+        lo = mins[j] - inflation * r
+        hi = maxs[j] + inflation * r
+        if x < lo:
+            out[j] = lo
+        elif x > hi:
+            out[j] = hi
+    return out
+
+
 def capture_output_baselines_pure(driven_attrs,
                                   pose0_inputs=None,
                                   pose0_values=None,

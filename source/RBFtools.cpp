@@ -82,6 +82,8 @@ MObject RBFtools::restInput;
 // controls
 MObject RBFtools::allowNegative;
 MObject RBFtools::baseValue;
+MObject RBFtools::clampEnabled;
+MObject RBFtools::clampInflation;
 MObject RBFtools::outputIsScale;
 MObject RBFtools::radiusType;
 MObject RBFtools::radius;
@@ -387,6 +389,24 @@ MStatus RBFtools::initialize()
     nAttr.setStorable(true);
     nAttr.setDefault(false);
 
+    // M1.3: Driver Clamp master switch. Default off for zero regression on
+    // v4 rigs — users opt in per node. See v5 PART C.2.3 / 铁律 B5 and
+    // addendum 2026-04-24 §M1.3.
+    clampEnabled = nAttr.create("clampEnabled", "cle", MFnNumericData::kBoolean);
+    nAttr.setKeyable(true);
+    nAttr.setStorable(true);
+    nAttr.setDefault(false);
+
+    // M1.3: symmetric outward inflation as a fraction of the per-dim range.
+    // 0.0 is v5 PART G.7's hard clamp; small positive values give a softer
+    // hull to dampen edge-pop on out-of-training-range inputs.
+    clampInflation = nAttr.create("clampInflation", "cli", MFnNumericData::kDouble);
+    nAttr.setKeyable(true);
+    nAttr.setStorable(true);
+    nAttr.setDefault(0.0);
+    nAttr.setMin(0.0);
+    nAttr.setSoftMax(1.0);
+
     outWeight = nAttr.create("outWeight", "ow", MFnNumericData::kDouble);
     nAttr.setWritable(true);
     nAttr.setKeyable(false);
@@ -607,6 +627,8 @@ MStatus RBFtools::initialize()
     addAttribute(output);
     addAttribute(baseValue);
     addAttribute(outputIsScale);
+    addAttribute(clampEnabled);
+    addAttribute(clampInflation);
     addAttribute(poseMode);
     addAttribute(twistAxis);
     addAttribute(opposite);
@@ -647,6 +669,8 @@ MStatus RBFtools::initialize()
     attributeAffects(RBFtools::angle, RBFtools::output);
     attributeAffects(RBFtools::baseValue, RBFtools::output);
     attributeAffects(RBFtools::outputIsScale, RBFtools::output);
+    attributeAffects(RBFtools::clampEnabled, RBFtools::output);
+    attributeAffects(RBFtools::clampInflation, RBFtools::output);
     attributeAffects(RBFtools::radius, RBFtools::output);
     attributeAffects(RBFtools::centerAngle, RBFtools::output);
     attributeAffects(RBFtools::curveRamp, RBFtools::output);
@@ -811,6 +835,12 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
 
     bool activeVal = activePlug.asBool();
     bool allowNegativeVal = allowNegativePlug.asBool();
+    // M1.3: Driver Clamp plug reads. Non-array scalars, no dirty tracker
+    // needed — clamp is inference-only and does not enter the weight solve.
+    MPlug clampEnabledPlug(thisNode, RBFtools::clampEnabled);
+    MPlug clampInflationPlug(thisNode, RBFtools::clampInflation);
+    bool clampEnabledVal = clampEnabledPlug.asBool();
+    double clampInflationVal = clampInflationPlug.asDouble();
     angleVal = anglePlug.asDouble();
     radiusVal = radiusPlug.asDouble();
     centerAngleVal = centerAnglePlug.asDouble();
@@ -1096,6 +1126,34 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                 distanceTypeVal = 0;
 
                 solveCount = poseCount;
+            }
+
+            // M1.3: clip driver to the per-dim training-hull bounding box.
+            // Bounds were cached by getPoseData / getPoseVectors in raw
+            // (pre-normalize) space, so `clampInflation` is in user scene
+            // units — not normalized units. Matrix mode skips the twist
+            // slot (j % 4 == 3) because twist is a wrap-aware circular
+            // quantity (see v5 addendum 2026-04-24 §M1.1) and linear
+            // clamping would freeze the wrap corrections M1.1 fixed.
+            // Defense: empty cache (first compute before any train) and
+            // size-mismatch (driver dim changed but bounds stale) both
+            // short-circuit to preserve current behaviour rather than
+            // crash on an index out of range.
+            if (clampEnabledVal
+                && !poseMinVec.empty()
+                && poseMinVec.size() == driver.size()
+                && poseMaxVec.size() == driver.size())
+            {
+                for (size_t j = 0; j < driver.size(); ++j)
+                {
+                    if (!genericMode && (j % 4 == 3))
+                        continue;
+                    const double r = poseMaxVec[j] - poseMinVec[j];
+                    const double lo = poseMinVec[j] - clampInflationVal * r;
+                    const double hi = poseMaxVec[j] + clampInflationVal * r;
+                    if (driver[j] < lo) driver[j] = lo;
+                    else if (driver[j] > hi) driver[j] = hi;
+                }
             }
 
             // M1.2: read per-output baseline + isScale arrays aligned to
@@ -1661,11 +1719,40 @@ MStatus RBFtools::getPoseVectors(MDataBlock &data,
 
         increment += 4;
     }
-    
+
+    // -------------------------------------------------
+    // M1.3: per-dimension bounds snapshot (raw space, pre-normalize).
+    // Matrix-mode layout is [vx, vy, vz, twist] * driverCount; compute()
+    // will skip the twist slot (j % 4 == 3) at clamp-apply time, but
+    // bounds are still populated uniformly here for simplicity.
+    // -------------------------------------------------
+
+    {
+        const unsigned dim = 4 * driverCount;
+        poseMinVec.assign(dim, 0.0);
+        poseMaxVec.assign(dim, 0.0);
+        if (poseCount > 0)
+        {
+            for (unsigned j = 0; j < dim; ++j)
+            {
+                double lo = poseData(0, j);
+                double hi = lo;
+                for (unsigned i = 1; i < poseCount; ++i)
+                {
+                    const double v = poseData(i, j);
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                }
+                poseMinVec[j] = lo;
+                poseMaxVec[j] = hi;
+            }
+        }
+    }
+
     // -------------------------------------------------
     // normalization
     // -------------------------------------------------
-    
+
     // Get the normalization factors.
     normFactors = poseData.normsColumn();
     // Normalize the pose matrix.
@@ -1923,11 +2010,33 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
             // consistent.
             poseModes.set(0, i);
         }
-        
+
+        // -------------------------------------------------
+        // M1.3: per-dimension bounds snapshot (raw space). Must run
+        // BEFORE normalizeColumns so inflation is in user scene units,
+        // not normalized units. Generic mode clamps all dims.
+        // -------------------------------------------------
+
+        poseMinVec.assign(inDim, 0.0);
+        poseMaxVec.assign(inDim, 0.0);
+        for (j = 0; j < inDim; j ++)
+        {
+            double lo = poseData(0, j);
+            double hi = lo;
+            for (i = 1; i < poseCount; i ++)
+            {
+                const double v = poseData(i, j);
+                if (v < lo) lo = v;
+                if (v > hi) hi = v;
+            }
+            poseMinVec[j] = lo;
+            poseMaxVec[j] = hi;
+        }
+
         // -------------------------------------------------
         // normalization
         // -------------------------------------------------
-        
+
         // Get the normalization factors.
         normFactors = poseData.normsColumn();
         // Normalize the pose matrix.
