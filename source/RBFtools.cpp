@@ -1211,23 +1211,13 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
             {
                 const unsigned rawInDim = inputIds.length();
                 const bool wantsEncoded = (inputEncodingVal != 0);
-                const bool placeholder = (inputEncodingVal == 2 ||
-                                          inputEncodingVal == 4);
+                // M2.1b: BendRoll (2) and SwingTwist (4) are now
+                // implemented; placeholder branch removed. The non-
+                // triple safety net remains — it catches user misconfig
+                // regardless of which non-Raw encoding is selected.
                 const bool nonTriple = (wantsEncoded && rawInDim % 3 != 0);
 
-                if (placeholder)
-                {
-                    if (!inputEncodingWarningIssued)
-                    {
-                        MGlobal::displayWarning(thisName + MString(
-                            ": inputEncoding ") +
-                            (inputEncodingVal == 2 ? "BendRoll" : "SwingTwist") +
-                            " lands in M2.1b; falling back to Raw.");
-                        inputEncodingWarningIssued = true;
-                    }
-                    effectiveEncoding = 0;
-                }
-                else if (nonTriple)
+                if (nonTriple)
                 {
                     if (!inputEncodingWarningIssued)
                     {
@@ -1254,6 +1244,7 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                      inputNorms,
                                      (int)effectiveEncoding,
                                      driverRotateOrders,
+                                     (unsigned)twistAxisVal,
                                      effInDim);
                 CHECK_MSTATUS_AND_RETURN_IT(status);
             }
@@ -1295,26 +1286,45 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                 solveCount = poseCount;
             }
 
-            // M1.3: clip driver to the per-dim training-hull bounding box.
-            // Bounds were cached by getPoseData / getPoseVectors in raw
-            // (pre-normalize) space, so `clampInflation` is in user scene
-            // units — not normalized units. Matrix mode skips the twist
-            // slot (j % 4 == 3) because twist is a wrap-aware circular
-            // quantity (see v5 addendum 2026-04-24 §M1.1) and linear
-            // clamping would freeze the wrap corrections M1.1 fixed.
+            // M1.3 + M2.1b: clip driver to the per-dim training-hull
+            // bounding box. Bounds were cached by getPoseData /
+            // getPoseVectors in raw (pre-normalize) space, so
+            // `clampInflation` stays in user-visible units.
+            //
+            // M2.1b replaces the single `j % 4 == 3` rule with a
+            // skip-mask built from (isMatrixMode, effectiveEncoding)
+            // per addendum §M2.1b.5. Wrap-aware dims (Matrix-mode
+            // twist, BendRoll roll, SwingTwist twist) are excluded
+            // from linear clamping to preserve M1.1's wrap semantics.
+            //
             // Defense: empty cache (first compute before any train) and
             // size-mismatch (driver dim changed but bounds stale) both
-            // short-circuit to preserve current behaviour rather than
-            // crash on an index out of range.
+            // short-circuit, preserving behaviour rather than crashing.
             if (clampEnabledVal
                 && !poseMinVec.empty()
                 && poseMinVec.size() == driver.size()
                 && poseMaxVec.size() == driver.size())
             {
-                for (size_t j = 0; j < driver.size(); ++j)
+                const size_t dim = driver.size();
+                std::vector<bool> clampSkipMask(dim, false);
+                if (!genericMode)
                 {
-                    if (!genericMode && (j % 4 == 3))
-                        continue;
+                    for (size_t j = 0; j < dim; ++j)
+                        if (j % 4 == 3) clampSkipMask[j] = true;
+                }
+                else if (effectiveEncoding == 2 /* BendRoll */)
+                {
+                    for (size_t j = 0; j < dim; ++j)
+                        if (j % 3 == 0) clampSkipMask[j] = true;  // roll slot
+                }
+                else if (effectiveEncoding == 4 /* SwingTwist */)
+                {
+                    for (size_t j = 0; j < dim; ++j)
+                        if (j % 5 == 4) clampSkipMask[j] = true;  // twist slot
+                }
+                for (size_t j = 0; j < dim; ++j)
+                {
+                    if (clampSkipMask[j]) continue;
                     const double r = poseMaxVec[j] - poseMinVec[j];
                     const double lo = poseMinVec[j] - clampInflationVal * r;
                     const double hi = poseMaxVec[j] + clampInflationVal * r;
@@ -2028,6 +2038,7 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
                                   std::vector<double>&normFactors,
                                   int inputEncoding,
                                   const std::vector<short>& rotateOrders,
+                                  unsigned twistAxis,
                                   unsigned &effectiveInDim)
 {
     MStatus status = MStatus::kSuccess;
@@ -2185,17 +2196,22 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
     // into (out[offOut..offOut+k-1]) per the active encoding.
     // -----------------------------------------------------------------
 
-    const bool encQuat   = (inputEncoding == 1);
-    const bool encExpMap = (inputEncoding == 3);
+    const bool encQuat       = (inputEncoding == 1);
+    const bool encBendRoll   = (inputEncoding == 2);
+    const bool encExpMap     = (inputEncoding == 3);
+    const bool encSwingTwist = (inputEncoding == 4);
     // Resolve effective dim. Non-3-divisible inDim is the caller's
     // safety-net precondition; we still handle it defensively by
     // falling back to Raw semantics.
-    const bool encActive = (encQuat || encExpMap) && (inDim % 3 == 0) && (inDim > 0);
+    const bool encAnyNonRaw = (encQuat || encBendRoll || encExpMap || encSwingTwist);
+    const bool encActive = encAnyNonRaw && (inDim % 3 == 0) && (inDim > 0);
     const unsigned groups = encActive ? (inDim / 3) : 0;
     if (encQuat && encActive)
         effectiveInDim = groups * 4;
+    else if (encSwingTwist && encActive)
+        effectiveInDim = groups * 5;
     else
-        effectiveInDim = inDim;
+        effectiveInDim = inDim;  // BendRoll 3→3, ExpMap 3→3, Raw N→N
 
     auto groupRotateOrder = [&](unsigned g) -> short {
         if (g < rotateOrders.size()) return rotateOrders[g];
@@ -2228,6 +2244,32 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
             driver[g*3+0] = lx;
             driver[g*3+1] = ly;
             driver[g*3+2] = lz;
+        }
+    }
+    else if (encBendRoll && encActive)
+    {
+        for (unsigned g = 0; g < groups; ++g)
+        {
+            double roll, bendH, bendV;
+            encodeBendRoll(rawDriver[g*3+0], rawDriver[g*3+1], rawDriver[g*3+2],
+                           groupRotateOrder(g), twistAxis, roll, bendH, bendV);
+            driver[g*3+0] = roll;
+            driver[g*3+1] = bendH;
+            driver[g*3+2] = bendV;
+        }
+    }
+    else if (encSwingTwist && encActive)
+    {
+        for (unsigned g = 0; g < groups; ++g)
+        {
+            double sx, sy, sz, sw, tw;
+            encodeSwingTwist(rawDriver[g*3+0], rawDriver[g*3+1], rawDriver[g*3+2],
+                             groupRotateOrder(g), twistAxis, sx, sy, sz, sw, tw);
+            driver[g*5+0] = sx;
+            driver[g*5+1] = sy;
+            driver[g*5+2] = sz;
+            driver[g*5+3] = sw;
+            driver[g*5+4] = tw;
         }
     }
     else
@@ -2358,6 +2400,34 @@ MStatus RBFtools::getPoseData(MDataBlock &data,
                     poseData(i, g*3+0) = lx;
                     poseData(i, g*3+1) = ly;
                     poseData(i, g*3+2) = lz;
+                }
+            }
+            else if (encBendRoll && encActive)
+            {
+                for (unsigned g = 0; g < groups; ++g)
+                {
+                    double roll, bendH, bendV;
+                    encodeBendRoll(rawRow[g*3+0], rawRow[g*3+1], rawRow[g*3+2],
+                                   groupRotateOrder(g), twistAxis,
+                                   roll, bendH, bendV);
+                    poseData(i, g*3+0) = roll;
+                    poseData(i, g*3+1) = bendH;
+                    poseData(i, g*3+2) = bendV;
+                }
+            }
+            else if (encSwingTwist && encActive)
+            {
+                for (unsigned g = 0; g < groups; ++g)
+                {
+                    double sx, sy, sz, sw, tw;
+                    encodeSwingTwist(rawRow[g*3+0], rawRow[g*3+1], rawRow[g*3+2],
+                                     groupRotateOrder(g), twistAxis,
+                                     sx, sy, sz, sw, tw);
+                    poseData(i, g*5+0) = sx;
+                    poseData(i, g*5+1) = sy;
+                    poseData(i, g*5+2) = sz;
+                    poseData(i, g*5+3) = sw;
+                    poseData(i, g*5+4) = tw;
                 }
             }
             else
@@ -2568,9 +2638,21 @@ double RBFtools::getPoseDelta(std::vector<double> vec1, std::vector<double> vec2
     if (encoding == 3)
         return getRadius(vec1, vec2);
 
-    // BendRoll (2) and SwingTwist (4): caller MUST have remapped to Raw
-    // via the safety net. This branch is unreachable under a correct
-    // caller; fall back to Raw semantics to stay defensive.
+    // BendRoll: per-3-block (roll, bendH, bendV) in ℝ³; plain
+    // Euclidean is correct after normalizeColumns has balanced the
+    // per-axis scales. (v5 PART G.4 / addendum §M2.1b.)
+    if (encoding == 2)
+        return getRadius(vec1, vec2);
+
+    // SwingTwist: per-5-block composite (swing quat L2 + twist wrap).
+    if (encoding == 4)
+    {
+        if (n >= 5 && n % 5 == 0)
+            return getSwingTwistBlockDistance(vec1, vec2);
+        return getRadius(vec1, vec2);  // defensive
+    }
+
+    // Unknown encoding: defensive fall-through.
     if (distType == 0)
         return getRadius(vec1, vec2);
     if (n == 3)
@@ -2692,6 +2774,140 @@ void RBFtools::encodeEulerToQuaternion(double rx, double ry, double rz,
 //      about the double cover. Uses a Taylor expansion for θ → 0 so
 //      log(identity) returns (0, 0, 0) without a divide-by-zero.
 //
+//
+// M2.1b — Swing-Twist decomposition. Implements v5 PART G.3. Axis is
+// a principal axis (0=X, 1=Y, 2=Z); when the projection norm collapses
+// below EPS0 the output degenerates to (identity swing, zero twist)
+// per addendum §M2.1b option (B)①. The degenerate set is exactly
+// {q : q_w = 0 AND q[axis] = 0} — measure-zero for unit quats, and
+// geometrically corresponds to a pure-perpendicular swing by exactly
+// π; callers should not expect round-trip recovery there.
+//
+void RBFtools::decomposeSwingTwist(double qx, double qy, double qz, double qw,
+                                   unsigned twistAxis,
+                                   double &sx, double &sy, double &sz,
+                                   double &sw, double &twistAngle)
+{
+    double a = qx;
+    if (twistAxis == 1)      a = qy;
+    else if (twistAxis == 2) a = qz;
+
+    const double normSq = qw * qw + a * a;
+    const double EPS0 = 1.0e-12;
+    if (normSq < EPS0)
+    {
+        // Degenerate: return (identity swing, zero twist).
+        sx = 0.0; sy = 0.0; sz = 0.0; sw = 1.0;
+        twistAngle = 0.0;
+        return;
+    }
+
+    const double norm = sqrt(normSq);
+    const double invNorm = 1.0 / norm;
+    const double tw = qw * invNorm;
+    // Twist quat xyz has only one non-zero component (along axis).
+    double tx = 0.0, ty = 0.0, tz = 0.0;
+    if (twistAxis == 0)      tx = a * invNorm;
+    else if (twistAxis == 1) ty = a * invNorm;
+    else                     tz = a * invNorm;
+
+    // Swing = q · twist^{-1} = q · conj(twist). Hamilton product with
+    // quats packed as (w, x, y, z).
+    const double aw = qw, ax = qx, ay = qy, az = qz;
+    const double bw =  tw, bx = -tx, by = -ty, bz = -tz;
+    const double rw = aw*bw - ax*bx - ay*by - az*bz;
+    const double rx = aw*bx + ax*bw + ay*bz - az*by;
+    const double ry = aw*by - ax*bz + ay*bw + az*bx;
+    const double rz = aw*bz + ax*by - ay*bx + az*bw;
+    sx = rx; sy = ry; sz = rz; sw = rw;
+
+    // Twist angle: τ = 2 * atan2(axis_comp_of_twist, twist_w). atan2 is
+    // scale-invariant so we can use the unnormalised (a, qw) directly.
+    twistAngle = 2.0 * atan2(a, qw);
+}
+
+
+//
+// M2.1b — BendRoll encoding. Stereographic projection of the swing
+// quaternion to ℝ² in the plane perpendicular to the twist axis, plus
+// the scalar twist. Layout: (roll, bendH, bendV) per group.
+//
+// Denominator is clamped to max(1 + s_w, ε) with ε = 1e-4 to keep the
+// value finite near the stereographic pole (s_w → -1, swing angle → 2π).
+// For typical rigs with swing angle < π/2, s_w > 0.7 and the clamp is
+// unreachable. Test T14.a/b/c anchor the numerical envelope; the
+// code contains no boundary branch — keep the hot path clean.
+//
+void RBFtools::encodeBendRoll(double rx, double ry, double rz,
+                              short rotateOrder, unsigned twistAxis,
+                              double &outRoll, double &outBendH, double &outBendV)
+{
+    double qx, qy, qz, qw;
+    encodeEulerToQuaternion(rx, ry, rz, rotateOrder, qx, qy, qz, qw);
+
+    double sx, sy, sz, sw, twistAngle;
+    decomposeSwingTwist(qx, qy, qz, qw, twistAxis, sx, sy, sz, sw, twistAngle);
+
+    // Pick the (h, v) axes orthogonal to the twist axis.
+    //   X axis → (h=Y, v=Z): s_h = sy, s_v = sz
+    //   Y axis → (h=Z, v=X): s_h = sz, s_v = sx
+    //   Z axis → (h=X, v=Y): s_h = sx, s_v = sy
+    double sh = sy, sv = sz;
+    if (twistAxis == 1)      { sh = sz; sv = sx; }
+    else if (twistAxis == 2) { sh = sx; sv = sy; }
+
+    const double EPS = 1.0e-4;
+    double swClamped = sw;
+    if (swClamped < -1.0 + EPS) swClamped = -1.0 + EPS;
+    const double denom = 1.0 + swClamped;  // ∈ [EPS, 2]
+
+    outRoll  = twistAngle;
+    outBendH = 2.0 * sh / denom;
+    outBendV = 2.0 * sv / denom;
+}
+
+
+//
+// M2.1b — SwingTwist encoding. Layout (sx, sy, sz, sw, twist) per
+// group. The first four components form a standard unit quaternion.
+//
+void RBFtools::encodeSwingTwist(double rx, double ry, double rz,
+                                short rotateOrder, unsigned twistAxis,
+                                double &sx, double &sy, double &sz,
+                                double &sw, double &twist)
+{
+    double qx, qy, qz, qw;
+    encodeEulerToQuaternion(rx, ry, rz, rotateOrder, qx, qy, qz, qw);
+    decomposeSwingTwist(qx, qy, qz, qw, twistAxis, sx, sy, sz, sw, twist);
+}
+
+
+//
+// M2.1b — per-5-block composite distance for SwingTwist-encoded
+// driver vectors. Per block:
+//     d² = (1 - |q_swing1·q_swing2|)² + twistWrap(τ1, τ2)²
+// Aggregated L2 across blocks. w_twist = 1.0 default (addendum
+// §M2.1b option (D)①): column-wise L2 normalisation upstream
+// balances the swing (dimensionless) vs twist (radians) scales.
+//
+double RBFtools::getSwingTwistBlockDistance(const std::vector<double> &v1,
+                                            const std::vector<double> &v2)
+{
+    double sumSq = 0.0;
+    const size_t blocks = v1.size() / 5;
+    for (size_t k = 0; k < blocks; ++k)
+    {
+        const size_t base = k * 5;
+        double dot = v1[base+0]*v2[base+0] + v1[base+1]*v2[base+1]
+                   + v1[base+2]*v2[base+2] + v1[base+3]*v2[base+3];
+        const double dSwing = 1.0 - fabs(dot);
+        const double dTwist = twistWrap(v1[base+4], v2[base+4]);
+        sumSq += dSwing * dSwing + dTwist * dTwist;
+    }
+    return sqrt(sumSq);
+}
+
+
 void RBFtools::encodeQuaternionToExpMap(double qx, double qy, double qz, double qw,
                                         double &lx, double &ly, double &lz)
 {

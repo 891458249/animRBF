@@ -369,9 +369,15 @@ class SolverDispatcher:
 # Encoding enum values (match C++ inputEncoding eAttr order).
 ENC_RAW        = 0
 ENC_QUATERNION = 1
-ENC_BENDROLL   = 2  # placeholder
+ENC_BENDROLL   = 2
 ENC_EXPMAP     = 3
-ENC_SWINGTWIST = 4  # placeholder
+ENC_SWINGTWIST = 4
+
+# Twist axis enum (matches C++ twistAxis attr). Moved above encode_driver
+# so its default-kwarg `twist_axis=AXIS_X` resolves at import time.
+AXIS_X = 0
+AXIS_Y = 1
+AXIS_Z = 2
 
 # rotateOrder enum values (match Maya native + C++ driverInputRotateOrder).
 RO_XYZ = 0
@@ -437,47 +443,169 @@ def encode_quaternion_to_expmap(qx, qy, qz, qw):
     return (scale * qx, scale * qy, scale * qz)
 
 
-def encode_driver(raw_vec, encoding, rotate_orders):
+def encode_driver(raw_vec, encoding, rotate_orders, twist_axis=AXIS_X):
     """Encode a raw driver vector into the (effective) encoded vector.
 
     `raw_vec` must be a list of scalars. Under Raw (0), returned as-is.
-    Under Quaternion (1), consumes (rx, ry, rz) triples → 4-tuples.
-    Under ExpMap (3), consumes (rx, ry, rz) triples → 3-tuples.
-    BendRoll / SwingTwist fall back to Raw (caller is expected to have
-    already remapped them via the safety net).
+    Non-Raw encodings consume (rx, ry, rz) triples:
+      * Quaternion (1) → 4-tuples
+      * BendRoll (2)   → 3-tuples (roll, bendH, bendV)
+      * ExpMap (3)     → 3-tuples
+      * SwingTwist (4) → 5-tuples (sx, sy, sz, sw, twist)
+    Any non-Raw encoding on a non-triple inDim falls back to Raw
+    (caller is expected to have resolved via resolve_effective_encoding).
     """
     n = len(raw_vec)
-    if encoding == ENC_QUATERNION and n % 3 == 0 and n > 0:
-        out = []
-        for g in range(n // 3):
+    if encoding == ENC_RAW or n == 0 or n % 3 != 0:
+        return list(raw_vec)
+
+    groups = n // 3
+    out = []
+
+    if encoding == ENC_QUATERNION:
+        for g in range(groups):
             ro = rotate_orders[g] if g < len(rotate_orders) else RO_XYZ
             q = encode_euler_to_quaternion(
                 raw_vec[g*3+0], raw_vec[g*3+1], raw_vec[g*3+2], ro)
             out.extend(q)
         return out
-    if encoding == ENC_EXPMAP and n % 3 == 0 and n > 0:
-        out = []
-        for g in range(n // 3):
+
+    if encoding == ENC_EXPMAP:
+        for g in range(groups):
             ro = rotate_orders[g] if g < len(rotate_orders) else RO_XYZ
             qx, qy, qz, qw = encode_euler_to_quaternion(
                 raw_vec[g*3+0], raw_vec[g*3+1], raw_vec[g*3+2], ro)
             lx, ly, lz = encode_quaternion_to_expmap(qx, qy, qz, qw)
             out.extend((lx, ly, lz))
         return out
+
+    if encoding == ENC_BENDROLL:
+        for g in range(groups):
+            ro = rotate_orders[g] if g < len(rotate_orders) else RO_XYZ
+            out.extend(encode_bendroll(
+                raw_vec[g*3+0], raw_vec[g*3+1], raw_vec[g*3+2], ro, twist_axis))
+        return out
+
+    if encoding == ENC_SWINGTWIST:
+        for g in range(groups):
+            ro = rotate_orders[g] if g < len(rotate_orders) else RO_XYZ
+            out.extend(encode_swing_twist(
+                raw_vec[g*3+0], raw_vec[g*3+1], raw_vec[g*3+2], ro, twist_axis))
+        return out
+
     return list(raw_vec)
 
 
 def resolve_effective_encoding(encoding, raw_in_dim):
-    """Apply the M2.1a safety net. Returns (effective_encoding, warning).
+    """Apply the safety net. Returns (effective_encoding, warning).
 
-    `warning` is one of None / 'placeholder' / 'non_triple'.
+    M2.1b: BendRoll / SwingTwist are no longer placeholder — they are
+    implemented. Only the `non_triple` branch remains.
+
+    `warning` is one of None / 'non_triple'.
     Mirrors the compute() pre-getPoseData safety block.
     """
-    if encoding in (ENC_BENDROLL, ENC_SWINGTWIST):
-        return ENC_RAW, 'placeholder'
     if encoding != ENC_RAW and raw_in_dim % 3 != 0:
         return ENC_RAW, 'non_triple'
     return encoding, None
+
+
+# ----------------------------------------------------------------------
+# M2.1b — Swing-Twist decomposition + BendRoll + SwingTwist encodings
+# ----------------------------------------------------------------------
+# (Constants moved above encode_driver so the default twist_axis kwarg
+#  resolves at module-load time — see AXIS_X / AXIS_Y / AXIS_Z defined
+#  earlier in the file.)
+
+# BendRoll stereographic projection ε. See addendum §M2.1b.3.
+BENDROLL_EPS = 1.0e-4
+
+
+def _quat_conjugate(q_wxyz):
+    w, x, y, z = q_wxyz
+    return (w, -x, -y, -z)
+
+
+def decompose_swing_twist(qx, qy, qz, qw, twist_axis):
+    """Swing-Twist decomposition. Mirrors C++ decomposeSwingTwist.
+
+    Axis: AXIS_X / AXIS_Y / AXIS_Z. Returns (sx, sy, sz, sw, twist_angle).
+    Degenerate projection (q_w² + axis_component² < 1e-12) falls back
+    to (identity swing = (0,0,0,1), zero twist) per option (B)①.
+    """
+    if twist_axis == AXIS_X:
+        a = qx
+    elif twist_axis == AXIS_Y:
+        a = qy
+    else:
+        a = qz
+
+    norm_sq = qw * qw + a * a
+    if norm_sq < 1.0e-12:
+        return (0.0, 0.0, 0.0, 1.0, 0.0)
+
+    norm = math.sqrt(norm_sq)
+    tw = qw / norm
+    tx = ty = tz = 0.0
+    if twist_axis == AXIS_X:
+        tx = a / norm
+    elif twist_axis == AXIS_Y:
+        ty = a / norm
+    else:
+        tz = a / norm
+
+    # Swing = q · conj(twist). Quat packed (w, x, y, z) for the multiply.
+    a_q = (qw, qx, qy, qz)
+    b_q = (tw, -tx, -ty, -tz)
+    rw, rx, ry, rz = _quat_mul(a_q, b_q)
+
+    twist_angle = 2.0 * math.atan2(a, qw)
+    return (rx, ry, rz, rw, twist_angle)
+
+
+def encode_bendroll(rx, ry, rz, rotate_order, twist_axis, eps=BENDROLL_EPS):
+    """Euler → BendRoll (roll, bendH, bendV).
+
+    Layout (roll, bendH, bendV) per v5 addendum §M2.1b (F)①. Denominator
+    clamped to max(1 + s_w, ε) to handle the stereographic-pole
+    singularity without a hot-path branch.
+    """
+    qx, qy, qz, qw = encode_euler_to_quaternion(rx, ry, rz, rotate_order)
+    sx, sy, sz, sw, twist_angle = decompose_swing_twist(qx, qy, qz, qw, twist_axis)
+
+    if twist_axis == AXIS_X:
+        sh, sv = sy, sz
+    elif twist_axis == AXIS_Y:
+        sh, sv = sz, sx
+    else:
+        sh, sv = sx, sy
+
+    sw_clamped = sw if sw >= -1.0 + eps else -1.0 + eps
+    denom = 1.0 + sw_clamped
+    bend_h = 2.0 * sh / denom
+    bend_v = 2.0 * sv / denom
+    return (twist_angle, bend_h, bend_v)
+
+
+def encode_swing_twist(rx, ry, rz, rotate_order, twist_axis):
+    """Euler → SwingTwist (sx, sy, sz, sw, twist). Mirrors C++ encodeSwingTwist."""
+    qx, qy, qz, qw = encode_euler_to_quaternion(rx, ry, rz, rotate_order)
+    return decompose_swing_twist(qx, qy, qz, qw, twist_axis)
+
+
+def get_swing_twist_block_distance(v1, v2):
+    """Per-5-block composite: sqrt(d_swing² + d_twist²) aggregated L2."""
+    assert len(v1) == len(v2)
+    n = len(v1)
+    blocks = n // 5
+    sum_sq = 0.0
+    for k in range(blocks):
+        base = k * 5
+        dot = sum(v1[base+i] * v2[base+i] for i in range(4))
+        d_swing = 1.0 - abs(dot)
+        d_twist = twist_wrap(v1[base+4], v2[base+4])
+        sum_sq += d_swing * d_swing + d_twist * d_twist
+    return math.sqrt(sum_sq)
 
 
 def get_quat_block_distance(v1, v2):
@@ -542,7 +670,13 @@ def get_pose_delta(v1, v2, dist_type, encoding, is_matrix_mode):
         return get_radius(v1, v2)
     if encoding == ENC_EXPMAP:
         return get_radius(v1, v2)
-    # BendRoll/SwingTwist should have been remapped by caller; defensive.
+    if encoding == ENC_BENDROLL:
+        return get_radius(v1, v2)
+    if encoding == ENC_SWINGTWIST:
+        if n >= 5 and n % 5 == 0:
+            return get_swing_twist_block_distance(v1, v2)
+        return get_radius(v1, v2)
+    # Unknown encoding: defensive fall-through.
     if dist_type == 0:
         return get_radius(v1, v2)
     if n == 3:
@@ -557,10 +691,14 @@ def clamp_skip_dims(encoding, is_matrix_mode, effective_dim):
     if is_matrix_mode:
         # Matrix mode: skip every 4k+3 (twist slot), unchanged from M1.3.
         return {j for j in range(effective_dim) if j % 4 == 3}
-    # Generic mode: Raw, Quaternion, ExpMap all clamp every dimension.
-    # BendRoll / SwingTwist land in M2.1b; placeholder falls back to Raw
-    # (handled by safety net), so they never reach this path with a
-    # distinct clamp-skip rule.
+    # Generic mode:
+    #   Raw / Quaternion / ExpMap → clamp every dim.
+    #   BendRoll (M2.1b) → skip every 3k (roll slot, wrap-aware).
+    #   SwingTwist (M2.1b) → skip every 5k+4 (twist slot, wrap-aware).
+    if encoding == ENC_BENDROLL:
+        return {j for j in range(effective_dim) if j % 3 == 0}
+    if encoding == ENC_SWINGTWIST:
+        return {j for j in range(effective_dim) if j % 5 == 4}
     return set()
 
 

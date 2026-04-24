@@ -98,6 +98,7 @@ public:
                                 std::vector<double>&normFactors,
                                 int inputEncoding,                 // M2.1a
                                 const std::vector<short>& rotateOrders,  // M2.1a
+                                unsigned twistAxis,                // M2.1b
                                 unsigned &effectiveInDim);         // M2.1a output
 
     virtual double getRadiusValue();
@@ -140,6 +141,37 @@ public:
     // double-cover discontinuity; caller does not need to canonicalize.
     static void encodeQuaternionToExpMap(double qx, double qy, double qz, double qw,
                                          double &lx, double &ly, double &lz);
+    // M2.1b: Swing-Twist decomposition of a unit quaternion about a
+    // principal axis. q = q_swing · q_twist. When the projection norm
+    // (q_w² + axis_component²) collapses below a numeric epsilon the
+    // output degenerates to identity swing + zero twist (per v5
+    // addendum §M2.1b option (B)①). Axis is 0=X, 1=Y, 2=Z.
+    static void decomposeSwingTwist(double qx, double qy, double qz, double qw,
+                                    unsigned twistAxis,
+                                    double &sx, double &sy, double &sz,
+                                    double &sw, double &twistAngle);
+    // M2.1b: Euler → BendRoll 3-tuple (roll, bendH, bendV).
+    // See v5 PART G.3 (swing-twist) + G.4 (stereographic). bend_H/V
+    // use a denominator clamp max(1+s_w, ε) with ε = 1e-4 (addendum
+    // §M2.1b option (A)②). Layout is (roll, bendH, bendV) per group
+    // with roll at offset 0 (skip position for clamp-skip mask).
+    static void encodeBendRoll(double rx, double ry, double rz,
+                               short rotateOrder, unsigned twistAxis,
+                               double &outRoll, double &outBendH, double &outBendV);
+    // M2.1b: Euler → SwingTwist 5-tuple (sx, sy, sz, sw, twist). The
+    // first four components form a standard unit quaternion, enabling
+    // downstream QWA consumption via stride=5 slicing (M2.2 forward-
+    // compat; addendum §M2.1b.8).
+    static void encodeSwingTwist(double rx, double ry, double rz,
+                                 short rotateOrder, unsigned twistAxis,
+                                 double &sx, double &sy, double &sz,
+                                 double &sw, double &twist);
+    // M2.1b: per-5-block composite distance for SwingTwist-encoded
+    // driver vectors. Per block: sqrt(d_swing² + d_twist²) with
+    // d_swing = 1 - |q1·q2| (M1.1 getQuatDistance) and d_twist =
+    // twistWrap(τ1, τ2) (M1.1). Aggregated L2 across blocks.
+    static double getSwingTwistBlockDistance(const std::vector<double> &v1,
+                                             const std::vector<double> &v2);
     static void getActivations(BRMatrix &mat, double width, short kernelType);
     static double interpolateRbf(double value, double width, short kernelType);
     static std::vector<double> normalizeVector(std::vector<double> vec, std::vector<double> factors);

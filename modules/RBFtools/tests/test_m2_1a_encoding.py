@@ -295,30 +295,11 @@ class T11_InDimSafetyNet(unittest.TestCase):
         self.assertEqual(out, raw)
 
 
-class T12_BendRollSwingTwistFallbackNotKFailure(unittest.TestCase):
-    """BendRoll / SwingTwist are declared but fall back to Raw with a
-    once-per-rig warning tag — NOT an error / kFailure."""
-
-    def test_bendroll_falls_back(self):
-        enc, warn = resolve_effective_encoding(
-            encoding=ENC_BENDROLL, raw_in_dim=6)
-        self.assertEqual(enc, ENC_RAW)
-        self.assertEqual(warn, 'placeholder')
-
-    def test_swingtwist_falls_back(self):
-        enc, warn = resolve_effective_encoding(
-            encoding=ENC_SWINGTWIST, raw_in_dim=6)
-        self.assertEqual(enc, ENC_RAW)
-        self.assertEqual(warn, 'placeholder')
-
-    def test_behaviour_equals_raw_after_fallback(self):
-        # After resolve_effective_encoding remaps to Raw, encode and
-        # dispatch behave exactly like Raw on a sample vector.
-        raw = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
-        enc_br, _ = resolve_effective_encoding(ENC_BENDROLL, 6)
-        enc_st, _ = resolve_effective_encoding(ENC_SWINGTWIST, 6)
-        self.assertEqual(encode_driver(raw, enc_br, []), raw)
-        self.assertEqual(encode_driver(raw, enc_st, []), raw)
+# T12 (M2.1a placeholder fallback) was a snapshot of the transient
+# "BendRoll/SwingTwist declared but not implemented" contract that
+# existed between M2.1a and M2.1b. Superseded by T12' in
+# test_m2_1b_encoding.py, which verifies the encodings actually land
+# (BendRoll → 3 per group, SwingTwist → 5 per group).
 
 
 if __name__ == "__main__":

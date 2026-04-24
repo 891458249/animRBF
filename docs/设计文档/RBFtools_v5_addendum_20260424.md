@@ -462,6 +462,130 @@ Matrix 模式**不读取** `inputEncoding` 的语义：
 
 **Forward pointer**：M4 Aim/Jiggle solver 重构时，"Matrix 模式的打包（swing on S² + twist）是否统一归为 `inputEncoding` 的第 5 / 6 档"将再议；本 milestone 保持两者独立。
 
+---
+
+## §M2.1b — BendRoll + SwingTwist Encodings + Swing-Twist 分解
+
+M2.1a 声明了 5 档 `inputEncoding` 但只落了 Raw / Quaternion / ExpMap 三档；BendRoll (2) 与 SwingTwist (4) 为占位 fall-back。M2.1b **解除占位**，把这两档的数学实现接入 M2.1a 框架。**不碰** attr schema、**不碰** dispatch / 签名框架。
+
+### M2.1b.1 — 决议日志
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | BendRoll 边界处理 | **② 不 canonicalize + ε = 10⁻⁴** | 连续优于 canonicalize 的 θ=π 翻转；ε=10⁻⁴ 在归一后不触发 kernel 数值失守 |
+| (B) | Swing-Twist 分解退化 fallback | **① identity swing + zero twist** | 退化集合是 q_w=0 ∧ q[axis]=0（测度零），fallback 行为可预测；不要求 round-trip |
+| (C) | Clamp-skip 接入 | **① 查表 mask** | 清晰、可扩展、O(N) 额外内存可忽略 |
+| (D) | SwingTwist 复合距离权重 | **① $w_{\text{twist}} = 1.0$** | 经 `normalizeColumns` 按列 L2 归一后 swing 与 twist 量纲自动平衡；用户覆盖推 M3 |
+| (E) | twistAxis 复用 | **① 节点级 `twistAxis`** | M3 + UI 时再考虑 per-group；当前零侵入 |
+| (F) | BendRoll 3-tuple 布局 | **① `(roll, bendH, bendV)`** | 首位 roll 对应 wrap-aware，skip `j%3==0` 最自然对齐 M1.3 pattern |
+
+### M2.1b.2 — 数学规约（核心公式）
+
+**Swing-Twist 分解**（v5 PART G.3）：给定单位四元数 $q = (q_x, q_y, q_z, q_w)$ 和扭转主轴 $\hat{\mathbf{a}}$（X/Y/Z），令 $a = (q_x, q_y, q_z) \cdot \hat{\mathbf{a}}$：
+
+$$\|t\|^2 = q_w^2 + a^2, \quad q_{\text{twist}} = \frac{(q_w, a\hat{\mathbf{a}})}{\|t\|}, \quad q_{\text{swing}} = q \cdot q_{\text{twist}}^{-1}$$
+
+$$\tau = 2\operatorname{atan2}(a, q_w)$$
+
+退化 fallback ($\|t\|^2 < 10^{-12}$)：$q_{\text{swing}} = (0,0,0,1)$, $\tau = 0$.
+
+**BendRoll**（v5 PART G.4 + ε 加固）：从 swing 四元数 $(s_x, s_y, s_z, s_w)$，选 twist 轴正交平面内两坐标 $(s_h, s_v)$：
+
+$$\tilde{s}_w = \max(s_w, -1 + \varepsilon), \quad \varepsilon = 10^{-4}$$
+
+$$\text{bend}_H = \frac{2 s_h}{1 + \tilde{s}_w}, \quad \text{bend}_V = \frac{2 s_v}{1 + \tilde{s}_w}, \quad \text{roll} = \tau$$
+
+Per-group 3-tuple: $(\text{roll}, \text{bend}_H, \text{bend}_V)$, stride = 3.
+
+**SwingTwist**：直接 5-tuple $(s_x, s_y, s_z, s_w, \tau)$ per group, stride = 5.
+
+**SwingTwist 复合距离**（本子任务新增，全局用户拍板 $w_{\text{twist}} = 1.0$）：
+
+$$d(v_1, v_2) = \sqrt{\sum_{k} \left[(1 - |q_{\text{swing},1}^{(k)} \cdot q_{\text{swing},2}^{(k)}|)^2 + \operatorname{twistWrap}(\tau_1^{(k)}, \tau_2^{(k)})^2\right]}$$
+
+### M2.1b.3 — ε 数值分析（(A)② 决议）
+
+Denominator $1 + \tilde{s}_w \in [\varepsilon, 2]$。ε=10⁻⁴ 下最坏 amplification = $2/\varepsilon = 2 \times 10^4$。
+
+| swing 角度 | $s_w$ | denom | 最大 bend 幅值（$s_h = 1$）|
+|---|---|---|---|
+| 0 (静态) | 1.0 | 2.0 | 1.0 |
+| π/2 (90°) | 0.707 | 1.707 | 1.17 |
+| π (180° 精确) | 0.0 | 1.0 | 2.0 |
+| π + 10⁻² (微外推) | -0.005 | 0.995 | 2.01 |
+| π + 10⁻³ | -0.0005 | 0.9995 | 2.001 |
+| 2π − 10⁻⁴（ε 触发线）| 0.999... | 1.999... | 1.0 |
+
+**典型补助骨 swing < π/2**：denom > 1.7，ε 完全不启动；BendRoll 幅值 ≤ 1.2 量级——对 RBF kernel 完美。ε 的作用仅在极端 > π 的 swing 场景，此时 ε=10⁻⁴ 把幅值上限钳在 $2 \times 10^4$，归一化后仍可用。
+
+**没有热路径 boundary 分支**：`std::max(s_w, -1 + ε)` 一行，无 if 分支；边界由 T14 锚定测试约束。
+
+### M2.1b.4 — Clamp-skip 规则矩阵（最终完整版）
+
+| encoding | 作用域 | per-block 维 | 跳过位 (relative offset) | 理由 |
+|---|---|---|---|---|
+| Raw | Generic | 1 | 无 | 全钳制 |
+| Quaternion | Generic | 4 | 无 | 分量 $\in [-1, 1]$ 有界 |
+| BendRoll | Generic | 3 | **0 (roll)** | twist 是 wrap-aware 圆量 |
+| ExpMap | Generic | 3 | 无 | ℝ³ 连续 |
+| SwingTwist | Generic | 5 | **4 (twist)** | twist 是 wrap-aware |
+| （任意） | Matrix | 4 | 3 (twist) | M1.3 不变 |
+
+实现：`compute()` 在 clamp 前构建 `std::vector<bool> clampSkipMask(dim)`，按 (isMatrixMode, effectiveEncoding) 填；clamp loop 按 mask 跳过。详见 (C)①。
+
+### M2.1b.5 — q ≡ -q 符号歧义契约（测试 T16.c 守护）
+
+四元数 $q$ 与 $-q$ 表示同一旋转。`decomposeSwingTwist(q)` 与 `decomposeSwingTwist(-q)` **不必**产生相同的 4-tuple swing / scalar twist，但：
+
+$$q = q_{\text{swing}} \cdot q_{\text{twist}}, \quad -q = (-q_{\text{swing}}) \cdot q_{\text{twist}}\quad \text{or} \quad q_{\text{swing}} \cdot (-q_{\text{twist}})$$
+
+任一代表都满足 round-trip。`getQuatDistance(q_{\text{swing}, 1}, q_{\text{swing}, 2}) = 1 - |q_1 \cdot q_2| \approx 0$，因此下游 RBF 训练在 $q$ 与 $-q$ 的两种表示上产生**同一**权重——不会因符号歧义引入非确定性。
+
+### M2.1b.6 — `twistAxis` 零回归分析
+
+- `twistAxis` attr（`RBFtools.cpp:217`，default 0 = X）在 M2.1a 及以前**仅** Matrix 模式 `getPoseVectors` / `getTwistAngle` 路径消费
+- M2.1b 首次让 Generic 模式（通过 BendRoll / SwingTwist）读此 attr
+- **零回归路径**：v4 rig 升级后 `inputEncoding` 默认 Raw，**永不触发** BendRoll/SwingTwist encode 分支，`twistAxis` 仍不读；只有用户主动切到 BendRoll/SwingTwist 才开始消费，属"新功能启用"，不是回归
+- Raw / Quaternion / ExpMap 路径**不触碰** `twistAxis`
+
+### M2.1b.7 — 零回归回归测试
+
+M1.1–M1.4 + M2.1a 的 102 条测试保持全绿（T12 从 M2.1a 剔除，因其验证的是 M2.1a-to-M2.1b 过渡期占位契约，已被 M2.1b 超越；说明移至 M2.1a 文件注释中）。Raw 行为字节级等价由 M2.1a T2 持续守护。
+
+### M2.1b.8 — M2.2 QWA 前瞻契约（锁定）
+
+**SwingTwist 输出格式契约**（编入 `encodeSwingTwist` 注释 + 此处）：
+
+- per-block layout = `(sx, sy, sz, sw, τ)`，stride = 5
+- 前 4 分量 $(s_x, s_y, s_z, s_w)$ 为**标准单位四元数**（unit norm 由 T12p 验证）
+- M2.2 QWA 如需从 SwingTwist-encoded 驱动向量提取四元数序列作为加权平均输入，**按 stride=5 前 4 维切片**即可
+
+**BendRoll 不可消费为 QWA 源**：立体投影是有损（roll 是标量而非旋转分量），不可逆回到四元数。用户若需要 QWA 数据流，需把 driver 切到 `Quaternion` 或 `SwingTwist` 编码。
+
+此契约提前锁定，M2.2 开工时不需再回溯核查 M2.1b 的数据布局。
+
+### M2.1b.9 — 推迟项（Non-goals 对齐）
+
+- ❌ v5 PART C.2.7 分字段 pose 存储（`poseSwingQuat` / `poseTwistAngle` 缓存）→ **M2.5**
+- ❌ per-group `driverInputTwistAxis[]` → M3（加 UI 时一起做）
+- ❌ `swingTwistWeight` 属性（复合距离加权可调）→ M3
+- ❌ 新增 MObject → 本次 commit **一个也不加**
+- ❌ 修改 `twistAxis` default / enum → 零侵入
+
+### M2.1b.10 — 签名演化记录
+
+```
+// getPoseData (M2.1b +1 param)
+//   +unsigned twistAxis    — 让 BendRoll/SwingTwist encode 能拿到主轴
+
+// 其他签名 (M2.1a 已定) 保持不变
+getPoseDelta(v1, v2, distType, encoding, isMatrixMode)     // M2.1a, 不变
+getDistances(poseMat, distType, encoding, isMatrixMode)    // M2.1a, 不变
+getPoseWeights(..., distType, encoding, isMatrixMode, ...) // M2.1a, 不变
+```
+
+BendRoll (encoding=2) + SwingTwist (encoding=4) 现在在 `getPoseDelta` Generic 分支里有**实际实现路径**，不再 fall-through 到 Raw。
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```
