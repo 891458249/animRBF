@@ -586,6 +586,170 @@ getPoseWeights(..., distType, encoding, isMatrixMode, ...) // M2.1a, 不变
 
 BendRoll (encoding=2) + SwingTwist (encoding=4) 现在在 `getPoseDelta` Generic 分支里有**实际实现路径**，不再 fall-through 到 Raw。
 
+---
+
+## §M2.2 — Quaternion Weighted Average (QWA) Output Encoding
+
+v5 PART D.4 / G.6 的 QWA 落地：输出端支持把连续 4 个 output slot 声明为一组 quaternion，用协方差矩阵最大特征向量代替标量加权和，解决 LERP 退化 + 单位长度破坏问题。本节记录决议、数学、使用点索引。
+
+### M2.2.1 — 决议日志
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | path (a) delta-train vs (b) direct | **① path (b) 直接 QWA** | 开题证明交换律 ⇒ 常数 $q_{\text{base}}$ 下 (a) ≡ (b)；选实现简单的 (b) |
+| (B) | 输出 quat group 识别 schema | **A 节点级 `outputQuaternionGroupStart[]` int multi** | 显式 start-only schema（隐式 count=4），cleaner than compound；零回归 empty→dormant |
+| (C) | 特征值求解器 | **① Power Iteration + dual-seed fallback** | 手写轻量，无 Eigen 依赖；M4.5 swap for `SelfAdjointEigenSolver<Matrix4d>` |
+| (D) | scale ∩ quat 冲突 | **① 两者都跳 + warning** | 拒绝 silent override；用户显式修正 |
+| (E) | 退化 fallback | **① identity quat + 一次性 warning** | 沿用 M2.1 模式；DG 永不停 |
+| (F) | Power Iteration 初始向量 | **① identity (0,0,0,1) 主 + `M·(1,1,1,1)` 副** | 主 seed 贴 rest-pose-typical 场景；副 seed 覆盖 QWA-adversarial 边界 |
+| (G) | 符号规范 | **① 强制 $q^*_w \ge 0$** | 与 M2.1b SwingTwist 对齐；消除 $q \equiv -q$ 歧义 |
+| (Q8) | 负权重 PSD 保护 | **仅 QWA 路径 `max(0, φ_i)` 截断** + 一次性 warning | 标量 M1.2 路径完全不动 |
+| (Q9) | isQuatMember 掩码架构 | **单一来源（compute 内构建一次，4 使用点消费）** | 避免派生漂移 |
+
+### M2.2.2 — 交换律完整证明（path (a) ≡ (b) 的理论基础）
+
+四元数右乘 $q \mapsto q \cdot q_0$ 作用于 $\mathbb{R}^4$ 列向量是一个线性变换：
+
+$$R(q_0) = \begin{pmatrix} d & c & -b & a \\ -c & d & a & b \\ b & -a & d & c \\ -a & -b & -c & d \end{pmatrix}, \quad q_0 = (a, b, c, d)^\top$$
+
+**正交性**：对 $\|q_0\|^2 = a^2 + b^2 + c^2 + d^2 = 1$，$R^\top R = I$。（验证：4 列两两内积 = 0；每列 norm² = $a^2+b^2+c^2+d^2 = 1$）
+
+**反同态**：$R(q \cdot q') = R(q') \cdot R(q)$。由此 $R(q_0^{-1}) = R(q_0)^\top$。
+
+**path (a) 推导**：
+
+$$\tilde{q}_i = R^\top q_i \implies \tilde{M} = \sum_i w_i \tilde{q}_i \tilde{q}_i^\top = R^\top M R$$
+
+$$\tilde{q}^* = \arg\max_{\|q\|=1} q^\top \tilde{M} q = \arg\max_{\|q\|=1} q^\top R^\top M R q$$
+
+代换 $u = R q$（正交保范）：$q^\top R^\top M R q = u^\top M u$，所以 $\tilde{q}^* = R^\top u^*$，其中 $u^* = \arg\max u^\top M u$ 是 pure QWA。
+
+**重组**：
+
+$$q^{*(\text{a})} = \tilde{q}^* \cdot q_0 = R(q_0) \tilde{q}^* = R R^\top u^* = u^* = q^{*(\text{pure})}$$
+
+**结论**：对常数 $q_{\text{base}}$，path (a) 与 path (b) 产出位级相同。实施走 (b)。
+
+### M2.2.3 — Power Iteration 数学 + dual-seed 策略
+
+**核心算法**：对 4×4 对称 PSD 矩阵 $M$，迭代 $q_{k+1} = \operatorname{normalize}(M q_k)$ 收敛到 $\lambda_1$ 的特征向量。
+
+**收敛速率**：$\|q_k - v_1\| \lesssim (\lambda_2/\lambda_1)^k \|q_0 - v_1\|$。QWA 补助骨场景（样本聚集、rank-1 dominant）下 $\lambda_1/\lambda_2 \gg 1$，15-20 iter 收敛。
+
+**停止判据**：$\|q_{k+1} - q_k\|_2 < 10^{-8}$ **或** $|q_{k+1} \cdot q_k| > 1 - 10^{-16}$（dot 判据处理可能的符号振荡，实践中罕见但守护了边界）。
+
+**Dual-seed 策略**（(F)① 扩展）：
+
+1. **主 seed**：$(0, 0, 0, 1)$ identity quat。rest-pose-biased，典型查询快速收敛。
+2. **副 seed**：$M \cdot (1, 1, 1, 1)^\top$ 归一化。当主 seed 与 $v_1$ 接近正交（测试用全随机 S³ 样本时可发生，实际 rig 场景极罕见）时，副 seed 保证与 $v_1$ 有非零分量（因为 $M \cdot \mathbf{1}$ 是 $M$ 列和，在 SPD 下必有 $v_1$ 分量）。
+
+若两 seed 都 50-iter 未收敛 → 返回 $(0, 0, 0, 1)$ identity + `qwa_no_converge` 一次性 warning（(E)）。
+
+### M2.2.4 — **Q8**：负权重 PSD 保护
+
+$M = \sum_i w_i q_i q_i^\top$ 要求 $w_i \ge 0$ 才保证 PSD（从而最大特征值有合理几何语义）。
+
+**问题**：
+- `allowNegative` attr default `true`
+- 某些 kernel（MQ variants）激活值可负
+- `interpolateRbf` 输出不保证非负
+
+**若 $w_i < 0$，$M$ 失去 PSD 性**：可能产生负特征值，Power Iteration 可能返回反向四元数（反映同旋转的另一半球），收敛性能也无保证。
+
+**决议**：**仅在 QWA 累加路径**做 `phi_i_qwa = max(0, phi_i)` 截断。首次截断触发 `qwa_clipped_weights` 一次性 warning。
+
+**关键**：**标量路径完全不截断**。allowNegative / interpolateWeight / scale 的语义对 scalar output 不变（M1.2 behavior intact）。负权重仅对 QWA 是 PSD 破坏源。
+
+### M2.2.5 — **Q9** / §MASK-INDEX：`isQuatMember[]` 单一来源架构
+
+`isQuatMember[j]` 是 **output-dim × 1** 的 bool 掩码，由 `resolveQuaternionGroups` 在 `compute()` 早期**构建一次**，被以下 **4 个使用点**只读消费：
+
+| # | 使用点 | 作用 |
+|---|---|---|
+| 1 | **M1.2 subtract-before-solve**（`yCols` 构建）| `isQuatMember[c]==true` → `yCols[c] = zeros`（跳过 baseline 减法 + 跳过 solve）|
+| 2 | **M1.4 Cholesky / GE solve**（wMat 列）| 通过 (1) 的零 yCols 自动产生零 wMat 列（无额外判断） |
+| 3 | **M1.2 add-back + post-processing**（final weight loop）| `isQuatMember[i]==true` → `continue`（保留 QWA 写入的值；不走 allowNegative / interpolate / scale / baseline）|
+| 4 | **getPoseWeights QWA 累加**（反向使用）| `isQuatMember[j]==true` → 跳过 scalar sum；QWA 累加 $M_g$ 代替 |
+
+**禁止**任何使用点重新派生掩码。派生位置:
+- 声明：`std::vector<bool> isQuatMember(solveCount, false);` 在 `compute()` 的 baseline-read 块之后
+- 填充：由 `resolveQuaternionGroups(rawStarts, solveCount, outputIsScaleArr, validStarts, isQuatMember, anyInvalid)` 写入
+- 传递：按值 const& 传给 `getPoseWeights`（使用点 3 直接读 compute() scope 内变量）
+
+### M2.2.6 — 配置验证规则（`resolveQuaternionGroups`）
+
+Raw starts 被依次检查，**有以下任一问题的整组丢弃**，剩下的继续：
+
+1. **越界**：`s < 0` 或 `s + 4 > solveCount`
+2. **重叠**：该组 4 个 slot 中任一已被前组占用
+3. **与 scale 冲突**：该组 4 个 slot 中任一 `outputIsScale[s+k] == true`
+
+任一组被丢弃 → `anyInvalid = true` → compute() 发一次性 `qwa_config` warning。用户需要显式修正（拒绝 silent override 符合 (D)①）。
+
+配置 hash 基于 order-sensitive rolling 函数：用户编辑 starts 时 `prevQuatGroupConfigHash` 变化 → 重置 3 个 warning flag + trip `evalInput = true` 强制重训 wMat（同步与新 `isQuatMember` 对齐）。
+
+### M2.2.7 — 零回归契约
+
+**空 `outputQuaternionGroupStart[]`**（v4 rig 升级 + 未显式声明）：
+
+- `rawStarts` 为空 → `resolveQuaternionGroups` 返回空 `validStarts` + 全 false `isQuatMember`
+- `getPoseWeights` 内 QWA 累加 `gCount == 0`，完全跳过
+- 所有 4 个使用点 mask 全 false → 行为字节级等价 M2.1b
+
+**测试 T9** 守护该契约；M1+M2.1 的 130 条测试在 M2.2 改动后全绿 ⇒ 零回归验证通过。
+
+### M2.2.8 — **§CORNER-PATH-A**：path (a) 显式 delta 模式的未来扩展路径
+
+当前 M2.2 实施 path (b) 直接 QWA。**交换律证明（M2.2.2）作为 path (a) 未来落地的数学保证**：
+
+未来场景（M3 或独立子任务）可能需要：
+- **per-sample $q_{\text{base},i}$**：每个 pose sample 关联不同 rest quaternion
+- **外部 API 对称性**：下游消费方约定"给我 delta 四元数"的接口
+- **局部 Transform 双存储**（M2.3 的一部分）：rest-frame 变换可能需要 delta 分解
+
+此时重新启用 delta 路径（$\tilde{q}_i = q_i \cdot q_0^{-1}$），经过 QWA 后乘回 $q_0$。**数学等价性由本证明保证**，实施时只需改训练存储 + 推理重组两处，QWA 核心代码不动。
+
+### M2.2.9 — **§M4.5-FORWARD**：Eigen 替换指针
+
+M4.5 引入 Eigen 后：
+
+```cpp
+Eigen::Map<const Eigen::Matrix4d> Mmat(M);  // row-major
+Eigen::SelfAdjointEigenSolver<Eigen::Matrix4d> es(Mmat);
+Eigen::Vector4d eig = es.eigenvectors().col(3);  // largest (ascending)
+```
+
+替换 `powerIterationMaxEigenvec4x4` + `computeQWAForGroup`。保留 dual-seed 策略 + identity + mass check + canonicalisation 为测试对照 / 调试用，实际路径走 Eigen。M4.5 scope 追加一项（连同 QR/SVD）。
+
+### M2.2.10 — 签名演化（getPoseWeights 本次 +5 参数）
+
+```cpp
+// M2.1b 之后
+getPoseWeights(out, poses, norms, driver, poseModes, wMat,
+               width, distType, encoding, isMatrixMode, kernelType);
+
+// M2.2 之后 — 追加 QWA 参数
+getPoseWeights(..., kernelType,
+               const BRMatrix& poseVals,              // 样本 quat 来源
+               const std::vector<int>& quatGroupStarts,
+               const std::vector<bool>& isQuatMember,
+               bool& qwaAnyClippedOut,                // PSD 截断 flag
+               bool& qwaAnyDegenerateOut);            // 非收敛 flag
+```
+
+仅一个 caller（`compute()`），签名变更受控。M4.5 Eigen 引入时可能进一步重构，届时再议。
+
+### M2.2.11 — Non-goals（明确推迟）
+
+- ❌ path (a) 显式 delta 训练模式 → §CORNER-PATH-A 未来扩展（commutativity 保证无功能收益除非 per-sample q_base）
+- ❌ per-sample $q_{\text{base}}$ → M3 或独立子任务
+- ❌ Jacobi / Eigen → M4.5
+- ❌ 输入端 quat group → 已由 M2.1b SwingTwist 覆盖
+- ❌ UI Quat Group 面板 → M2.4
+- ❌ QWA 调试可视化（特征值谱）→ M5
+- ❌ `swingTwistWeight` 可调权重 → M3
+- ❌ 分字段 pose 存储 → M2.5
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```

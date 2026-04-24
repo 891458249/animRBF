@@ -172,6 +172,42 @@ public:
     // twistWrap(τ1, τ2) (M1.1). Aggregated L2 across blocks.
     static double getSwingTwistBlockDistance(const std::vector<double> &v1,
                                              const std::vector<double> &v2);
+
+    // M2.2: Power Iteration for the maximum-eigenvalue eigenvector of a
+    // 4x4 symmetric PSD matrix (QWA covariance). Initial vector is the
+    // identity quaternion (0, 0, 0, 1). Returns true on convergence.
+    // Result is normalized to unit length and canonicalised to the
+    // q_w >= 0 hemisphere (v5 addendum §M2.2 (G)). M4.5 will replace
+    // this hand-rolled iteration with Eigen::SelfAdjointEigenSolver.
+    static bool powerIterationMaxEigenvec4x4(const double M[16],
+                                             double outQ[4],
+                                             int maxIter = 50,
+                                             double tol = 1.0e-8);
+
+    // M2.2: wrap Power Iteration with PSD-mass check. When the total
+    // mass of M (trace) is below EPS_M, returns identity + QWA_ZERO_MASS;
+    // when Power Iteration fails to converge, returns identity +
+    // QWA_NO_CONVERGE; on success returns QWA_OK. All three statuses
+    // translate to "identity quaternion + once-per-rig warning" at the
+    // caller per v5 addendum §M2.2 (E).
+    enum QWAResult { QWA_OK = 0, QWA_ZERO_MASS = 1, QWA_NO_CONVERGE = 2 };
+    static QWAResult computeQWAForGroup(const double M[16], double outQ[4]);
+
+    // M2.2: validate user-provided quaternion group starts against the
+    // output dim count and the outputIsScale array. Invalid groups
+    // (out-of-range, overlapping, or colliding with scale channels)
+    // are dropped from the returned starts list; the `anyInvalid` out-
+    // param flips to true so the caller can emit a one-time warning.
+    // `isQuatMember` is the single-source-of-truth mask consumed by
+    // (1) M1.2 subtract-before-solve, (2) M1.4 yCols skip, (3) M1.2
+    // add-back, and (4) post-processing QWA overwrite.
+    // See addendum §M2.2 (Q9) / §M2.2.MASK-INDEX.
+    static void resolveQuaternionGroups(const std::vector<int> &rawStarts,
+                                        unsigned outputCount,
+                                        const std::vector<bool> &outputIsScaleArr,
+                                        std::vector<int> &validStarts,
+                                        std::vector<bool> &isQuatMember,
+                                        bool &anyInvalid);
     static void getActivations(BRMatrix &mat, double width, short kernelType);
     static double interpolateRbf(double value, double width, short kernelType);
     static std::vector<double> normalizeVector(std::vector<double> vec, std::vector<double> factors);
@@ -185,7 +221,13 @@ public:
                                int distType,
                                int encoding,           // M2.1a
                                bool isMatrixMode,      // M2.1a
-                               short kernelType);
+                               short kernelType,
+                               // M2.2 QWA:
+                               const BRMatrix &poseVals,
+                               const std::vector<int> &quatGroupStarts,
+                               const std::vector<bool> &isQuatMember,
+                               bool &qwaAnyClippedOut,
+                               bool &qwaAnyDegenerateOut);
 
     virtual double interpolateWeight(double value, int type);
     virtual double blendCurveWeight(double value);
@@ -240,6 +282,7 @@ public:
     static MObject solverMethod;
     static MObject inputEncoding;
     static MObject driverInputRotateOrder;
+    static MObject outputQuaternionGroupStart;
     static MObject colorDriver;
     static MObject colorDriverR;
     static MObject colorDriverG;
@@ -347,6 +390,19 @@ private:
     // on every DG evaluation.
     bool  inputEncodingWarningIssued;
     short prevInputEncodingVal;
+
+    // M2.2: three independent once-per-config warning flags for the
+    // QWA path. `qwaConfigWarningIssued` is for invalid quat-group
+    // configuration (out-of-range start, overlap, scale conflict).
+    // `qwaClippedWarningIssued` is for the negative-weight PSD clamp
+    // (addendum §M2.2 (Q8)). `qwaDegenerateWarningIssued` covers the
+    // zero-mass / non-convergent Power Iteration fallback (addendum §E).
+    // `prevQuatGroupConfigHash` resets all three when the user edits
+    // the outputQuaternionGroupStart array.
+    bool   qwaConfigWarningIssued;
+    bool   qwaClippedWarningIssued;
+    bool   qwaDegenerateWarningIssued;
+    size_t prevQuatGroupConfigHash;
 };
 
 // ---------------------------------------------------------------------

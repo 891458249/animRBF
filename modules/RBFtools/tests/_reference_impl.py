@@ -593,6 +593,157 @@ def encode_swing_twist(rx, ry, rz, rotate_order, twist_axis):
     return decompose_swing_twist(qx, qy, qz, qw, twist_axis)
 
 
+# ----------------------------------------------------------------------
+# M2.2 — QWA (Quaternion Weighted Average) output-side helpers
+# ----------------------------------------------------------------------
+
+# Identity quat fallback.
+QWA_IDENTITY = (0.0, 0.0, 0.0, 1.0)
+
+
+def right_mul_matrix(q0):
+    """Right-multiplication matrix R(q0) such that R(q0) @ q = q · q0.
+
+    q0 is (a, b, c, d) = (qx, qy, qz, qw). Used in the commutativity
+    proof (v5 addendum §M2.2.CORNER-PATH-A) — R is orthogonal when q0
+    is unit, so the path-(a) delta-train / path-(b) direct-QWA pair
+    produces identical output for any constant q_base.
+    """
+    import numpy as np
+    a, b, c, d = q0
+    return np.array([
+        [ d,  c, -b,  a],
+        [-c,  d,  a,  b],
+        [ b, -a,  d,  c],
+        [-a, -b, -c,  d],
+    ])
+
+
+def power_iteration_max_eigenvec_4x4(M, max_iter=50, tol=1.0e-8):
+    """Mirror of C++ powerIterationMaxEigenvec4x4.
+
+    Dual-seed strategy per addendum §M2.2 (F)①-extended: primary seed
+    is identity quaternion (0, 0, 0, 1) (rest-pose-biased, user design
+    intent). If that fails to converge in max_iter steps, a secondary
+    seed normalize(sum-of-M-columns) is used — guaranteed to have
+    non-zero component along any eigenvector with non-zero eigenvalue.
+    Returns (q, converged, iters_total).
+    """
+    import numpy as np
+    M_np = np.asarray(M, dtype=float).reshape(4, 4)
+
+    def _run(seed):
+        q = np.array(seed, dtype=float)
+        n0 = float(np.linalg.norm(q))
+        if n0 == 0.0:
+            return (q, False, 0)
+        q = q / n0
+        converged = False
+        iters = 0
+        for k in range(max_iter):
+            qp = M_np @ q
+            norm = float(np.linalg.norm(qp))
+            if norm < 1.0e-30:
+                return (q, False, k + 1)
+            qp = qp / norm
+            delta = float(np.linalg.norm(qp - q))
+            dot = float(np.dot(qp, q))
+            q = qp
+            iters = k + 1
+            if delta < tol or abs(dot) > 1.0 - tol * tol:
+                converged = True
+                break
+        return (q, converged, iters)
+
+    # Primary: identity. Secondary: normalize(M·1) (robust against
+    # identity-seed being near-orthogonal to the dominant eigenvector).
+    q1, ok1, it1 = _run([0.0, 0.0, 0.0, 1.0])
+    if ok1:
+        q_final, iters = q1, it1
+        converged = True
+    else:
+        sec = M_np @ np.array([1.0, 1.0, 1.0, 1.0])
+        if float(np.linalg.norm(sec)) < 1.0e-30:
+            sec = np.array([0.5, 0.5, 0.5, 0.5])
+        q2, ok2, it2 = _run(sec)
+        q_final = q2
+        iters = it1 + it2
+        converged = ok2
+
+    if q_final[3] < 0.0:
+        q_final = -q_final
+    return ((float(q_final[0]), float(q_final[1]),
+             float(q_final[2]), float(q_final[3])),
+            converged, iters)
+
+
+def compute_qwa_for_group(M):
+    """Mirror of C++ computeQWAForGroup. Returns (quat, status) where
+    status ∈ {'OK', 'ZERO_MASS', 'NO_CONVERGE'}."""
+    import numpy as np
+    M_np = np.asarray(M, dtype=float).reshape(4, 4)
+    EPS_M = 1.0e-12
+    trace = float(np.trace(M_np))
+    if trace < EPS_M:
+        return (QWA_IDENTITY, 'ZERO_MASS')
+    q, ok, _ = power_iteration_max_eigenvec_4x4(M_np)
+    if not ok:
+        return (QWA_IDENTITY, 'NO_CONVERGE')
+    return (q, 'OK')
+
+
+def resolve_quaternion_groups(raw_starts, output_count, is_scale_arr):
+    """Mirror of C++ resolveQuaternionGroups.
+
+    Returns (valid_starts, is_quat_member, any_invalid). Drops entries
+    that are out-of-range, overlap another accepted group, or collide
+    with any outputIsScale==True on their 4 slots. `is_quat_member`
+    is the single-source-of-truth mask (addendum §M2.2.Q9).
+    """
+    valid_starts = []
+    is_quat_member = [False] * output_count
+    any_invalid = False
+    for s in raw_starts:
+        if s < 0 or s + 4 > output_count:
+            any_invalid = True
+            continue
+        if any(is_quat_member[s + k] for k in range(4)):
+            any_invalid = True
+            continue
+        if any(s + k < len(is_scale_arr) and is_scale_arr[s + k]
+               for k in range(4)):
+            any_invalid = True
+            continue
+        for k in range(4):
+            is_quat_member[s + k] = True
+        valid_starts.append(s)
+    return (valid_starts, is_quat_member, any_invalid)
+
+
+def accumulate_qwa_matrix(phis, quats, clip_negative=True):
+    """Build M = Σ_i max(0, φ_i) · q_i q_iᵀ.
+
+    Returns (M, any_clipped). any_clipped is True iff at least one
+    φ_i was negative (addendum §M2.2 (Q8)). With clip_negative=False
+    the negative samples are retained for test T11.b/c so the PSD
+    breakage can be demonstrated explicitly.
+    """
+    import numpy as np
+    M = np.zeros((4, 4))
+    any_clipped = False
+    for phi, q in zip(phis, quats):
+        phi_use = phi
+        if phi_use < 0.0:
+            any_clipped = True
+            if clip_negative:
+                phi_use = 0.0
+        if phi_use == 0.0:
+            continue
+        qv = np.asarray(q, dtype=float).reshape(4, 1)
+        M += phi_use * (qv @ qv.T)
+    return (M, any_clipped)
+
+
 def get_swing_twist_block_distance(v1, v2):
     """Per-5-block composite: sqrt(d_swing² + d_twist²) aggregated L2."""
     assert len(v1) == len(v2)

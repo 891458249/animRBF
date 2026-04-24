@@ -89,6 +89,7 @@ MObject RBFtools::regularization;
 MObject RBFtools::solverMethod;
 MObject RBFtools::inputEncoding;
 MObject RBFtools::driverInputRotateOrder;
+MObject RBFtools::outputQuaternionGroupStart;
 MObject RBFtools::radiusType;
 MObject RBFtools::radius;
 MObject RBFtools::distanceType;
@@ -131,7 +132,11 @@ RBFtools::RBFtools()
     : lastSolveMethod(0),              // M1.4: Cholesky tried first on fresh node.
       prevSolverMethodVal(0),          // M1.4: Auto; matches solverMethod default.
       inputEncodingWarningIssued(false), // M2.1a: fresh warning on first fall-back.
-      prevInputEncodingVal(0)          // M2.1a: Raw; matches inputEncoding default.
+      prevInputEncodingVal(0),         // M2.1a: Raw; matches inputEncoding default.
+      qwaConfigWarningIssued(false),   // M2.2: fresh warnings on first config / edge hit.
+      qwaClippedWarningIssued(false),
+      qwaDegenerateWarningIssued(false),
+      prevQuatGroupConfigHash(0)
 {}
 
 RBFtools::~RBFtools()
@@ -470,6 +475,22 @@ MStatus RBFtools::initialize()
     nAttr.setMin(0.0);
     nAttr.setSoftMax(1.0e-3);
 
+    // M2.2: output quaternion group starts. int multi; each stored value
+    // S declares that output[S..S+3] forms a unit-quaternion group for
+    // QWA aggregation. Implicit count = 4 per start (v5 addendum §M2.2
+    // (B) schema simplification). Empty array = QWA dormant (zero
+    // regression). Invalid entries (out-of-range, overlapping, scale
+    // collision) are dropped at compute() time with a once-per-config
+    // warning — never kFailure.
+    outputQuaternionGroupStart = nAttr.create(
+        "outputQuaternionGroupStart", "oqgs", MFnNumericData::kInt);
+    nAttr.setArray(true);
+    nAttr.setUsesArrayDataBuilder(true);
+    nAttr.setKeyable(false);
+    nAttr.setStorable(true);
+    nAttr.setDefault(0);
+    nAttr.setMin(0);
+
     outWeight = nAttr.create("outWeight", "ow", MFnNumericData::kDouble);
     nAttr.setWritable(true);
     nAttr.setKeyable(false);
@@ -696,6 +717,7 @@ MStatus RBFtools::initialize()
     addAttribute(solverMethod);
     addAttribute(inputEncoding);
     addAttribute(driverInputRotateOrder);
+    addAttribute(outputQuaternionGroupStart);
     addAttribute(poseMode);
     addAttribute(twistAxis);
     addAttribute(opposite);
@@ -742,6 +764,7 @@ MStatus RBFtools::initialize()
     attributeAffects(RBFtools::solverMethod, RBFtools::output);
     attributeAffects(RBFtools::inputEncoding, RBFtools::output);
     attributeAffects(RBFtools::driverInputRotateOrder, RBFtools::output);
+    attributeAffects(RBFtools::outputQuaternionGroupStart, RBFtools::output);
     attributeAffects(RBFtools::radius, RBFtools::output);
     attributeAffects(RBFtools::centerAngle, RBFtools::output);
     attributeAffects(RBFtools::curveRamp, RBFtools::output);
@@ -1375,6 +1398,68 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                 }
             }
 
+            // M2.2: resolve the quaternion-group schema. Runs only in
+            // Generic mode (QWA is an output-side concept; Matrix mode
+            // output is one-hot blend weights with no quaternion
+            // semantics). Produces (validStarts, isQuatMember); invalid
+            // configurations emit a once-per-config warning without
+            // halting the DG. See addendum §M2.2.MASK-INDEX for the
+            // four downstream consumers of isQuatMember.
+            std::vector<int> quatGroupStarts;
+            std::vector<bool> isQuatMember(solveCount, false);
+            if (genericMode && solveCount > 0)
+            {
+                // Read raw starts from the multi int array.
+                std::vector<int> rawStarts;
+                MArrayDataHandle qgsHandle =
+                    data.inputArrayValue(outputQuaternionGroupStart, &status);
+                if (status == MStatus::kSuccess)
+                {
+                    const unsigned cnt = qgsHandle.elementCount();
+                    for (unsigned k = 0; k < cnt; ++k)
+                    {
+                        if (qgsHandle.jumpToArrayElement(k) == MStatus::kSuccess)
+                            rawStarts.push_back(qgsHandle.inputValue().asInt());
+                    }
+                }
+
+                // Config-hash: stable order-sensitive digest so user
+                // edits to the quat-group spec reset the once-per-rig
+                // warning flags (addendum §M2.2 (Q9)).
+                size_t newHash = rawStarts.size();
+                for (int s : rawStarts)
+                    newHash = newHash * 131u + (size_t)(s + 1);
+                if (newHash != prevQuatGroupConfigHash)
+                {
+                    qwaConfigWarningIssued = false;
+                    qwaClippedWarningIssued = false;
+                    qwaDegenerateWarningIssued = false;
+                    prevQuatGroupConfigHash = newHash;
+                    // Re-solve wMat: columns that just became quat
+                    // members must be zeroed in the solver output,
+                    // and columns that just left quat membership must
+                    // get freshly solved. attributeAffects alone reuses
+                    // the cached wMat, producing incorrect output until
+                    // the next structural change; mirror the M1.2
+                    // baseline dirty-tracker pattern.
+                    evalInput = true;
+                }
+
+                bool anyInvalid = false;
+                resolveQuaternionGroups(rawStarts, solveCount, outputIsScaleArr,
+                                        quatGroupStarts, isQuatMember,
+                                        anyInvalid);
+                if (anyInvalid && !qwaConfigWarningIssued)
+                {
+                    MGlobal::displayWarning(thisName + MString(
+                        ": outputQuaternionGroupStart contains invalid "
+                        "entries (out-of-range, overlapping, or colliding "
+                        "with outputIsScale). Those groups are disabled; "
+                        "remaining groups run QWA normally."));
+                    qwaConfigWarningIssued = true;
+                }
+            }
+
             // Store the pose values for debugging.
             // The original values get normalized before solving
             // therefore, a copy needs to be kept for when the solve
@@ -1482,6 +1567,20 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     std::vector< std::vector<double> > yCols(solveCount);
                     for (c = 0; c < solveCount; c ++)
                     {
+                        // M2.2: quaternion-group dims skip the scalar
+                        // solve entirely — their output is produced by
+                        // QWA (post-loop Power Iteration), not by
+                        // K W = Y followed by linear combination. Using
+                        // an all-zero RHS here leaves wMat's column at
+                        // zero; the scalar path in getPoseWeights then
+                        // contributes nothing to those output slots,
+                        // and the QWA post-loop overwrites them with
+                        // the Power-Iteration eigenvector.
+                        if (c < isQuatMember.size() && isQuatMember[c])
+                        {
+                            yCols[c].assign(poseCount, 0.0);
+                            continue;
+                        }
                         yCols[c] = matValues.getColumnVector(c);
                         if (genericMode)
                         {
@@ -1571,6 +1670,8 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                 // final weight calculation
                 // -----------------------------------------------
 
+                bool qwaAnyClipped = false;
+                bool qwaAnyDegenerate = false;
                 getPoseWeights(weightsArray,
                                matPoses,
                                inputNorms,
@@ -1581,7 +1682,29 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                distanceTypeVal,
                                (int)effectiveEncoding,
                                /*isMatrixMode*/ !genericMode,
-                               kernelVal);
+                               kernelVal,
+                               matValues,
+                               quatGroupStarts,
+                               isQuatMember,
+                               qwaAnyClipped,
+                               qwaAnyDegenerate);
+                if (qwaAnyClipped && !qwaClippedWarningIssued)
+                {
+                    MGlobal::displayWarning(thisName + MString(
+                        ": QWA negative kernel activation clipped to 0 "
+                        "to preserve PSD property (addendum §M2.2 Q8). "
+                        "This path is invoked only when quaternion groups "
+                        "are active; scalar output is unaffected."));
+                    qwaClippedWarningIssued = true;
+                }
+                if (qwaAnyDegenerate && !qwaDegenerateWarningIssued)
+                {
+                    MGlobal::displayWarning(thisName + MString(
+                        ": QWA returned identity quaternion for at least "
+                        "one group (zero-mass or non-convergent Power "
+                        "Iteration). Addendum §M2.2 (E)."));
+                    qwaDegenerateWarningIssued = true;
+                }
 
                 if (exposeDataVal == 2 || exposeDataVal == 4)
                     showArray(weightsArray, thisName + " : RBF Weights");
@@ -1592,6 +1715,15 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
 
                 for (i = 0; i < weightsArray.length(); i ++)
                 {
+                    // M2.2: quaternion-group members carry the QWA
+                    // Power-Iteration eigenvector components — they
+                    // must NOT be reshaped by allowNegative /
+                    // interpolateWeight / scale / baseline (those are
+                    // scalar post-processing for delta weights).
+                    // Preserve the value verbatim.
+                    if (i < isQuatMember.size() && isQuatMember[i])
+                        continue;
+
                     double value = weightsArray[i];
 
                     if (value < 0.0 && !allowNegativeVal)
@@ -2890,6 +3022,211 @@ void RBFtools::encodeSwingTwist(double rx, double ry, double rz,
 // §M2.1b option (D)①): column-wise L2 normalisation upstream
 // balances the swing (dimensionless) vs twist (radians) scales.
 //
+//
+// M2.2 — Power Iteration for the maximum-eigenvalue eigenvector of a
+// 4x4 symmetric PSD matrix. M is row-major (M[i*4 + j]). The iteration
+// seeds at (0, 0, 0, 1) — identity quaternion — because most
+// QWA-relevant queries already cluster near rest orientation; a random
+// seed would waste iterations drifting off axis.
+//
+// Convergence: |q_{k+1} - q_k| < tol  OR  |q_{k+1} . q_k| > 1 - tol^2.
+// The dot-product check catches the sign-ambiguity oscillation that
+// pure subtraction can miss when the eigenvector keeps flipping ±.
+//
+// Returns true on convergence. On return, outQ is unit-length and
+// canonicalised to the q_w >= 0 hemisphere (v5 addendum §M2.2 (G),
+// matching M2.1b SwingTwist sign convention).
+//
+// M4.5 will swap this for Eigen::SelfAdjointEigenSolver<Matrix4d>
+// (see addendum §M2.2.M4.5-FORWARD).
+//
+bool RBFtools::powerIterationMaxEigenvec4x4(const double M[16],
+                                            double outQ[4],
+                                            int maxIter,
+                                            double tol)
+{
+    // Local closure for a single Power Iteration run from a given seed.
+    // Captures by-reference M + tol + maxIter. Mirrors the Python
+    // reference's inner _run helper.
+    auto runFromSeed = [&](const double seed[4], double qOut[4]) -> bool
+    {
+        double q[4] = {seed[0], seed[1], seed[2], seed[3]};
+        const double n0 = sqrt(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+        if (n0 < 1.0e-30) return false;
+        q[0] /= n0; q[1] /= n0; q[2] /= n0; q[3] /= n0;
+
+        for (int k = 0; k < maxIter; ++k)
+        {
+            double qp[4] = {0, 0, 0, 0};
+            for (int i = 0; i < 4; ++i)
+            {
+                qp[i] = M[i*4 + 0] * q[0]
+                      + M[i*4 + 1] * q[1]
+                      + M[i*4 + 2] * q[2]
+                      + M[i*4 + 3] * q[3];
+            }
+            const double norm = sqrt(qp[0]*qp[0] + qp[1]*qp[1]
+                                   + qp[2]*qp[2] + qp[3]*qp[3]);
+            if (norm < 1.0e-30) return false;
+            qp[0] /= norm; qp[1] /= norm; qp[2] /= norm; qp[3] /= norm;
+
+            const double dx = qp[0] - q[0], dy = qp[1] - q[1];
+            const double dz = qp[2] - q[2], dw = qp[3] - q[3];
+            const double delta = sqrt(dx*dx + dy*dy + dz*dz + dw*dw);
+            const double dot = qp[0]*q[0] + qp[1]*q[1] + qp[2]*q[2] + qp[3]*q[3];
+
+            q[0] = qp[0]; q[1] = qp[1]; q[2] = qp[2]; q[3] = qp[3];
+            if (delta < tol || fabs(dot) > 1.0 - tol * tol)
+            {
+                qOut[0] = q[0]; qOut[1] = q[1];
+                qOut[2] = q[2]; qOut[3] = q[3];
+                return true;
+            }
+        }
+        // Not converged within maxIter — return last iterate.
+        qOut[0] = q[0]; qOut[1] = q[1]; qOut[2] = q[2]; qOut[3] = q[3];
+        return false;
+    };
+
+    // Primary seed: identity quaternion (user design (F)①, biased
+    // toward the rest-pose-typical case where QWA clusters near
+    // (0,0,0,1) and convergence is fast).
+    double result[4] = {0.0, 0.0, 0.0, 1.0};
+    const double seed1[4] = {0.0, 0.0, 0.0, 1.0};
+    bool converged = runFromSeed(seed1, result);
+
+    if (!converged)
+    {
+        // Secondary seed: M · (1,1,1,1), which is guaranteed non-zero
+        // for any non-trivial M (unless (1,1,1,1) lies in the null
+        // space — extremely unlikely for practical QWA covariances).
+        // Fallback to (½, ½, ½, ½) if that projection collapses.
+        double seed2[4];
+        seed2[0] = M[ 0] + M[ 1] + M[ 2] + M[ 3];
+        seed2[1] = M[ 4] + M[ 5] + M[ 6] + M[ 7];
+        seed2[2] = M[ 8] + M[ 9] + M[10] + M[11];
+        seed2[3] = M[12] + M[13] + M[14] + M[15];
+        const double n2 = sqrt(seed2[0]*seed2[0] + seed2[1]*seed2[1]
+                             + seed2[2]*seed2[2] + seed2[3]*seed2[3]);
+        if (n2 < 1.0e-30)
+        {
+            seed2[0] = 0.5; seed2[1] = 0.5; seed2[2] = 0.5; seed2[3] = 0.5;
+        }
+        converged = runFromSeed(seed2, result);
+    }
+
+    if (result[3] < 0.0)
+    {
+        result[0] = -result[0]; result[1] = -result[1];
+        result[2] = -result[2]; result[3] = -result[3];
+    }
+    outQ[0] = result[0]; outQ[1] = result[1];
+    outQ[2] = result[2]; outQ[3] = result[3];
+    return converged;
+}
+
+
+//
+// M2.2 — PSD-mass check + Power Iteration dispatch. Identity-quat
+// fallback for (a) zero-mass matrices and (b) non-convergent iteration.
+// Caller translates non-OK result codes into a once-per-rig warning
+// via qwaDegenerateWarningIssued (addendum §M2.2 (E) + §M2.2 (Q6)).
+//
+RBFtools::QWAResult RBFtools::computeQWAForGroup(const double M[16],
+                                                 double outQ[4])
+{
+    const double EPS_M = 1.0e-12;
+    const double trace = M[0] + M[5] + M[10] + M[15];
+    if (trace < EPS_M)
+    {
+        outQ[0] = 0.0; outQ[1] = 0.0; outQ[2] = 0.0; outQ[3] = 1.0;
+        return QWA_ZERO_MASS;
+    }
+
+    const bool ok = powerIterationMaxEigenvec4x4(M, outQ);
+    if (!ok) return QWA_NO_CONVERGE;
+    return QWA_OK;
+}
+
+
+//
+// M2.2 — validate raw user-provided quaternion group starts. Invalid
+// entries (out-of-range, overlap, or colliding with an outputIsScale
+// member on any of the four group slots) are dropped; the returned
+// validStarts reflects the filtered set. `isQuatMember` is the
+// single-source-of-truth mask used by the M1.2 subtract / M1.4 yCols
+// skip / M1.2 add-back / QWA-overwrite sites per addendum §M2.2.Q9 +
+// §M2.2.MASK-INDEX.
+//
+// `anyInvalid` flips to true iff at least one entry was dropped, so
+// the caller can fire the once-per-rig config warning.
+//
+void RBFtools::resolveQuaternionGroups(const std::vector<int> &rawStarts,
+                                       unsigned outputCount,
+                                       const std::vector<bool> &outputIsScaleArr,
+                                       std::vector<int> &validStarts,
+                                       std::vector<bool> &isQuatMember,
+                                       bool &anyInvalid)
+{
+    validStarts.clear();
+    isQuatMember.assign(outputCount, false);
+    anyInvalid = false;
+
+    for (size_t r = 0; r < rawStarts.size(); ++r)
+    {
+        const int s = rawStarts[r];
+
+        // Out-of-range.
+        if (s < 0 || (unsigned)(s + 4) > outputCount)
+        {
+            anyInvalid = true;
+            continue;
+        }
+
+        // Overlap with an already-accepted group.
+        bool overlap = false;
+        for (int k = 0; k < 4; ++k)
+        {
+            if (isQuatMember[(unsigned)(s + k)])
+            {
+                overlap = true;
+                break;
+            }
+        }
+        if (overlap)
+        {
+            anyInvalid = true;
+            continue;
+        }
+
+        // Scale-channel conflict (addendum §M2.2 (D)①): if ANY of the
+        // four slots is marked outputIsScale=true, reject the whole
+        // group — both semantics are disabled there and the user must
+        // explicitly resolve.
+        bool scaleConflict = false;
+        for (int k = 0; k < 4; ++k)
+        {
+            const unsigned idx = (unsigned)(s + k);
+            if (idx < outputIsScaleArr.size() && outputIsScaleArr[idx])
+            {
+                scaleConflict = true;
+                break;
+            }
+        }
+        if (scaleConflict)
+        {
+            anyInvalid = true;
+            continue;
+        }
+
+        // Accepted.
+        for (int k = 0; k < 4; ++k)
+            isQuatMember[(unsigned)(s + k)] = true;
+        validStarts.push_back(s);
+    }
+}
+
+
 double RBFtools::getSwingTwistBlockDistance(const std::vector<double> &v1,
                                             const std::vector<double> &v2)
 {
@@ -3196,7 +3533,12 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
                                   int distType,
                                   int encoding,
                                   bool isMatrixMode,
-                                  short kernelType)
+                                  short kernelType,
+                                  const BRMatrix &poseVals,
+                                  const std::vector<int> &quatGroupStarts,
+                                  const std::vector<bool> &isQuatMember,
+                                  bool &qwaAnyClippedOut,
+                                  bool &qwaAnyDegenerateOut)
 {
     unsigned int poseCount = poses.getRowSize();
     unsigned int valueCount = out.length();
@@ -3210,6 +3552,15 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
     driver = normalizeVector(driver, norms);
 
     unsigned int i, j;
+
+    // M2.2: per-group 4x4 covariance accumulators. Only allocated when
+    // the user has declared at least one quaternion group — rig default
+    // (empty) skips this allocation entirely.
+    const size_t gCount = quatGroupStarts.size();
+    std::vector< std::vector<double> > Mmats(gCount, std::vector<double>(16, 0.0));
+    qwaAnyClippedOut = false;
+    qwaAnyDegenerateOut = false;
+    const bool haveMask = (isQuatMember.size() == valueCount);
 
     for (i = 0; i < poseCount; i ++)
     {
@@ -3233,9 +3584,66 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
         }
 
         dist = getPoseDelta(dv, ps, distType, encoding, isMatrixMode);
+        const double phi = interpolateRbf(dist, width, kernelType);
 
+        // Scalar accumulate. Dims flagged as quat-group members take
+        // their value from the QWA post-loop instead; skip their scalar
+        // sum entirely to avoid double-contribution.
         for (j = 0; j < valueCount; j ++)
-            out[j] += weightMat(i, j) * interpolateRbf(dist, width, kernelType);
+        {
+            if (haveMask && isQuatMember[j]) continue;
+            out[j] += weightMat(i, j) * phi;
+        }
+
+        // M2.2 QWA accumulate. Negative kernel activations break the
+        // PSD property of M (addendum §M2.2 (Q8)); clamp to 0 and raise
+        // the once-per-rig warning flag on first clip. Standard (scalar)
+        // path is unaffected — allowNegative semantics stay as-is.
+        if (gCount > 0)
+        {
+            double phiQwa = phi;
+            if (phiQwa < 0.0)
+            {
+                phiQwa = 0.0;
+                qwaAnyClippedOut = true;
+            }
+            if (phiQwa > 0.0)
+            {
+                for (size_t g = 0; g < gCount; ++g)
+                {
+                    const int s = quatGroupStarts[g];
+                    const double q0_ = poseVals(i, (unsigned)(s + 0));
+                    const double q1_ = poseVals(i, (unsigned)(s + 1));
+                    const double q2_ = poseVals(i, (unsigned)(s + 2));
+                    const double q3_ = poseVals(i, (unsigned)(s + 3));
+                    double *Mg = Mmats[g].data();
+                    const double comp[4] = {q0_, q1_, q2_, q3_};
+                    for (int a = 0; a < 4; ++a)
+                    {
+                        const double pa = phiQwa * comp[a];
+                        for (int b = 0; b < 4; ++b)
+                            Mg[a*4 + b] += pa * comp[b];
+                    }
+                }
+            }
+        }
+    }
+
+    // M2.2: resolve each group's QWA. OK / ZERO_MASS / NO_CONVERGE
+    // all translate to a valid write (OK = eigenvector; others =
+    // identity). Non-OK results collapse into a single caller-side
+    // warning flag — per-group verbosity is not helpful for rigger
+    // debugging and could flood the log.
+    for (size_t g = 0; g < gCount; ++g)
+    {
+        const int s = quatGroupStarts[g];
+        double qOut[4];
+        const QWAResult r = computeQWAForGroup(Mmats[g].data(), qOut);
+        if (r != QWA_OK) qwaAnyDegenerateOut = true;
+        out[(unsigned)(s + 0)] = qOut[0];
+        out[(unsigned)(s + 1)] = qOut[1];
+        out[(unsigned)(s + 2)] = qOut[2];
+        out[(unsigned)(s + 3)] = qOut[3];
     }
 }
 
