@@ -1,0 +1,114 @@
+# ============================================================
+# RBFtools .gitignore — Python + Maya + IDE + project-specific
+# ============================================================
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+.eggs/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+venv/
+.venv/
+env/
+ENV/
+
+# ---------- Maya ----------
+# Scene / session artifacts
+*.swatches
+mayaLog.txt
+incrementalSave/
+*_backup*.ma
+*_backup*.mb
+*.ma.bak
+*.mb.bak
+*.mel.bak
+
+# ---------- C/C++ build artifacts (source/build/) ----------
+source/build/
+build/
+dist/
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.a
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# NOTE: Compiled Maya plug-ins (.mll/.so/.bundle) under modules/RBFtools/plug-ins/
+# are INTENTIONALLY tracked — this repo distributes built binaries.
+# Do not add *.mll / *.so / *.bundle / *.dylib / *.dll to ignore list.
+
+# ---------- IDE / Editors ----------
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+.project
+.cproject
+.settings/
+*.code-workspace
+
+# ---------- OS ----------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+
+# ---------- Office lockfiles ----------
+~$*
+*.tmp
+
+# ---------- Third-party vendored sources (NOT part of this repo) ----------
+docs/源文档/chadvernon/
+docs/源文档/**/*.zip
+*.zip.bak
+
+# ---------- Large third-party reference slides (exceed GitHub 100 MB limit) ----------
+# Tekken 8 public GDC-style technical presentations — kept locally as reference,
+# excluded from the repo. See docs/源文档/技术分析MD/ for the distilled analyses.
+docs/源文档/铁拳技术文档/*.pptx
+docs/源文档/铁拳技术文档/*.ppt
+
+# ---------- Logs ----------
+*.log
+logs/
+
+# ---------- Claude Code / local AI tooling ----------
+.claude/
+.remember/
+.claude-ops-log/
+CLAUDE.local.md
+
+# ---------- Secrets / credentials ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/

@@ -1,0 +1,670 @@
+# -*- coding: utf-8 -*-
+"""
+Help text dictionary for all UI controls — English and Chinese.
+"""
+
+from __future__ import absolute_import
+
+from RBFtools.ui.i18n import current_language
+
+_EN = {
+    # -- General --
+    "active":
+        "Enable or disable the node's computation. "
+        "When unchecked, the node outputs zero / rest values.",
+
+    "type":
+        "Switch between two solver modes:\n"
+        "  Vector Angle - single-axis angular / translational blending.\n"
+        "  RBF - multi-dimensional pose-based interpolation.",
+
+    "icon_size":
+        "Scale factor for the viewport locator icon. "
+        "Controls the cone display size in Vector Angle mode.\n\n"
+        "This option is only available in Vector Angle mode.",
+
+    # -- Vector Angle --
+    "direction":
+        "The primary axis used to measure the angle between driver and reader. "
+        "X / Y / Z corresponds to the local axis of the driver transform.",
+
+    "invert":
+        "Flip the direction axis to measure from the opposite side. "
+        "Useful when the driver rotates in the negative direction.",
+
+    "use_rotate":
+        "Enable rotation-based driving. The output weight is derived from "
+        "the angular difference between the driver and reader matrices.",
+
+    "angle":
+        "The cone half-angle (in degrees) at which the output weight "
+        "reaches zero. A larger angle means a wider influence range.",
+
+    "center_angle":
+        "An offset angle (in degrees) that shifts the center of the "
+        "influence cone away from the rest direction.",
+
+    "twist":
+        "Enable an additional twist component along the primary axis. "
+        "The twist weight is multiplied with the main angular weight.",
+
+    "twist_angle":
+        "The twist half-angle (in degrees) at which the twist weight "
+        "reaches zero.",
+
+    "use_translate":
+        "Enable translation-based driving. The output weight is derived "
+        "from the distance between driver and reader along the chosen axis.",
+
+    "grow":
+        "When enabled, the weight grows from 0 to 1 as the driver moves "
+        "from min to max. When disabled, it shrinks from 1 to 0.",
+
+    "translate_min":
+        "The start position (in scene units) of the translation range.",
+
+    "translate_max":
+        "The end position (in scene units) of the translation range.",
+
+    "interpolation":
+        "The easing curve applied to the output weight:\n"
+        "  Linear - constant rate\n"
+        "  Slow - ease-in\n"
+        "  Fast - ease-out\n"
+        "  Smooth1/2 - ease-in-out (two levels)\n"
+        "  Curve - custom ramp (edit in Attribute Editor)",
+
+    "draw_cone":
+        "Draw the influence cone in the viewport, visualising the "
+        "angle range where the weight is non-zero.",
+
+    "draw_center_cone":
+        "Draw a second smaller cone representing the center angle offset.",
+
+    "draw_weight":
+        "Display a numeric weight label next to the locator in the viewport.",
+
+    # -- RBF --
+    "kernel":
+        "The radial basis kernel function used to compute pose weights:\n"
+        "  Linear - simple distance falloff\n"
+        "  Gaussian 1/2 - bell curve (two sharpness levels)\n"
+        "  Thin Plate - smooth, good for scattered data\n"
+        "  Multi-Quadratic / Inverse - biharmonic variants",
+
+    "radius_type":
+        "How the RBF influence radius is calculated:\n"
+        "  Mean Distance - average distance between poses\n"
+        "  Variance / Std Dev - statistical spread measures\n"
+        "  Custom - user-defined radius value",
+
+    "radius":
+        "Manual radius value (only editable when Radius Type = Custom). "
+        "Smaller values = sharper transitions between poses.",
+
+    "allow_neg":
+        "Allow the solver to output negative weights. "
+        "Disabling this clamps all weights to >= 0.",
+
+    "rbf_scale":
+        "A global multiplier applied to all output values.",
+
+    "rbf_mode":
+        "Choose the RBF sub-solver:\n"
+        "  Generic - uses per-attribute distance (Euclidean or Angle).\n"
+        "  Matrix - uses full transform matrices, supports twist decomposition.",
+
+    "distance_type":
+        "Distance metric for the Generic RBF solver:\n"
+        "  Euclidean - straight-line distance in attribute space\n"
+        "  Angle - angular distance (useful for rotation attributes)",
+
+    "twist_axis":
+        "The rotation axis used for twist decomposition "
+        "in Matrix RBF mode (X / Y / Z).",
+
+    "draw_origin":
+        "Draw a circle at the origin in the viewport.",
+
+    "draw_poses":
+        "Draw lines from the origin to each stored pose direction.",
+
+    "pose_length":
+        "Visual length of pose direction lines in the viewport.",
+
+    "draw_indices":
+        "Display pose index numbers next to each pose marker.",
+
+    "index_distance":
+        "Offset distance for index labels from pose markers.",
+
+    "draw_twist":
+        "Visualize the twist component of each pose as an additional marker.",
+
+    "opposite":
+        "Mirror the pose directions to the opposite hemisphere.",
+
+    "driver_index":
+        "When multiple drivers are connected, select which driver's "
+        "data to visualize in the viewport.",
+
+    # -- Pose Editor --
+    "auto_fill_bs":
+        "When adding poses for a BlendShape driven node, "
+        "automatically fill target weights as one-hot vectors "
+        "(rest = all zeros, each pose = one target at 1.0).",
+
+    "add_pose":
+        "Capture the current scene values of the selected driver "
+        "and driven attributes and add them as a new pose row.",
+
+    "apply_poses":
+        "Write all pose data from the table to the RBF node "
+        "and trigger a solver recomputation.",
+
+    "connect_poses":
+        "Connect the driver inputs and driven outputs between "
+        "the scene nodes and the RBF node.",
+
+    "disconnect_poses":
+        "Break all output connections from the RBF node to the driven node. "
+        "This frees the driven attributes so you can manually adjust values "
+        "to define new poses. Use Connect again when done.",
+
+    "reload_poses":
+        "Re-read all pose data from the RBF node in the scene "
+        "and refresh the table display.",
+
+    # -- Per-option: Type --
+    "type_vector_angle":
+        "Vector Angle mode uses a single axis to measure angular and/or "
+        "translational distance between a driver and a reader transform.\n\n"
+        "Best for simple setups like corrective blendshapes driven by "
+        "a single joint rotation. Provides cone-based influence visualization.",
+
+    "type_rbf":
+        "RBF (Radial Basis Function) mode uses multi-dimensional pose-based "
+        "interpolation to blend between stored poses.\n\n"
+        "Best for complex setups where multiple attributes drive multiple "
+        "outputs simultaneously. Supports both generic per-attribute distance "
+        "and full transform matrix solving.",
+
+    # -- Per-option: Direction --
+    "direction_x":
+        "Use the local X axis of the driver transform as the primary "
+        "measurement direction.\n\n"
+        "Typical use: shoulder joints that rotate primarily around X.",
+
+    "direction_y":
+        "Use the local Y axis of the driver transform as the primary "
+        "measurement direction.\n\n"
+        "Typical use: spine or neck joints that bend around Y.",
+
+    "direction_z":
+        "Use the local Z axis of the driver transform as the primary "
+        "measurement direction.\n\n"
+        "Typical use: limb joints that rotate primarily around Z.",
+
+    # -- Per-option: Interpolation --
+    "interp_linear":
+        "Linear interpolation — constant rate of change.\n\n"
+        "The weight changes at a uniform speed from 0 to 1. "
+        "No easing, no acceleration. Simplest and most predictable.",
+
+    "interp_slow":
+        "Slow (ease-in) — starts slowly, accelerates toward the end.\n\n"
+        "The weight ramps up gradually at first, then speeds up. "
+        "Good for movements that need a gentle start.",
+
+    "interp_fast":
+        "Fast (ease-out) — starts quickly, decelerates toward the end.\n\n"
+        "The weight changes rapidly at first, then slows down. "
+        "Good for movements that need a snappy start.",
+
+    "interp_smooth1":
+        "Smooth 1 (ease-in-out) — slow start and end, faster in the middle.\n\n"
+        "A gentle S-curve with moderate smoothing. Good general-purpose "
+        "easing for natural-looking transitions.",
+
+    "interp_smooth2":
+        "Smooth 2 (ease-in-out, stronger) — more pronounced S-curve.\n\n"
+        "Stronger easing than Smooth 1, with a flatter start and end. "
+        "Use for softer, more cushioned transitions.",
+
+    "interp_curve":
+        "Curve — fully custom ramp curve.\n\n"
+        "Open the Attribute Editor to edit the ramp shape directly. "
+        "Provides complete control over the falloff profile.",
+
+    # -- Per-option: Kernel --
+    "kernel_linear":
+        "Linear kernel: \xcf\x86(r) = r\n\n"
+        "The simplest kernel — weight falls off linearly with distance. "
+        "Produces sharp, tent-like transitions between poses. "
+        "Radius Type is ignored (always uses direct distance).\n\n"
+        "Pros: Fast, predictable.\n"
+        "Cons: Not smooth at pose locations (C\u2070 continuity only).",
+
+    "kernel_gaussian1":
+        "Gaussian 1 kernel: \xcf\x86(r) = exp(-r\xc2\xb2)\n\n"
+        "Standard bell-curve falloff. Each pose has a smooth, rounded "
+        "region of influence that fades to zero. "
+        "Radius controls the width of the bell curve.\n\n"
+        "Pros: Smooth (C\u221e), well-behaved, most commonly used.\n"
+        "Cons: Can produce near-zero weights far from any pose.",
+
+    "kernel_gaussian2":
+        "Gaussian 2 kernel: \xcf\x86(r) = exp(-r\xc2\xb2/2)\n\n"
+        "A wider variant of the Gaussian bell curve. The '/2' denominator "
+        "makes each pose's influence spread further before fading.\n\n"
+        "Pros: Broader falloff, smoother blending across distant poses.\n"
+        "Cons: Less localised — nearby poses may interfere more.",
+
+    "kernel_thin_plate":
+        "Thin Plate Spline kernel: \xcf\x86(r) = r\xc2\xb2 \xc2\xb7 ln(r)\n\n"
+        "Inspired by the physical bending of a thin metal plate. "
+        "Produces very smooth interpolation with minimal oscillation.\n\n"
+        "Pros: Excellent for scattered data, minimal overshoot.\n"
+        "Cons: Not strictly positive-definite — may need regularisation.",
+
+    "kernel_multi_quadratic":
+        "Multi-Quadratic Biharmonic kernel: \xcf\x86(r) = \u221a(1 + r\xc2\xb2)\n\n"
+        "A biharmonic kernel that grows without bound. Produces globally "
+        "smooth interpolation where distant poses still contribute.\n\n"
+        "Pros: Very smooth, good for large pose sets.\n"
+        "Cons: Distant poses may have too much influence; can be slow.",
+
+    "kernel_inv_multi_quadratic":
+        "Inverse Multi-Quadratic Biharmonic kernel: \xcf\x86(r) = 1/\u221a(1 + r\xc2\xb2)\n\n"
+        "The inverse of the Multi-Quadratic. Influence decays toward zero "
+        "for distant poses, providing more localised blending.\n\n"
+        "Pros: Smooth and localised, always positive.\n"
+        "Cons: May produce very small weights for distant poses.",
+
+    # -- Per-option: Radius Type --
+    "rtype_mean_distance":
+        "Mean Distance — the radius is set to the average of all pairwise "
+        "distances between stored poses.\n\n"
+        "A robust automatic choice that adapts to the overall spread of "
+        "your pose data. Works well in most situations.",
+
+    "rtype_variance":
+        "Variance — the radius is set to the statistical variance of "
+        "inter-pose distances.\n\n"
+        "Produces a wider radius than Mean Distance when poses are "
+        "unevenly distributed. Use when poses are clustered.",
+
+    "rtype_std_dev":
+        "Standard Deviation — the radius is the square root of the variance.\n\n"
+        "A balanced middle ground between Mean Distance and Variance. "
+        "Often provides the most natural-looking transitions.",
+
+    "rtype_custom":
+        "Custom — manually set the radius value using the Radius spinner.\n\n"
+        "Full control over the influence width. Smaller values produce "
+        "sharper transitions; larger values produce smoother blending.\n"
+        "Required for fine-tuning edge cases.",
+
+    # -- Per-option: RBF Mode --
+    "rbf_mode_generic":
+        "Generic RBF — computes distance in per-attribute space.\n\n"
+        "Each driver attribute (translate X, rotate Y, etc.) is treated "
+        "as an independent dimension. Distance is measured using the "
+        "chosen Distance Type (Euclidean or Angle).\n\n"
+        "Best for: attribute-driven setups, non-transform drivers.",
+
+    "rbf_mode_matrix":
+        "Matrix RBF — computes distance using full 4x4 transform matrices.\n\n"
+        "The driver's world-space matrix is decomposed for distance "
+        "calculation, with optional twist decomposition along a chosen axis.\n\n"
+        "Best for: transform-driven setups, joint-based rigs where "
+        "rotation order matters.",
+
+    # -- Per-option: Distance Type --
+    "dist_euclidean":
+        "Euclidean distance — straight-line distance in attribute space.\n\n"
+        "d = sqrt(sum((a_i - b_i)^2))\n\n"
+        "Standard distance metric. Works well for translation and "
+        "general numeric attributes. May be less ideal for pure rotation "
+        "attributes due to gimbal effects.",
+
+    "dist_angle":
+        "Angular distance — measures the angle between attribute vectors.\n\n"
+        "Treats each set of driver attributes as a direction vector and "
+        "computes the angle between them. Ideal for rotation-only drivers "
+        "where magnitude doesn't matter, only direction.",
+
+    # -- Per-option: Twist Axis --
+    "twist_axis_x":
+        "Decompose twist around the X axis.\n\n"
+        "The rotation matrix is split into a twist component around X "
+        "and a swing component perpendicular to X. "
+        "Use for joints whose primary roll axis is X (e.g., forearm twist).",
+
+    "twist_axis_y":
+        "Decompose twist around the Y axis.\n\n"
+        "The rotation matrix is split into a twist component around Y "
+        "and a swing component perpendicular to Y. "
+        "Use for joints whose primary roll axis is Y.",
+
+    "twist_axis_z":
+        "Decompose twist around the Z axis.\n\n"
+        "The rotation matrix is split into a twist component around Z "
+        "and a swing component perpendicular to Z. "
+        "Use for joints whose primary roll axis is Z.",
+}
+
+_ZH = {
+    # -- General --
+    "active":
+        u"\u542f\u7528\u6216\u7981\u7528\u8282\u70b9\u8ba1\u7b97\u3002"
+        u"\u5173\u95ed\u65f6\u8282\u70b9\u8f93\u51fa\u96f6/\u4f11\u606f\u503c\u3002",
+
+    "type":
+        u"\u5207\u6362\u6c42\u89e3\u5668\u6a21\u5f0f:\n"
+        u"  \u5411\u91cf\u89d2\u5ea6 \u2014 \u5355\u8f74\u89d2\u5ea6/\u5e73\u79fb\u6df7\u5408\u3002\n"
+        u"  RBF \u2014 \u591a\u7ef4\u59ff\u6001\u63d2\u503c\u3002",
+
+    "icon_size":
+        u"\u89c6\u53e3\u5b9a\u4f4d\u5668\u56fe\u6807\u7684\u7f29\u653e\u7cfb\u6570\u3002"
+        u"\u63a7\u5236\u5411\u91cf\u89d2\u5ea6\u6a21\u5f0f\u4e0b\u7684\u5706\u9525\u663e\u793a\u5927\u5c0f\u3002\n\n"
+        u"\u6b64\u9009\u9879\u4ec5\u5728\u5411\u91cf\u89d2\u5ea6\u6a21\u5f0f\u4e0b\u53ef\u7528\u3002",
+
+    # -- Vector Angle --
+    "direction":
+        u"\u7528\u4e8e\u6d4b\u91cf\u9a71\u52a8\u5668\u4e0e\u8bfb\u53d6\u5668\u4e4b\u95f4\u89d2\u5ea6\u7684\u4e3b\u8f74\u3002"
+        u"X/Y/Z \u5bf9\u5e94\u9a71\u52a8\u53d8\u6362\u7684\u5c40\u90e8\u8f74\u3002",
+
+    "invert":
+        u"\u7ffb\u8f6c\u65b9\u5411\u8f74\uff0c\u4ece\u53cd\u65b9\u5411\u6d4b\u91cf\u3002"
+        u"\u5f53\u9a71\u52a8\u5668\u5411\u8d1f\u65b9\u5411\u65cb\u8f6c\u65f6\u5f88\u6709\u7528\u3002",
+
+    "use_rotate":
+        u"\u542f\u7528\u57fa\u4e8e\u65cb\u8f6c\u7684\u9a71\u52a8\u3002"
+        u"\u8f93\u51fa\u6743\u91cd\u7531\u9a71\u52a8\u5668\u4e0e\u8bfb\u53d6\u5668\u77e9\u9635\u7684\u89d2\u5ea6\u5dee\u5f02\u5f97\u51fa\u3002",
+
+    "angle":
+        u"\u5706\u9525\u534a\u89d2\uff08\u5ea6\uff09\uff0c\u5728\u6b64\u89d2\u5ea6\u5904\u8f93\u51fa\u6743\u91cd\u53d8\u4e3a\u96f6\u3002"
+        u"\u89d2\u5ea6\u8d8a\u5927\uff0c\u5f71\u54cd\u8303\u56f4\u8d8a\u5bbd\u3002",
+
+    "center_angle":
+        u"\u504f\u79fb\u89d2\u5ea6\uff08\u5ea6\uff09\uff0c\u5c06\u5f71\u54cd\u5706\u9525\u7684\u4e2d\u5fc3\u4ece\u4f11\u606f\u65b9\u5411\u79fb\u5f00\u3002",
+
+    "twist":
+        u"\u542f\u7528\u6cbf\u4e3b\u8f74\u7684\u989d\u5916\u626d\u8f6c\u5206\u91cf\u3002"
+        u"\u626d\u8f6c\u6743\u91cd\u4e0e\u4e3b\u89d2\u5ea6\u6743\u91cd\u76f8\u4e58\u3002",
+
+    "twist_angle":
+        u"\u626d\u8f6c\u534a\u89d2\uff08\u5ea6\uff09\uff0c\u5728\u6b64\u89d2\u5ea6\u5904\u626d\u8f6c\u6743\u91cd\u53d8\u4e3a\u96f6\u3002",
+
+    "use_translate":
+        u"\u542f\u7528\u57fa\u4e8e\u5e73\u79fb\u7684\u9a71\u52a8\u3002"
+        u"\u8f93\u51fa\u6743\u91cd\u7531\u9a71\u52a8\u5668\u6cbf\u6307\u5b9a\u8f74\u7684\u8ddd\u79bb\u5f97\u51fa\u3002",
+
+    "grow":
+        u"\u542f\u7528\u65f6\uff0c\u6743\u91cd\u4ece min \u5230 max \u7531 0\u21921 \u589e\u957f\u3002"
+        u"\u7981\u7528\u65f6\uff0c\u4ece 1\u21920 \u9012\u51cf\u3002",
+
+    "translate_min":
+        u"\u5e73\u79fb\u8303\u56f4\u7684\u8d77\u59cb\u4f4d\u7f6e\uff08\u573a\u666f\u5355\u4f4d\uff09\u3002",
+
+    "translate_max":
+        u"\u5e73\u79fb\u8303\u56f4\u7684\u7ed3\u675f\u4f4d\u7f6e\uff08\u573a\u666f\u5355\u4f4d\uff09\u3002",
+
+    "interpolation":
+        u"\u5e94\u7528\u4e8e\u8f93\u51fa\u6743\u91cd\u7684\u7f13\u52a8\u66f2\u7ebf:\n"
+        u"  Linear \u2014 \u7ebf\u6027\n"
+        u"  Slow \u2014 \u6162\u5165\n"
+        u"  Fast \u2014 \u6162\u51fa\n"
+        u"  Smooth1/2 \u2014 \u5e73\u6ed1\u8fc7\u6e21\n"
+        u"  Curve \u2014 \u81ea\u5b9a\u4e49\u66f2\u7ebf\uff08\u5728\u5c5e\u6027\u7f16\u8f91\u5668\u4e2d\u7f16\u8f91\uff09",
+
+    "draw_cone":
+        u"\u5728\u89c6\u53e3\u4e2d\u7ed8\u5236\u5f71\u54cd\u5706\u9525\uff0c\u53ef\u89c6\u5316\u6743\u91cd\u975e\u96f6\u7684\u89d2\u5ea6\u8303\u56f4\u3002",
+
+    "draw_center_cone":
+        u"\u7ed8\u5236\u8868\u793a\u4e2d\u5fc3\u89d2\u5ea6\u504f\u79fb\u7684\u7b2c\u4e8c\u4e2a\u8f83\u5c0f\u5706\u9525\u3002",
+
+    "draw_weight":
+        u"\u5728\u89c6\u53e3\u4e2d\u5b9a\u4f4d\u5668\u65c1\u663e\u793a\u6570\u5b57\u6743\u91cd\u6807\u7b7e\u3002",
+
+    # -- RBF --
+    "kernel":
+        u"RBF \u6838\u51fd\u6570:\n"
+        u"  Linear \u2014 \u7b80\u5355\u8ddd\u79bb\u8870\u51cf\n"
+        u"  Gaussian 1/2 \u2014 \u949f\u5f62\u66f2\u7ebf\n"
+        u"  Thin Plate \u2014 \u5149\u6ed1\uff0c\u9002\u5408\u5206\u6563\u6570\u636e\n"
+        u"  Multi-Quadratic / Inverse \u2014 \u53cc\u8c10\u53d8\u4f53",
+
+    "radius_type":
+        u"RBF \u5f71\u54cd\u534a\u5f84\u7684\u8ba1\u7b97\u65b9\u5f0f:\n"
+        u"  Mean Distance \u2014 \u59ff\u6001\u95f4\u5e73\u5747\u8ddd\u79bb\n"
+        u"  Variance / Std Dev \u2014 \u7edf\u8ba1\u79bb\u6563\u5ea6\n"
+        u"  Custom \u2014 \u7528\u6237\u81ea\u5b9a\u4e49\u534a\u5f84\u503c",
+
+    "radius":
+        u"\u624b\u52a8\u534a\u5f84\u503c\uff08\u4ec5\u5728\u534a\u5f84\u7c7b\u578b = Custom \u65f6\u53ef\u7f16\u8f91\uff09\u3002"
+        u"\u503c\u8d8a\u5c0f\uff0c\u59ff\u6001\u95f4\u8fc7\u6e21\u8d8a\u9510\u5229\u3002",
+
+    "allow_neg":
+        u"\u5141\u8bb8\u6c42\u89e3\u5668\u8f93\u51fa\u8d1f\u6743\u91cd\u3002"
+        u"\u7981\u7528\u65f6\u6240\u6709\u6743\u91cd\u88ab\u9650\u5236\u4e3a \u2265 0\u3002",
+
+    "rbf_scale":
+        u"\u5e94\u7528\u4e8e\u6240\u6709\u8f93\u51fa\u503c\u7684\u5168\u5c40\u7f29\u653e\u7cfb\u6570\u3002",
+
+    "rbf_mode":
+        u"\u9009\u62e9 RBF \u5b50\u6c42\u89e3\u5668:\n"
+        u"  Generic \u2014 \u4f7f\u7528\u6bcf\u5c5e\u6027\u8ddd\u79bb\uff08\u6b27\u6c0f\u6216\u89d2\u5ea6\uff09\u3002\n"
+        u"  Matrix \u2014 \u4f7f\u7528\u5b8c\u6574\u53d8\u6362\u77e9\u9635\uff0c\u652f\u6301\u626d\u8f6c\u5206\u89e3\u3002",
+
+    "distance_type":
+        u"Generic RBF \u7684\u8ddd\u79bb\u5ea6\u91cf:\n"
+        u"  Euclidean \u2014 \u5c5e\u6027\u7a7a\u95f4\u4e2d\u7684\u76f4\u7ebf\u8ddd\u79bb\n"
+        u"  Angle \u2014 \u89d2\u8ddd\u79bb\uff08\u9002\u5408\u65cb\u8f6c\u5c5e\u6027\uff09",
+
+    "twist_axis":
+        u"Matrix RBF \u6a21\u5f0f\u4e0b\u626d\u8f6c\u5206\u89e3\u4f7f\u7528\u7684\u65cb\u8f6c\u8f74 (X/Y/Z)\u3002",
+
+    "draw_origin":
+        u"\u5728\u89c6\u53e3\u4e2d\u539f\u70b9\u5904\u7ed8\u5236\u4e00\u4e2a\u5706\u3002",
+
+    "draw_poses":
+        u"\u4ece\u539f\u70b9\u5230\u6bcf\u4e2a\u5b58\u50a8\u59ff\u6001\u65b9\u5411\u7ed8\u5236\u7ebf\u6761\u3002",
+
+    "pose_length":
+        u"\u89c6\u53e3\u4e2d\u59ff\u6001\u65b9\u5411\u7ebf\u7684\u89c6\u89c9\u957f\u5ea6\u3002",
+
+    "draw_indices":
+        u"\u5728\u6bcf\u4e2a\u59ff\u6001\u6807\u8bb0\u65c1\u663e\u793a\u59ff\u6001\u7d22\u5f15\u7f16\u53f7\u3002",
+
+    "index_distance":
+        u"\u7d22\u5f15\u6807\u7b7e\u4e0e\u59ff\u6001\u6807\u8bb0\u7684\u504f\u79fb\u8ddd\u79bb\u3002",
+
+    "draw_twist":
+        u"\u4ee5\u989d\u5916\u6807\u8bb0\u53ef\u89c6\u5316\u6bcf\u4e2a\u59ff\u6001\u7684\u626d\u8f6c\u5206\u91cf\u3002",
+
+    "opposite":
+        u"\u5c06\u59ff\u6001\u65b9\u5411\u955c\u50cf\u5230\u76f8\u53cd\u7684\u534a\u7403\u3002",
+
+    "driver_index":
+        u"\u5f53\u8fde\u63a5\u4e86\u591a\u4e2a\u9a71\u52a8\u5668\u65f6\uff0c"
+        u"\u9009\u62e9\u5728\u89c6\u53e3\u4e2d\u53ef\u89c6\u5316\u54ea\u4e2a\u9a71\u52a8\u5668\u7684\u6570\u636e\u3002",
+
+    # -- Pose Editor --
+    "auto_fill_bs":
+        u"\u4e3a BlendShape \u88ab\u9a71\u52a8\u8282\u70b9\u6dfb\u52a0\u59ff\u6001\u65f6\uff0c"
+        u"\u81ea\u52a8\u586b\u5145\u76ee\u6807\u6743\u91cd\u4e3a one-hot \u5411\u91cf\u3002",
+
+    "add_pose":
+        u"\u6355\u6349\u5f53\u524d\u573a\u666f\u4e2d\u9009\u5b9a\u7684\u9a71\u52a8/\u88ab\u9a71\u52a8\u5c5e\u6027\u503c\uff0c"
+        u"\u4f5c\u4e3a\u65b0\u59ff\u6001\u884c\u6dfb\u52a0\u3002",
+
+    "apply_poses":
+        u"\u5c06\u8868\u683c\u4e2d\u7684\u6240\u6709\u59ff\u6001\u6570\u636e\u5199\u5165 RBF \u8282\u70b9\uff0c"
+        u"\u5e76\u89e6\u53d1\u6c42\u89e3\u5668\u91cd\u65b0\u8ba1\u7b97\u3002",
+
+    "connect_poses":
+        u"\u5c06\u573a\u666f\u8282\u70b9\u7684\u9a71\u52a8\u8f93\u5165\u548c\u88ab\u9a71\u52a8\u8f93\u51fa\u4e0e RBF \u8282\u70b9\u8fde\u63a5\u3002",
+
+    "disconnect_poses":
+        u"\u65ad\u5f00 RBF \u8282\u70b9\u5230\u88ab\u9a71\u52a8\u8282\u70b9\u7684\u6240\u6709\u8f93\u51fa\u8fde\u63a5\u3002"
+        u"\u8fd9\u6837\u60a8\u53ef\u4ee5\u624b\u52a8\u8c03\u8282\u88ab\u9a71\u52a8\u5c5e\u6027\u6765\u5b9a\u4e49\u65b0\u59ff\u6001\u3002"
+        u"\u5b8c\u6210\u540e\u518d\u6b21\u70b9\u51fb\u8fde\u63a5\u5373\u53ef\u3002",
+
+    "reload_poses":
+        u"\u4ece\u573a\u666f\u4e2d\u7684 RBF \u8282\u70b9\u91cd\u65b0\u8bfb\u53d6\u6240\u6709\u59ff\u6001\u6570\u636e\uff0c"
+        u"\u5237\u65b0\u8868\u683c\u663e\u793a\u3002",
+
+    # -- Per-option: Type --
+    "type_vector_angle":
+        u"\u5411\u91cf\u89d2\u5ea6\u6a21\u5f0f\u4f7f\u7528\u5355\u8f74\u6765\u6d4b\u91cf\u9a71\u52a8\u5668\u4e0e\u8bfb\u53d6\u5668\u53d8\u6362\u4e4b\u95f4\u7684\u89d2\u5ea6\u548c/\u6216\u5e73\u79fb\u8ddd\u79bb\u3002\n\n"
+        u"\u6700\u9002\u5408\u7b80\u5355\u8bbe\u7f6e\uff0c\u4f8b\u5982\u7531\u5355\u4e2a\u5173\u8282\u65cb\u8f6c\u9a71\u52a8\u7684\u4fee\u6b63\u6df7\u5408\u53d8\u5f62\u3002\u63d0\u4f9b\u5706\u9525\u5f71\u54cd\u8303\u56f4\u53ef\u89c6\u5316\u3002",
+
+    "type_rbf":
+        u"RBF\uff08\u5f84\u5411\u57fa\u51fd\u6570\uff09\u6a21\u5f0f\u4f7f\u7528\u591a\u7ef4\u59ff\u6001\u63d2\u503c\u5728\u5b58\u50a8\u7684\u59ff\u6001\u4e4b\u95f4\u8fdb\u884c\u6df7\u5408\u3002\n\n"
+        u"\u6700\u9002\u5408\u591a\u4e2a\u5c5e\u6027\u540c\u65f6\u9a71\u52a8\u591a\u4e2a\u8f93\u51fa\u7684\u590d\u6742\u8bbe\u7f6e\u3002\u652f\u6301\u901a\u7528\u9010\u5c5e\u6027\u8ddd\u79bb\u548c\u5b8c\u6574\u53d8\u6362\u77e9\u9635\u6c42\u89e3\u3002",
+
+    # -- Per-option: Direction --
+    "direction_x":
+        u"\u4f7f\u7528\u9a71\u52a8\u53d8\u6362\u7684\u5c40\u90e8 X \u8f74\u4f5c\u4e3a\u4e3b\u8981\u6d4b\u91cf\u65b9\u5411\u3002\n\n"
+        u"\u5178\u578b\u7528\u9014\uff1a\u4e3b\u8981\u56f4\u7ed5 X \u8f74\u65cb\u8f6c\u7684\u80a9\u5173\u8282\u3002",
+
+    "direction_y":
+        u"\u4f7f\u7528\u9a71\u52a8\u53d8\u6362\u7684\u5c40\u90e8 Y \u8f74\u4f5c\u4e3a\u4e3b\u8981\u6d4b\u91cf\u65b9\u5411\u3002\n\n"
+        u"\u5178\u578b\u7528\u9014\uff1a\u56f4\u7ed5 Y \u8f74\u5f2f\u66f2\u7684\u810a\u67f1\u6216\u9888\u90e8\u5173\u8282\u3002",
+
+    "direction_z":
+        u"\u4f7f\u7528\u9a71\u52a8\u53d8\u6362\u7684\u5c40\u90e8 Z \u8f74\u4f5c\u4e3a\u4e3b\u8981\u6d4b\u91cf\u65b9\u5411\u3002\n\n"
+        u"\u5178\u578b\u7528\u9014\uff1a\u4e3b\u8981\u56f4\u7ed5 Z \u8f74\u65cb\u8f6c\u7684\u80a2\u4f53\u5173\u8282\u3002",
+
+    # -- Per-option: Interpolation --
+    "interp_linear":
+        u"\u7ebf\u6027\u63d2\u503c - \u6052\u5b9a\u53d8\u5316\u7387\u3002\n\n"
+        u"\u6743\u91cd\u4ece 0 \u5230 1 \u4ee5\u5747\u5300\u901f\u5ea6\u53d8\u5316\u3002\u65e0\u7f13\u52a8\uff0c\u65e0\u52a0\u901f\u3002\u6700\u7b80\u5355\u4e14\u6700\u53ef\u9884\u6d4b\u3002",
+
+    "interp_slow":
+        u"\u6162\u901f\uff08\u7f13\u5165\uff09- \u5f00\u59cb\u7f13\u6162\uff0c\u5411\u672b\u5c3e\u52a0\u901f\u3002\n\n"
+        u"\u6743\u91cd\u8d77\u521d\u7f13\u6162\u4e0a\u5347\uff0c\u7136\u540e\u52a0\u901f\u3002\u9002\u5408\u9700\u8981\u5e73\u7f13\u5f00\u59cb\u7684\u8fd0\u52a8\u3002",
+
+    "interp_fast":
+        u"\u5feb\u901f\uff08\u7f13\u51fa\uff09- \u5f00\u59cb\u5feb\u901f\uff0c\u5411\u672b\u5c3e\u51cf\u901f\u3002\n\n"
+        u"\u6743\u91cd\u8d77\u521d\u5feb\u901f\u53d8\u5316\uff0c\u7136\u540e\u51cf\u6162\u3002\u9002\u5408\u9700\u8981\u5feb\u901f\u542f\u52a8\u7684\u8fd0\u52a8\u3002",
+
+    "interp_smooth1":
+        u"\u5e73\u6ed1 1\uff08\u7f13\u5165\u7f13\u51fa\uff09- \u5f00\u59cb\u548c\u7ed3\u675f\u7f13\u6162\uff0c\u4e2d\u95f4\u8f83\u5feb\u3002\n\n"
+        u"\u6e29\u548c\u7684 S \u66f2\u7ebf\uff0c\u5177\u6709\u9002\u5ea6\u5e73\u6ed1\u3002\u901a\u7528\u7684\u7f13\u52a8\u9009\u62e9\uff0c\u9002\u5408\u81ea\u7136\u8fc7\u6e21\u3002",
+
+    "interp_smooth2":
+        u"\u5e73\u6ed1 2\uff08\u7f13\u5165\u7f13\u51fa\uff0c\u66f4\u5f3a\uff09- \u66f4\u660e\u663e\u7684 S \u66f2\u7ebf\u3002\n\n"
+        u"\u6bd4\u5e73\u6ed1 1 \u66f4\u5f3a\u7684\u7f13\u52a8\u6548\u679c\uff0c\u5f00\u59cb\u548c\u7ed3\u675f\u66f4\u5e73\u5766\u3002\u7528\u4e8e\u66f4\u67d4\u548c\u7684\u8fc7\u6e21\u3002",
+
+    "interp_curve":
+        u"\u66f2\u7ebf - \u5b8c\u5168\u81ea\u5b9a\u4e49\u6e10\u53d8\u66f2\u7ebf\u3002\n\n"
+        u"\u6253\u5f00\u5c5e\u6027\u7f16\u8f91\u5668\u76f4\u63a5\u7f16\u8f91\u6e10\u53d8\u5f62\u72b6\u3002\u63d0\u4f9b\u5bf9\u8870\u51cf\u66f2\u7ebf\u7684\u5b8c\u5168\u63a7\u5236\u3002",
+
+    # -- Per-option: Kernel --
+    "kernel_linear":
+        u"\u7ebf\u6027\u6838\u51fd\u6570: \u03c6(r) = r\n\n"
+        u"\u6700\u7b80\u5355\u7684\u6838\u51fd\u6570 - \u6743\u91cd\u968f\u8ddd\u79bb\u7ebf\u6027\u8870\u51cf\u3002\u5728\u59ff\u6001\u4e4b\u95f4\u4ea7\u751f\u5c16\u9510\u7684\u5e10\u7bf7\u72b6\u8fc7\u6e21\u3002"
+        u"\u534a\u5f84\u7c7b\u578b\u88ab\u5ffd\u7565\uff08\u59cb\u7ec8\u4f7f\u7528\u76f4\u63a5\u8ddd\u79bb\uff09\u3002\n\n"
+        u"\u4f18\u70b9\uff1a\u5feb\u901f\u3001\u53ef\u9884\u6d4b\u3002\n"
+        u"\u7f3a\u70b9\uff1a\u5728\u59ff\u6001\u4f4d\u7f6e\u4e0d\u5149\u6ed1\uff08\u4ec5 C\u2070 \u8fde\u7eed\u6027\uff09\u3002",
+
+    "kernel_gaussian1":
+        u"\u9ad8\u65af 1 \u6838\u51fd\u6570: \u03c6(r) = exp(-r\xb2)\n\n"
+        u"\u6807\u51c6\u949f\u5f62\u66f2\u7ebf\u8870\u51cf\u3002\u6bcf\u4e2a\u59ff\u6001\u5177\u6709\u5e73\u6ed1\u3001\u5706\u6da6\u7684\u5f71\u54cd\u533a\u57df\uff0c\u9010\u6e10\u8870\u51cf\u4e3a\u96f6\u3002"
+        u"\u534a\u5f84\u63a7\u5236\u949f\u5f62\u66f2\u7ebf\u7684\u5bbd\u5ea6\u3002\n\n"
+        u"\u4f18\u70b9\uff1a\u5149\u6ed1\uff08C\u221e\uff09\uff0c\u8868\u73b0\u826f\u597d\uff0c\u6700\u5e38\u7528\u3002\n"
+        u"\u7f3a\u70b9\uff1a\u8fdc\u79bb\u6240\u6709\u59ff\u6001\u65f6\u53ef\u80fd\u4ea7\u751f\u63a5\u8fd1\u96f6\u7684\u6743\u91cd\u3002",
+
+    "kernel_gaussian2":
+        u"\u9ad8\u65af 2 \u6838\u51fd\u6570: \u03c6(r) = exp(-r\xb2/2)\n\n"
+        u"\u9ad8\u65af\u949f\u5f62\u66f2\u7ebf\u7684\u66f4\u5bbd\u53d8\u4f53\u3002'/2' \u5206\u6bcd\u4f7f\u6bcf\u4e2a\u59ff\u6001\u7684\u5f71\u54cd\u6269\u5c55\u66f4\u8fdc\u3002\n\n"
+        u"\u4f18\u70b9\uff1a\u66f4\u5bbd\u7684\u8870\u51cf\uff0c\u8de8\u8fdc\u8ddd\u79bb\u59ff\u6001\u66f4\u5e73\u6ed1\u7684\u6df7\u5408\u3002\n"
+        u"\u7f3a\u70b9\uff1a\u5c40\u90e8\u6027\u8f83\u5dee - \u76f8\u90bb\u59ff\u6001\u53ef\u80fd\u5e72\u6270\u66f4\u591a\u3002",
+
+    "kernel_thin_plate":
+        u"\u8584\u677f\u6837\u6761\u6838\u51fd\u6570: \u03c6(r) = r\xb2 \xb7 ln(r)\n\n"
+        u"\u7075\u611f\u6765\u81ea\u8584\u91d1\u5c5e\u677f\u7684\u7269\u7406\u5f2f\u66f2\u3002\u4ea7\u751f\u975e\u5e38\u5e73\u6ed1\u7684\u63d2\u503c\uff0c\u632f\u8361\u6700\u5c0f\u3002\n\n"
+        u"\u4f18\u70b9\uff1a\u975e\u5e38\u9002\u5408\u5206\u6563\u6570\u636e\uff0c\u6700\u5c0f\u8fc7\u51b2\u3002\n"
+        u"\u7f3a\u70b9\uff1a\u975e\u4e25\u683c\u6b63\u5b9a - \u53ef\u80fd\u9700\u8981\u6b63\u5219\u5316\u3002",
+
+    "kernel_multi_quadratic":
+        u"\u591a\u91cd\u4e8c\u6b21\u53cc\u8c03\u548c\u6838\u51fd\u6570: \u03c6(r) = \u221a(1 + r\xb2)\n\n"
+        u"\u4e00\u79cd\u65e0\u9650\u589e\u957f\u7684\u53cc\u8c03\u548c\u6838\u51fd\u6570\u3002\u4ea7\u751f\u5168\u5c40\u5e73\u6ed1\u7684\u63d2\u503c\uff0c\u8fdc\u8ddd\u79bb\u59ff\u6001\u4ecd\u6709\u8d21\u732e\u3002\n\n"
+        u"\u4f18\u70b9\uff1a\u975e\u5e38\u5e73\u6ed1\uff0c\u9002\u5408\u5927\u578b\u59ff\u6001\u96c6\u3002\n"
+        u"\u7f3a\u70b9\uff1a\u8fdc\u8ddd\u79bb\u59ff\u6001\u53ef\u80fd\u5f71\u54cd\u8fc7\u5927\uff1b\u53ef\u80fd\u8f83\u6162\u3002",
+
+    "kernel_inv_multi_quadratic":
+        u"\u9006\u591a\u91cd\u4e8c\u6b21\u53cc\u8c03\u548c\u6838\u51fd\u6570: \u03c6(r) = 1/\u221a(1 + r\xb2)\n\n"
+        u"\u591a\u91cd\u4e8c\u6b21\u7684\u9006\u3002\u8fdc\u8ddd\u79bb\u59ff\u6001\u7684\u5f71\u54cd\u8870\u51cf\u4e3a\u96f6\uff0c\u63d0\u4f9b\u66f4\u5c40\u90e8\u7684\u6df7\u5408\u3002\n\n"
+        u"\u4f18\u70b9\uff1a\u5149\u6ed1\u4e14\u5c40\u90e8\u5316\uff0c\u59cb\u7ec8\u4e3a\u6b63\u3002\n"
+        u"\u7f3a\u70b9\uff1a\u8fdc\u8ddd\u79bb\u59ff\u6001\u53ef\u80fd\u4ea7\u751f\u975e\u5e38\u5c0f\u7684\u6743\u91cd\u3002",
+
+    # -- Per-option: Radius Type --
+    "rtype_mean_distance":
+        u"\u5e73\u5747\u8ddd\u79bb - \u534a\u5f84\u8bbe\u7f6e\u4e3a\u6240\u6709\u59ff\u6001\u4e4b\u95f4\u6210\u5bf9\u8ddd\u79bb\u7684\u5e73\u5747\u503c\u3002\n\n"
+        u"\u4e00\u79cd\u7a33\u5065\u7684\u81ea\u52a8\u9009\u62e9\uff0c\u9002\u5e94\u59ff\u6001\u6570\u636e\u7684\u6574\u4f53\u5206\u5e03\u3002\u5728\u5927\u591a\u6570\u60c5\u51b5\u4e0b\u6548\u679c\u826f\u597d\u3002",
+
+    "rtype_variance":
+        u"\u65b9\u5dee - \u534a\u5f84\u8bbe\u7f6e\u4e3a\u59ff\u6001\u95f4\u8ddd\u79bb\u7684\u7edf\u8ba1\u65b9\u5dee\u3002\n\n"
+        u"\u5f53\u59ff\u6001\u5206\u5e03\u4e0d\u5747\u5300\u65f6\uff0c\u4ea7\u751f\u6bd4\u5e73\u5747\u8ddd\u79bb\u66f4\u5bbd\u7684\u534a\u5f84\u3002\u9002\u5408\u59ff\u6001\u805a\u96c6\u7684\u60c5\u51b5\u3002",
+
+    "rtype_std_dev":
+        u"\u6807\u51c6\u5dee - \u534a\u5f84\u4e3a\u65b9\u5dee\u7684\u5e73\u65b9\u6839\u3002\n\n"
+        u"\u4ecb\u4e8e\u5e73\u5747\u8ddd\u79bb\u548c\u65b9\u5dee\u4e4b\u95f4\u7684\u5e73\u8861\u9009\u62e9\u3002\u901a\u5e38\u63d0\u4f9b\u6700\u81ea\u7136\u7684\u8fc7\u6e21\u6548\u679c\u3002",
+
+    "rtype_custom":
+        u"\u81ea\u5b9a\u4e49 - \u4f7f\u7528\u534a\u5f84\u5fae\u8c03\u5668\u624b\u52a8\u8bbe\u7f6e\u534a\u5f84\u503c\u3002\n\n"
+        u"\u5b8c\u5168\u63a7\u5236\u5f71\u54cd\u5bbd\u5ea6\u3002\u8f83\u5c0f\u7684\u503c\u4ea7\u751f\u66f4\u9510\u5229\u7684\u8fc7\u6e21\uff1b\u8f83\u5927\u7684\u503c\u4ea7\u751f\u66f4\u5e73\u6ed1\u7684\u6df7\u5408\u3002\n"
+        u"\u7528\u4e8e\u5fae\u8c03\u8fb9\u7f18\u60c5\u51b5\u3002",
+
+    # -- Per-option: RBF Mode --
+    "rbf_mode_generic":
+        u"\u901a\u7528 RBF - \u5728\u9010\u5c5e\u6027\u7a7a\u95f4\u4e2d\u8ba1\u7b97\u8ddd\u79bb\u3002\n\n"
+        u"\u6bcf\u4e2a\u9a71\u52a8\u5c5e\u6027\uff08\u5e73\u79fb X\u3001\u65cb\u8f6c Y \u7b49\uff09\u88ab\u89c6\u4e3a\u72ec\u7acb\u7ef4\u5ea6\u3002\u4f7f\u7528\u9009\u5b9a\u7684\u8ddd\u79bb\u7c7b\u578b"
+        u"\uff08\u6b27\u51e0\u91cc\u5f97\u6216\u89d2\u5ea6\uff09\u6d4b\u91cf\u8ddd\u79bb\u3002\n\n"
+        u"\u6700\u9002\u5408\uff1a\u5c5e\u6027\u9a71\u52a8\u8bbe\u7f6e\u3001\u975e\u53d8\u6362\u9a71\u52a8\u5668\u3002",
+
+    "rbf_mode_matrix":
+        u"\u77e9\u9635 RBF - \u4f7f\u7528\u5b8c\u6574 4\u00d74 \u53d8\u6362\u77e9\u9635\u8ba1\u7b97\u8ddd\u79bb\u3002\n\n"
+        u"\u9a71\u52a8\u5668\u7684\u4e16\u754c\u7a7a\u95f4\u77e9\u9635\u88ab\u5206\u89e3\u7528\u4e8e\u8ddd\u79bb\u8ba1\u7b97\uff0c\u53ef\u9009\u6cbf\u6307\u5b9a\u8f74\u8fdb\u884c\u626d\u8f6c\u5206\u89e3\u3002\n\n"
+        u"\u6700\u9002\u5408\uff1a\u53d8\u6362\u9a71\u52a8\u8bbe\u7f6e\u3001\u57fa\u4e8e\u5173\u8282\u7684\u7ed1\u5b9a\uff08\u65cb\u8f6c\u987a\u5e8f\u5f88\u91cd\u8981\u7684\u60c5\u51b5\uff09\u3002",
+
+    # -- Per-option: Distance Type --
+    "dist_euclidean":
+        u"\u6b27\u51e0\u91cc\u5f97\u8ddd\u79bb - \u5c5e\u6027\u7a7a\u95f4\u4e2d\u7684\u76f4\u7ebf\u8ddd\u79bb\u3002\n\n"
+        u"d = \u221a(\u03a3(a_i - b_i)\xb2)\n\n"
+        u"\u6807\u51c6\u8ddd\u79bb\u5ea6\u91cf\u3002\u9002\u5408\u5e73\u79fb\u548c\u4e00\u822c\u6570\u503c\u5c5e\u6027\u3002\u7531\u4e8e\u4e07\u5411\u9501\u6548\u5e94\uff0c\u53ef\u80fd\u4e0d\u592a\u9002\u5408\u7eaf\u65cb\u8f6c\u5c5e\u6027\u3002",
+
+    "dist_angle":
+        u"\u89d2\u8ddd\u79bb - \u6d4b\u91cf\u5c5e\u6027\u5411\u91cf\u4e4b\u95f4\u7684\u89d2\u5ea6\u3002\n\n"
+        u"\u5c06\u6bcf\u7ec4\u9a71\u52a8\u5c5e\u6027\u89c6\u4e3a\u65b9\u5411\u5411\u91cf\u5e76\u8ba1\u7b97\u5b83\u4eec\u4e4b\u95f4\u7684\u89d2\u5ea6\u3002"
+        u"\u9002\u5408\u4ec5\u65cb\u8f6c\u7684\u9a71\u52a8\u5668\uff0c\u5176\u4e2d\u5927\u5c0f\u65e0\u5173\u7d27\u8981\uff0c\u53ea\u5173\u6ce8\u65b9\u5411\u3002",
+
+    # -- Per-option: Twist Axis --
+    "twist_axis_x":
+        u"\u56f4\u7ed5 X \u8f74\u5206\u89e3\u626d\u8f6c\u3002\n\n"
+        u"\u65cb\u8f6c\u77e9\u9635\u88ab\u5206\u89e3\u4e3a\u56f4\u7ed5 X \u7684\u626d\u8f6c\u5206\u91cf\u548c\u5782\u76f4\u4e8e X \u7684\u6446\u52a8\u5206\u91cf\u3002"
+        u"\u9002\u7528\u4e8e\u4e3b\u8981\u6eda\u52a8\u8f74\u4e3a X \u7684\u5173\u8282\uff08\u5982\u524d\u81c2\u626d\u8f6c\uff09\u3002",
+
+    "twist_axis_y":
+        u"\u56f4\u7ed5 Y \u8f74\u5206\u89e3\u626d\u8f6c\u3002\n\n"
+        u"\u65cb\u8f6c\u77e9\u9635\u88ab\u5206\u89e3\u4e3a\u56f4\u7ed5 Y \u7684\u626d\u8f6c\u5206\u91cf\u548c\u5782\u76f4\u4e8e Y \u7684\u6446\u52a8\u5206\u91cf\u3002"
+        u"\u9002\u7528\u4e8e\u4e3b\u8981\u6eda\u52a8\u8f74\u4e3a Y \u7684\u5173\u8282\u3002",
+
+    "twist_axis_z":
+        u"\u56f4\u7ed5 Z \u8f74\u5206\u89e3\u626d\u8f6c\u3002\n\n"
+        u"\u65cb\u8f6c\u77e9\u9635\u88ab\u5206\u89e3\u4e3a\u56f4\u7ed5 Z \u7684\u626d\u8f6c\u5206\u91cf\u548c\u5782\u76f4\u4e8e Z \u7684\u6446\u52a8\u5206\u91cf\u3002"
+        u"\u9002\u7528\u4e8e\u4e3b\u8981\u6eda\u52a8\u8f74\u4e3a Z \u7684\u5173\u8282\u3002",
+}
+
+_TABLES = {"en": _EN, "zh": _ZH}
+
+
+def get_help_text(key):
+    """Return the help text for *key* in the current UI language."""
+    lang = current_language()
+    table = _TABLES.get(lang, _EN)
+    return table.get(key, _EN.get(key, ""))

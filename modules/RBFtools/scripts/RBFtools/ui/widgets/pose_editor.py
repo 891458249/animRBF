@@ -1,0 +1,151 @@
+# -*- coding: utf-8 -*-
+"""
+Pose editor — composes two :class:`AttributeList` widgets (driver / driven)
+and a :class:`PoseTable`.
+
+This is the bottom half of the main window when in RBF mode.
+Signals only — no ``maya.cmds``.
+"""
+
+from __future__ import absolute_import
+
+from RBFtools.ui.compat import QtWidgets, QtCore
+from RBFtools.ui.i18n import tr
+from RBFtools.ui.widgets.collapsible import CollapsibleFrame
+from RBFtools.ui.widgets.attribute_list import AttributeList
+from RBFtools.ui.widgets.pose_table import PoseTable
+
+
+class PoseEditor(CollapsibleFrame):
+    """Full RBF Pose Editor section."""
+
+    # Forwarded from children
+    selectNodeRequested = QtCore.Signal(str)          # role
+    filtersChanged = QtCore.Signal(str, dict)         # (role, filters)
+    addPoseRequested = QtCore.Signal()
+    applyRequested = QtCore.Signal()
+    connectRequested = QtCore.Signal()
+    reloadRequested = QtCore.Signal()
+    recallPose = QtCore.Signal(int)
+    updatePose = QtCore.Signal(int)
+    deletePose = QtCore.Signal(int)
+    autoFillChanged = QtCore.Signal(bool)
+
+    def __init__(self, parent=None):
+        super(PoseEditor, self).__init__(
+            title=tr("rbf_pose_editor"), parent=parent)
+        self._build()
+
+    # ------------------------------------------------------------------
+    # Build
+    # ------------------------------------------------------------------
+
+    def _build(self):
+        lay = self.content_layout()
+
+        # Auto-fill checkbox
+        self._cb_auto = QtWidgets.QCheckBox(tr("auto_fill_bs"))
+        self._cb_auto.toggled.connect(self.autoFillChanged)
+        lay.addWidget(self._cb_auto)
+
+        lay.addWidget(self._separator())
+
+        # Driver / Driven split
+        split = QtWidgets.QHBoxLayout()
+
+        self._driver_list = AttributeList("driver")
+        self._driven_list = AttributeList("driven")
+
+        split.addWidget(self._driver_list, 1)
+
+        divider = QtWidgets.QFrame()
+        divider.setFrameShape(QtWidgets.QFrame.VLine)
+        divider.setFrameShadow(QtWidgets.QFrame.Sunken)
+        split.addWidget(divider)
+
+        split.addWidget(self._driven_list, 1)
+        lay.addLayout(split)
+
+        # Wire child signals
+        self._driver_list.selectNodeRequested.connect(
+            lambda: self.selectNodeRequested.emit("driver"))
+        self._driven_list.selectNodeRequested.connect(
+            lambda: self.selectNodeRequested.emit("driven"))
+        self._driver_list.filtersChanged.connect(self.filtersChanged)
+        self._driven_list.filtersChanged.connect(self.filtersChanged)
+
+        lay.addWidget(self._separator())
+
+        # Pose table
+        self._pose_table = PoseTable()
+        lay.addWidget(self._pose_table, 1)
+
+        # Wire pose table signals
+        self._pose_table.recallPose.connect(self.recallPose)
+        self._pose_table.updatePose.connect(self.updatePose)
+        self._pose_table.deletePose.connect(self.deletePose)
+
+        lay.addWidget(self._separator())
+
+        # Bottom buttons
+        btn_row = QtWidgets.QHBoxLayout()
+        self._btn_add = QtWidgets.QPushButton(tr("add_pose"))
+        self._btn_apply = QtWidgets.QPushButton(tr("apply"))
+        self._btn_connect = QtWidgets.QPushButton(tr("connect"))
+        self._btn_reload = QtWidgets.QPushButton(tr("reload"))
+
+        for btn in (self._btn_add, self._btn_apply,
+                    self._btn_connect, self._btn_reload):
+            btn_row.addWidget(btn)
+
+        self._btn_add.clicked.connect(self.addPoseRequested)
+        self._btn_apply.clicked.connect(self.applyRequested)
+        self._btn_connect.clicked.connect(self.connectRequested)
+        self._btn_reload.clicked.connect(self.reloadRequested)
+        lay.addLayout(btn_row)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    @property
+    def driver_list(self):
+        return self._driver_list
+
+    @property
+    def driven_list(self):
+        return self._driven_list
+
+    @property
+    def pose_table(self):
+        return self._pose_table
+
+    def set_auto_fill(self, checked):
+        blocked = self._cb_auto.blockSignals(True)
+        self._cb_auto.setChecked(checked)
+        self._cb_auto.blockSignals(blocked)
+
+    def auto_fill(self):
+        return self._cb_auto.isChecked()
+
+    def retranslate(self):
+        self.set_title(tr("rbf_pose_editor"))
+        self._cb_auto.setText(tr("auto_fill_bs"))
+        self._driver_list.retranslate()
+        self._driven_list.retranslate()
+        self._pose_table.retranslate()
+        self._btn_add.setText(tr("add_pose"))
+        self._btn_apply.setText(tr("apply"))
+        self._btn_connect.setText(tr("connect"))
+        self._btn_reload.setText(tr("reload"))
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _separator():
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.HLine)
+        line.setFrameShadow(QtWidgets.QFrame.Sunken)
+        return line
