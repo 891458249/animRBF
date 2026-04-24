@@ -104,6 +104,11 @@ public:
     static double getPoseDelta(std::vector<double> vec1, std::vector<double> vec2, int distType);
     static double getRadius(std::vector<double> vec1, std::vector<double> vec2);
     static double getAngle(std::vector<double> vec1, std::vector<double> vec2);
+    static double twistWrap(double tau1, double tau2);
+    static double getMatrixModeLinearDistance(const std::vector<double> &vec1,
+                                              const std::vector<double> &vec2);
+    static double getQuatDistance(const std::vector<double> &q1,
+                                  const std::vector<double> &q2);
     static void getActivations(BRMatrix &mat, double width, short kernelType);
     static double interpolateRbf(double value, double width, short kernelType);
     static std::vector<double> normalizeVector(std::vector<double> vec, std::vector<double> factors);

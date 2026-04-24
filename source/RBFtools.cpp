@@ -1939,11 +1939,22 @@ BRMatrix RBFtools::getDistances(BRMatrix poseMat, int distType)
 double RBFtools::getPoseDelta(std::vector<double> vec1, std::vector<double> vec2, int distType)
 {
     double dist = 0.0;
+    const size_t n = vec1.size();
     if (distType == 0)
-        dist = getRadius(vec1, vec2);
+    {
+        // Matrix-mode layout packs (vx, vy, vz, twist) per driver. Plain Euclidean on the
+        // twist scalar treats +179 deg vs -179 deg as ~358 deg apart, collapsing the kernel
+        // activation near the 2*pi seam. Route the 4k layout to a wrap-aware L2 distance that
+        // keeps xyz chord semantics (preserves existing radius calibration) and only folds
+        // the twist delta onto the 2*pi circle. See docs/设计文档/RBFtools_v5_addendum_20260424.md.
+        if (n >= 4 && n % 4 == 0 && n == vec2.size())
+            dist = getMatrixModeLinearDistance(vec1, vec2);
+        else
+            dist = getRadius(vec1, vec2);
+    }
     else
     {
-        if (vec1.size() == 3 && vec2.size() == 3)
+        if (n == 3 && vec2.size() == 3)
             dist = getAngle(vec1, vec2);
         else
             dist = getRadius(vec1, vec2);
@@ -1987,9 +1998,82 @@ double RBFtools::getRadius(std::vector<double> vec1, std::vector<double> vec2)
 //
 double RBFtools::getAngle(std::vector<double> vec1, std::vector<double> vec2)
 {
+    // WHY: vec is a 3-D axis vector, and MVector::angle returns unsigned [0, pi] already —
+    // no |q . q| absolute-value concern applies here (the v5 PART D.3 note assumed a 4-D
+    // quaternion input that this code path does not actually receive). For quaternion inputs
+    // arriving via the M2.1 encoding work, use getQuatDistance instead.
     MVector v1(vec1[0], vec1[1], vec1[2]);
     MVector v2(vec2[0], vec2[1], vec2[2]);
     return v1.angle(v2);
+}
+
+
+//
+// Description:
+//      Fold a twist-angle delta onto the 2*pi circle so +179 deg vs -179 deg
+//      is measured as ~2 deg instead of ~358 deg. Input taus are the output
+//      of getTwistAngle (2 * atan2), whose range is (-2*pi, 2*pi].
+//
+double RBFtools::twistWrap(double tau1, double tau2)
+{
+    const double TWO_PI = 2.0 * M_PI;
+    double d = fabs(tau1 - tau2);
+    d = fmod(d, TWO_PI);
+    if (d > M_PI)
+        d = TWO_PI - d;
+    return d;
+}
+
+
+//
+// Description:
+//      Wrap-aware L2 distance for Matrix-mode driver vectors packed as
+//      [vx, vy, vz, twist] * driverCount. xyz keeps chord (Euclidean)
+//      semantics to preserve existing radius calibration; only the twist
+//      component is folded onto a 2*pi circle. Aggregation across driver
+//      blocks is L2.
+//
+double RBFtools::getMatrixModeLinearDistance(const std::vector<double> &vec1,
+                                             const std::vector<double> &vec2)
+{
+    double sumSq = 0.0;
+    const size_t blocks = vec1.size() / 4;
+    for (size_t k = 0; k < blocks; ++k)
+    {
+        const size_t base = k * 4;
+        for (size_t i = 0; i < 3; ++i)
+        {
+            const double d = vec1[base + i] - vec2[base + i];
+            sumSq += d * d;
+        }
+        const double w = twistWrap(vec1[base + 3], vec2[base + 3]);
+        sumSq += w * w;
+    }
+    return sqrt(sumSq);
+}
+
+
+//
+// Description:
+//      Quaternion distance d(q1, q2) = 1 - |q1 . q2| (v5 PART G.2). The
+//      absolute value collapses the q == -q double cover so antipodal
+//      quaternions register as identical rotations.
+//
+// NOTE (M1.1): Declared + implemented alongside the other distance helpers
+// but INTENTIONALLY UNWIRED. The M2.1 Quaternion input encoding is the first
+// caller; wiring it now would also implicitly fix the v5 addendum 2026-04-24
+// "Bug 2" (Matrix+Angle silent fallback to Euclidean), which the user has
+// scoped out of this commit to keep blast radius minimal.
+//
+double RBFtools::getQuatDistance(const std::vector<double> &q1,
+                                 const std::vector<double> &q2)
+{
+    double dot = 0.0;
+    const size_t n = (q1.size() < q2.size() ? q1.size() : q2.size());
+    const size_t stop = (n < 4 ? n : 4);
+    for (size_t i = 0; i < stop; ++i)
+        dot += q1[i] * q2[i];
+    return 1.0 - fabs(dot);
 }
 
 
