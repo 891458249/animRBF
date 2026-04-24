@@ -93,3 +93,15 @@ FILTER_DEFAULTS = {
 }
 
 FILTER_KEYS = list(FILTER_DEFAULTS.keys())
+
+# ------------------------------------------------------------------
+# Scale-channel attribute names (M1.2 — Output Base Value)
+# ------------------------------------------------------------------
+
+# Scale channels must anchor at 1.0 regardless of captured scene values
+# to defend against t-pose mesh collapse when a driven node is transiently
+# at scale=0.  Both Maya long and short names are matched exactly.
+SCALE_ATTR_NAMES = frozenset({
+    "scaleX", "scaleY", "scaleZ",
+    "sx", "sy", "sz",
+})

@@ -133,4 +133,61 @@
 
 ---
 
+---
+
+## §M1.2 — Output Base Value + outputIsScale 实施决议
+
+主文档 PART C.2.4 / 铁律 B6 的方案落地时做以下三处细化，对主文档无冲突，仅补充：
+
+### M1.2.A — Baseline 源头优先级
+
+`capture_output_baselines(driven_node, driven_attrs, poses)` 按以下顺序取每输出维度的 `base_value`：
+
+1. **`poses[0]`（首选）**：当 `poses[0].inputs` 全 ≈ 0（通过 `float_eq`）时，视为 rest row，用 `poses[0].values[i]` 作基线。确定性、从存储数据复现。
+2. **当前场景值（fallback）**：否则读 `driven_node.attr`，并发 `cmds.warning` 提示用户确保 rest pose。
+3. **0.0（保底）**：两者都不可用时兜底。
+
+**Scale 通道始终覆盖为 1.0**，忽略上述优先级结果，防御 rest 为 0 的场景塌陷。
+
+### M1.2.B — 运行时重解触发
+
+`attributeAffects(baseValue → output)` 会触发 `compute()`，但不会自动置 `evalInput = true`；若不处理，DG 会复用旧 `wMat`，在用户运行时改 `baseValue` 后产出错误输出。
+
+**方案**：沿用代码已有的 `globalPoseCount` compare-on-read 模式。新增两个私有成员：
+
+```cpp
+std::vector<double> prevBaseValueArr;
+std::vector<bool>   prevOutputIsScaleArr;
+```
+
+`compute()` 入口读完新数组后与 prev 比较，不一致则 `evalInput = true` 并更新 prev。这样 live-edit `baseValue` / `outputIsScale` 会强制一次 training 重跑。仅 Generic 模式下激活；Matrix 模式数组始终空，比较总是相等，不触发无意义重训。
+
+### M1.2.C — 老 rig 升级策略
+
+不引入 schema version 门控。`apply_poses` 检测到 "节点有 poses 但 baseValue 数组为空" → 发 `cmds.warning("Upgrading node <name> to v5 baseline schema")`。日志即留痕，不弹窗不阻断。
+
+### M1.2.D — 加-减顺序与既有后处理的关系
+
+C++ 侧 compute() 的后处理循环原顺序：
+
+```
+1. 取 δ = weightsArray[i]
+2. if !allowNegative: max(δ, 0)
+3. if useInterpolation: curve(δ)
+4. δ *= scaleVal
+5. 写回
+```
+
+M1.2 在 step 4 后、step 5 前插入 `δ += anchor`（仅 Generic 模式）。这样：
+
+- `allowNegative=false` 钳制 δ 不能低于 0 → 输出 ≥ anchor（"永不低于 rest"）；scale 通道 ≥ 1.0。
+- `scaleVal` 仅放大 delta，不动 anchor → 用户调 scale 不会移动 rest 基准。
+- `interpolateWeight` 作用于 δ 的 [0,1] 曲线语义保持（Matrix 模式行为不变）。
+
+### M1.2.E — 不激活路径
+
+Matrix 模式下 `weightsArray` 索引是 pose id（blendShape blend weight），不是输出维度索引；baseline 加回在 C++ 侧被 `genericMode` gate 抑制。`baseValue[]` / `outputIsScale[]` 数组允许存在但不参与 Matrix 模式计算，也不会触发重解（prev 数组始终空，比较恒等）。
+
+---
+
 **本文档结束。**

@@ -81,6 +81,8 @@ MObject RBFtools::poseValues;
 MObject RBFtools::restInput;
 // controls
 MObject RBFtools::allowNegative;
+MObject RBFtools::baseValue;
+MObject RBFtools::outputIsScale;
 MObject RBFtools::radiusType;
 MObject RBFtools::radius;
 MObject RBFtools::distanceType;
@@ -363,7 +365,28 @@ MStatus RBFtools::initialize()
     nAttr.setWritable(true);
     nAttr.setArray(true);
     nAttr.setUsesArrayDataBuilder(true);
-    
+
+    // M1.2: per-output-dimension baseline. Only consulted in Generic mode.
+    // Subtracted from poseValue[i][c] before the weight solve; added back to
+    // the final output[c] after kernel evaluation. See v5 PART C.2.4 / G.1.
+    baseValue = nAttr.create("baseValue", "bv", MFnNumericData::kDouble);
+    nAttr.setArray(true);
+    nAttr.setUsesArrayDataBuilder(true);
+    nAttr.setKeyable(false);
+    nAttr.setStorable(true);
+    nAttr.setDefault(0.0);
+
+    // M1.2: per-output-dimension scale-channel flag. When true, the training
+    // baseline is forced to 1.0 regardless of baseValue[c] — this protects
+    // scale channels from being trained with a 0.0 baseline and collapsing
+    // the mesh on t-pose. See v5 铁律 B6.
+    outputIsScale = nAttr.create("outputIsScale", "ois", MFnNumericData::kBoolean);
+    nAttr.setArray(true);
+    nAttr.setUsesArrayDataBuilder(true);
+    nAttr.setKeyable(false);
+    nAttr.setStorable(true);
+    nAttr.setDefault(false);
+
     outWeight = nAttr.create("outWeight", "ow", MFnNumericData::kDouble);
     nAttr.setWritable(true);
     nAttr.setKeyable(false);
@@ -582,6 +605,8 @@ MStatus RBFtools::initialize()
     addAttribute(poseInput);
     addAttribute(poseValue);
     addAttribute(output);
+    addAttribute(baseValue);
+    addAttribute(outputIsScale);
     addAttribute(poseMode);
     addAttribute(twistAxis);
     addAttribute(opposite);
@@ -620,6 +645,8 @@ MStatus RBFtools::initialize()
     attributeAffects(RBFtools::active, RBFtools::output);
     attributeAffects(RBFtools::allowNegative, RBFtools::output);
     attributeAffects(RBFtools::angle, RBFtools::output);
+    attributeAffects(RBFtools::baseValue, RBFtools::output);
+    attributeAffects(RBFtools::outputIsScale, RBFtools::output);
     attributeAffects(RBFtools::radius, RBFtools::output);
     attributeAffects(RBFtools::centerAngle, RBFtools::output);
     attributeAffects(RBFtools::curveRamp, RBFtools::output);
@@ -1070,7 +1097,49 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
 
                 solveCount = poseCount;
             }
-            
+
+            // M1.2: read per-output baseline + isScale arrays aligned to
+            // solveCount. Generic mode subtracts the per-dim anchor before
+            // the weight solve and re-adds it after inference; Matrix mode
+            // (blendShape blend-weight output) has no baseline semantics
+            // and leaves the arrays zeroed/false. Sparse index handling
+            // mirrors getPoseData's jumpToElement pattern.
+            std::vector<double> baseValueArr(solveCount, 0.0);
+            std::vector<bool>   outputIsScaleArr(solveCount, false);
+            if (genericMode && solveCount > 0)
+            {
+                MArrayDataHandle bvHandle = data.inputArrayValue(baseValue, &status);
+                if (status == MStatus::kSuccess)
+                {
+                    for (unsigned int jj = 0; jj < solveCount; ++jj)
+                    {
+                        if (bvHandle.jumpToElement(jj) == MStatus::kSuccess)
+                            baseValueArr[jj] = bvHandle.inputValue().asDouble();
+                    }
+                }
+                MArrayDataHandle isHandle = data.inputArrayValue(outputIsScale, &status);
+                if (status == MStatus::kSuccess)
+                {
+                    for (unsigned int jj = 0; jj < solveCount; ++jj)
+                    {
+                        if (isHandle.jumpToElement(jj) == MStatus::kSuccess)
+                            outputIsScaleArr[jj] = isHandle.inputValue().asBool();
+                    }
+                }
+
+                // Trip a re-solve when the baseline spec changed since last
+                // compute. attributeAffects alone would reuse the cached
+                // wMat and produce incorrect output after the user edits
+                // baseValue / outputIsScale live.
+                if (baseValueArr != prevBaseValueArr ||
+                    outputIsScaleArr != prevOutputIsScaleArr)
+                {
+                    evalInput = true;
+                    prevBaseValueArr = baseValueArr;
+                    prevOutputIsScaleArr = outputIsScaleArr;
+                }
+            }
+
             // Store the pose values for debugging.
             // The original values get normalized before solving
             // therefore, a copy needs to be kept for when the solve
@@ -1150,6 +1219,20 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         y = matValues.getColumnVector(c);
                         //BRMatrix().showVector(y, MString(MString("values ") + c));
 
+                        // M1.2: subtract per-dimension baseline. Scale
+                        // channels always anchor at 1.0 to defend against
+                        // t-pose mesh collapse when rest happens to be 0.
+                        // Matrix mode is one-hot and bypassed here.
+                        if (genericMode)
+                        {
+                            const double anchor = outputIsScaleArr[c] ? 1.0 : baseValueArr[c];
+                            if (anchor != 0.0)
+                            {
+                                for (size_t yr = 0; yr < y.size(); ++yr)
+                                    y[yr] -= anchor;
+                            }
+                        }
+
                         // Copy the activation matrix because it gets
                         // modified during the solving process.
                         BRMatrix solveMat = linMat;
@@ -1210,8 +1293,20 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     if (useInterpolationVal)
                         value = interpolateWeight(value, interVal);
 
+                    value *= scaleVal;
+
+                    // M1.2: add per-dimension anchor back in Generic mode,
+                    // *after* allowNegative / interpolateWeight / scale so
+                    // those legacy controls keep shaping the delta (not the
+                    // absolute output). Matrix-mode weightsArray indexes
+                    // poses, not output dims, so no add-back.
+                    if (genericMode && i < outputIsScaleArr.size())
+                    {
+                        value += outputIsScaleArr[i] ? 1.0 : baseValueArr[i];
+                    }
+
                     // Set the final weight.
-                    weightsArray.set(value * scaleVal, i);
+                    weightsArray.set(value, i);
                 }
             }
             // In case there are no poses generate a default value at

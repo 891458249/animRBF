@@ -31,6 +31,7 @@ from RBFtools.constants import (
     NODE_TYPE,
     FILTER_DEFAULTS,
     FILTER_VAR_TEMPLATE,
+    SCALE_ATTR_NAMES,
 )
 
 
@@ -480,7 +481,7 @@ def clear_node_data(node):
         return get_transform(node)
 
     with undo_chunk("RBFtools: clear node data"):
-        for attr in ("input", "poses", "output"):
+        for attr in ("input", "poses", "output", "baseValue", "outputIsScale"):
             try:
                 indices = cmds.getAttr(
                     "{}.{}".format(shape, attr), multiIndices=True) or []
@@ -1039,6 +1040,168 @@ def _write_pose_to_node(shape, sequential_idx, pose):
                 sequential_idx, i, exc))
 
 
+# =====================================================================
+#  11b. Output baselines — Milestone 1.2 (v5 PART C.2.4 / 铁律 B6)
+# =====================================================================
+
+
+def _is_scale_attr(attr_name):
+    """Return ``True`` if *attr_name* names a Maya scale channel.
+
+    Matches exact long (``scaleX/Y/Z``) and short (``sx/sy/sz``) names.
+    Used to force a 1.0 training baseline on scale outputs so a
+    transient driven.scale == 0 at Apply time cannot silently poison
+    the solver and collapse the mesh on t-pose recall.
+    """
+    return attr_name in SCALE_ATTR_NAMES
+
+
+def capture_output_baselines(driven_node, driven_attrs, poses=None):
+    """Collect per-output ``(base_value, is_scale)`` for the driven attrs.
+
+    Source priority (v5 addendum 2026-04-24 §M1.2):
+
+    1. If *poses* is provided AND ``poses[0]`` has all driver inputs
+       ≈ 0 (the rest pose by convention), use ``poses[0].values[i]``
+       as the baseline. Deterministic, reproducible from stored data.
+    2. Otherwise fall back to the current scene value at
+       ``driven_node.attr``. Emits ``cmds.warning`` because this
+       depends on the user having the rig in rest pose at Apply time.
+
+    **Scale channels always override the source to 1.0** regardless of
+    captured value, as a defense against pose[0] / scene being at 0.
+
+    Parameters
+    ----------
+    driven_node : str
+        The node whose attributes are driven by ``output[]``.
+    driven_attrs : list[str]
+        Ordered attribute names (same order as the node's ``output[]``).
+    poses : list[PoseData] or None, optional
+        Full pose list. When provided and ``poses[0]`` is a rest pose,
+        ``poses[0].values`` acts as the baseline source.
+
+    Returns
+    -------
+    list[tuple[float, bool]]
+        ``[(base_value, is_scale), ...]`` indexed by ``driven_attrs``.
+    """
+    rest_from_pose0 = None
+    if poses and len(poses) > 0:
+        p0 = poses[0]
+        if p0.inputs and all(float_eq(v, 0.0) for v in p0.inputs):
+            rest_from_pose0 = list(p0.values)
+
+    if rest_from_pose0 is None and _exists(driven_node):
+        cmds.warning(
+            "capture_output_baselines: no rest-pose row found in pose[0]; "
+            "falling back to current scene value on '{}' — ensure the rig "
+            "is in rest pose before Apply.".format(driven_node))
+
+    baselines = []
+    for i, attr in enumerate(driven_attrs):
+        is_scale = _is_scale_attr(attr)
+        if is_scale:
+            base_value = 1.0
+        elif rest_from_pose0 is not None and i < len(rest_from_pose0):
+            base_value = float(rest_from_pose0[i])
+        else:
+            plug = "{}.{}".format(driven_node, attr)
+            try:
+                base_value = float(cmds.getAttr(plug))
+            except Exception as exc:
+                cmds.warning(
+                    "capture_output_baselines: getAttr {} failed: {}; "
+                    "using 0.0".format(plug, exc))
+                base_value = 0.0
+        baselines.append((base_value, is_scale))
+    return baselines
+
+
+def write_output_baselines(node, baselines):
+    """Write ``(base_value, is_scale)`` pairs onto the solver node.
+
+    Fills ``shape.baseValue[i]`` and ``shape.outputIsScale[i]`` for each
+    index *i* in *baselines*. No-op if the shape does not exist; each
+    per-index write is guarded so one failure does not abort the rest.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    for i, (bv, is_scale) in enumerate(baselines):
+        bv_plug = "{}.baseValue[{}]".format(shape, i)
+        is_plug = "{}.outputIsScale[{}]".format(shape, i)
+        try:
+            cmds.setAttr(bv_plug, float(bv))
+        except Exception as exc:
+            cmds.warning("write_output_baselines: setAttr {} failed: {}".format(
+                bv_plug, exc))
+        try:
+            cmds.setAttr(is_plug, bool(is_scale))
+        except Exception as exc:
+            cmds.warning("write_output_baselines: setAttr {} failed: {}".format(
+                is_plug, exc))
+
+
+def read_output_baselines(node):
+    """Read ``(base_value, is_scale)`` back from the node.
+
+    Returns
+    -------
+    list[tuple[float, bool]]
+        Empty list if the node has no ``baseValue`` / ``outputIsScale``
+        multi indices set (e.g., a v4 rig before its first v5 Apply).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        bv_ids = cmds.getAttr(shape + ".baseValue", multiIndices=True) or []
+    except Exception:
+        return []
+    try:
+        is_ids = cmds.getAttr(shape + ".outputIsScale", multiIndices=True) or []
+    except Exception:
+        is_ids = []
+    max_idx = max(list(bv_ids) + list(is_ids) + [-1])
+    if max_idx < 0:
+        return []
+    out = []
+    for i in range(max_idx + 1):
+        bv = 0.0
+        is_scale = False
+        if i in bv_ids:
+            try:
+                bv = float(cmds.getAttr("{}.baseValue[{}]".format(shape, i)))
+            except Exception:
+                pass
+        if i in is_ids:
+            try:
+                is_scale = bool(cmds.getAttr(
+                    "{}.outputIsScale[{}]".format(shape, i)))
+            except Exception:
+                pass
+        out.append((bv, is_scale))
+    return out
+
+
+def _node_has_baseline_schema(node):
+    """Return True when *node* already has a v5 baseline array written.
+
+    Used by :func:`apply_poses` to emit a one-time upgrade notice when
+    an old v4 node (poses present, no baseline array) is first applied
+    under v5.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return False
+    try:
+        ids = cmds.getAttr(shape + ".baseValue", multiIndices=True) or []
+    except Exception:
+        return False
+    return bool(ids)
+
+
 def apply_poses(node, driver_node, driven_node,
                 driver_attrs, driven_attrs, poses):
     """Write pose data onto the solver node (no connections).
@@ -1067,15 +1230,34 @@ def apply_poses(node, driver_node, driven_node,
     if not _exists(shape):
         return
 
+    # v4 → v5 upgrade notice: a node with poses but no baseline array is
+    # about to be re-applied under the v5 schema. Log only, never block.
+    had_poses = False
+    try:
+        had_poses = bool(cmds.getAttr(shape + ".poses", multiIndices=True) or [])
+    except Exception:
+        had_poses = False
+    if had_poses and not _node_has_baseline_schema(node):
+        cmds.warning(
+            "Upgrading node {} to v5 baseline schema".format(shape))
+
     with undo_chunk("RBFtools: apply poses"):
-        # 1 — clear stale data
+        # 1 — clear stale data (including any prior baseline arrays)
         clear_node_data(node)
 
         # 2 — write pose data (packed sequential indices)
         for seq_idx, pose in enumerate(poses):
             _write_pose_to_node(shape, seq_idx, pose)
 
-        # 3 — trigger evaluation cycle
+        # 3 — capture + write per-output baselines. pose[0] is the
+        # preferred source when it is a rest row (all driver inputs 0);
+        # otherwise the current scene value is used. Scale channels
+        # always anchor at 1.0. See v5 addendum 2026-04-24 §M1.2.
+        baselines = capture_output_baselines(
+            driven_node, driven_attrs, poses=poses)
+        write_output_baselines(node, baselines)
+
+        # 4 — trigger evaluation cycle
         cmds.setAttr(shape + ".evaluate", 0)
         cmds.setAttr(shape + ".evaluate", 1)
 

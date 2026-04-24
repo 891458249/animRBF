@@ -166,6 +166,8 @@ public:
 
     // rbf attributes (sorted)
     static MObject allowNegative;
+    static MObject baseValue;
+    static MObject outputIsScale;
     static MObject radius;
     static MObject colorDriver;
     static MObject colorDriverR;
@@ -241,6 +243,12 @@ private:
     BRMatrix wMat;
     
     std::vector<double> inputNorms;
+
+    // M1.2: cached baseline / isScale snapshot. compute() compares current
+    // plug values against these on entry; any change trips evalInput = true
+    // so the weight matrix is re-solved against the shifted Y targets.
+    std::vector<double> prevBaseValueArr;
+    std::vector<bool>   prevOutputIsScaleArr;
 };
 
 // ---------------------------------------------------------------------
