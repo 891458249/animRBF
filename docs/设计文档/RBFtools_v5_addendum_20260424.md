@@ -2431,6 +2431,211 @@ T4b source-text scan 守护：`add_neutral_sample` 执行体内**不出现** `ap
 
 ---
 
+## §M3.5 — Pose Profiler
+
+Milestone 3 倒数第二个子任务 —— 纯只读诊断工具。算法 85% 纯函数比例（M3.x 系列最高），**0 行 C++ + 0 行 core.py 改动**——M3.1 / M3.6 / M3.5 三连续克制范式。
+
+### M3.5.F1-F4 — Verify-before-design 第 4 次使用
+
+| # | 验证项 | 结论 | 决议影响 |
+|---|---|---|---|
+| **F1** | `lastSolveMethod` 能否从 Python 读？ | ❌ —— C++ 实例成员（[source/RBFtools.cpp:137](source/RBFtools.cpp:137)），**不是** MObject Maya attr | (A.3) Profile 删 `last_solve_method` 字段，仅显示 `solver_method` 配置值 + caveat。**0 C++ 红线绝对优先**于诊断字段价值——开口子整个 M3 系列零 C++ 契约就崩 |
+| **F2** | M1.4 是否有 benchmark ms 数据？ | ❌ —— addendum 全文无 ms / millisecond / 时间常数 | (B.3) 用概念常数 `_K_CHOL` / `_K_GE` / `_K_QWA` + **显著 caveat**；M5 真实 benchmark 替换；符号名作为 forward-compat 接口保留 |
+| **F3** | `CollapsibleFrame` API 够用？ | ✅ —— `add_widget` / `set_visible_content` / `set_title` 全齐 | (F.3 + spillover §3) ToolsSection 是薄 lazy subclass + widget_id 索引字典 |
+| **F4** | `core_prune.analyse_node` 复用可行？ | ✅ —— read-only（T_ANALYSE_READ_ONLY）+ 返回所有 health-check 字段 | (E.2) Profiler 0 行重新实现扫描 |
+
+四个事实直接驱动四项决议修订（A.3 / B.3 / F.3 / E.2）—— 这是 verify-before-design 模式的最高价值形态。
+
+### M3.5.1 — 决议日志（10 项 + 2 加固）
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | `last_solve_method` 字段 | **A.3** 显示 `solver_method` 配置值 + caveat | F1 验证不可读；0 C++ 红线 |
+| (B) | Solve 时间单位 | **B.3** 绝对 ms + 显著 caveat | 用户感知量级；caveat 防误信 |
+| (C) | 拆分建议形式 | **C.2** 仅量级表无语义 | profile 不暗示自动化 |
+| (D) | 拆分阈值 | **D.3** n_poses>80 + cells>500 + cholesky>5ms | 三条件任一即建议 |
+| (E) | Health checks | **E.2** 复用 M3.1 analyse_node | 一处事实来源（F4） |
+| (F) | 展示形式 | **F.3** 双入口（ToolsSection + Tools 菜单） | 常驻 + 复制保存 |
+| (G) | 自动刷新 | **G.3** 切换清空 + 手动 Refresh | 避免大节点切换卡顿 |
+| (H) | spillover §3 dup widget_id | **H.2** RuntimeError 拒绝 | 防 M3.4 状态泄漏 |
+| (I) | spillover §3 是否含 remove | **I.2** add + remove | 前瞻 M3.4 |
+| (J) | 校准常数位置 | **J.1** 模块级常数 | M5 之前不需 UI 暴露 |
+| 加固 1 | caveat 可见性 | T_CAVEAT_VISIBLE 守护 | 双行 + 调参入口提示 |
+| 加固 2 | ToolsSection 持久 | T_TOOLS_SECTION_PERSISTS 守护 | once created, persists |
+
+### M3.5.2 — Read-only 契约（T_PROFILE_READ_ONLY 永久守护）
+
+```
+profile_node body MUST NOT contain any cmds.* mutation call or
+undo_chunk wrapper. T_PROFILE_READ_ONLY (PERMANENT GUARD)
+source-scans for 8 forbidden symbols:
+  cmds.setAttr / connectAttr / disconnectAttr / delete /
+  removeMultiInstance / aliasAttr / createNode / undo_chunk
+
+Mirrors M3.1 T_ANALYSE_READ_ONLY. Profiler is the second M3.x
+sub-task to ship a read-only PERMANENT guard.
+```
+
+### M3.5.3 — Caveat 可见性契约（T_CAVEAT_VISIBLE 永久守护）
+
+格式约束：
+
+1. Caveat 文字用 `[ ... ]` 方括号包围（视觉显著）
+2. Performance 段 **section 头** 即带 caveat：`Performance estimates  [CONCEPTUAL — no machine calibration]`
+3. Performance 段**末尾**重复带调参符号名 `[tune _K_CHOL / _K_GE / _K_QWA in core_profile.py for your hardware; see addendum §M3.5.F2]`
+4. solver_method 字段同段 + 引用 §M3.5.F1
+
+T_CAVEAT_VISIBLE 三 sub-test 守护：
+
+- `[CONCEPTUAL — no machine calibration]` 字符串必须在 report 出现
+- `_K_CHOL` 标识符必须在 report 出现（用户 grep 调参入口）
+- `[configured value;` 字符串必须在 report 出现（F1 caveat）
+
+任何重写 `format_report` 删掉 caveat 都会被立即捕获。
+
+### M3.5.4 — Split-suggestion 算法（**informational only**）
+
+```
+触发条件（任一即给建议）:
+  n_poses > 80
+  n_inputs * n_outputs > 500
+  cholesky_time_ms > 5.0  (estimated)
+
+输出形式:
+  仅给量级表 (N=2/3/4 拆分后每节点估算时间)
+  不给"按 swing/twist/finger" 等语义猜测
+  明文 "Splitting strategy is rig-semantic and must be decided
+        by the user — Profiler does not auto-split or suggest
+        specific attribute groupings."
+
+Profile 永远不自动执行拆分。
+```
+
+### M3.5.5 — Spillover §3 — `add_tools_panel_widget` / `remove_tools_panel_widget`
+
+ToolsSection collapsible 首次落地。**M3.0-spillover §3**（追溯式归章节群）。
+
+```python
+# RBFToolsWindow
+
+def _ensure_tools_section(self):
+    """Lazily create ToolsSection on first call. Once created,
+    persists for the session — see T_TOOLS_SECTION_PERSISTS."""
+    if getattr(self, "_tools_section", None) is None:
+        self._tools_section = CollapsibleFrame(tr("section_tools"))
+        self._tools_panel_widgets = {}
+        self._sections.insertWidget(
+            self._sections.count() - 1, self._tools_section)
+    return self._tools_section
+
+def add_tools_panel_widget(self, widget_id, widget):
+    """Register *widget* under *widget_id*. Lazily creates
+    ToolsSection on first call. Raises RuntimeError on duplicate
+    widget_id (no silent overwrite — H.2)."""
+
+def remove_tools_panel_widget(self, widget_id):
+    """Unregister and detach. ToolsSection itself is NOT
+    destroyed even when the last child is removed
+    (T_TOOLS_SECTION_PERSISTS contract — avoids visual flicker
+    on subsequent add)."""
+```
+
+**契约（M3 全程红线）**：
+
+1. 后续 M3.x 子任务的 ToolsSection 扩展**必须**走此 helper —— 禁止再直接 `_main_layout.insertWidget` 操作
+2. **T_TOOLS_SECTION_PERSISTS PERMANENT GUARD**：source-scan `remove_tools_panel_widget` 体内**不出现** `self._tools_section = None` 或 `self._tools_section.deleteLater`
+3. **重复 widget_id → RuntimeError 拒绝**（H.2 防 M3.4 状态泄漏）
+4. M3.5 是首个真实消费者：`add_tools_panel_widget("profile_report", ProfileWidget(...))`
+
+### M3.5.6 — M3.4 Forward-Compat Contract
+
+`add_tools_panel_widget` / `remove_tools_panel_widget` 签名锁定。M3.4 Live Edit 落地不再变更：
+
+```python
+add_tools_panel_widget(widget_id: str, widget: QWidget) -> QWidget
+remove_tools_panel_widget(widget_id: str) -> bool
+```
+
+M3.4 实施时如需扩展（例如 widget 显示/隐藏切换），**必须保持现有 add/remove 接口不变**（向后兼容）。新功能用新方法名（如 `set_tools_panel_widget_visible`）扩展。
+
+预期 M3.4 调用形式：
+
+```python
+self._live_edit_cb = QtWidgets.QCheckBox(tr("live_edit_toggle"))
+self._live_edit_cb.toggled.connect(self._on_live_edit_toggled)
+self.add_tools_panel_widget("live_edit_toggle", self._live_edit_cb)
+```
+
+### M3.5.7 — 改动清单
+
+| 文件 | 改动 | 行数 |
+|---|---|---|
+| `core_profile.py` | **新建** ~340 行（profile_node + format_report + 估算函数 + 阈值常数 + `_K_*` calibration 常数 + F1/F2/F3/F4 docstring） |
+| `core.py` | **0 改动**（M3.1 / M3.6 / M3.5 三连续零核心改动）|
+| `controller.py` | +`profile_current_node` + `profile_to_script_editor`（read-only，无 ask_confirm）~30 行 |
+| `ui/main_window.py` | +`_ensure_tools_section` + `add_tools_panel_widget` + `remove_tools_panel_widget` + Tools entry + 1 callback + ProfileWidget wiring ~95 行 |
+| `ui/widgets/profile_widget.py` | **新建** ~60 行（QPlainTextEdit + Refresh + on_node_changed slot）|
+| `ui/i18n.py` | +5 keys × 2 langs = 10 行 |
+| `tests/test_m3_5_profile.py` | **新建** ~440 行（13 测试类，**25 子测试**，含 T_PROFILE_READ_ONLY + T_REUSE_PRUNE + T_CAVEAT_VISIBLE 3 sub + T_TOOLS_SECTION_PERSISTS 1 sub + T7 spillover 3 sub）|
+| `docs/.../addendum_20260424.md` | §M3.5 + spillover §3 + F1/F2 caveat + M3.4 forward-compat ~165 行 |
+| `docs/.../milestone_3_summary.md` | 进度（6/7 → 6/7 但 next 改 M3.4）+ 把 M3.5 加入 6/7 已完成 |
+
+**总：~1140 行**（含测试 + addendum）；**生产代码 ~525 行 < 800**。
+
+### M3.5.8 — 测试矩阵
+
+| T# | 名称 | 子测 |
+|---|---|---|
+| T1 | `_estimate_solve_times` 大 O 单调 + GE 3× Cholesky + qwa 仅 quat groups | 3 |
+| T2 | `_estimate_memory` 三组件正确 + n=0 边界 | 2 |
+| **T3** | `profile_node` 端到端（**T_REUSE_PRUNE** 复用 M3.1 analyse_node + health 字段传递）| 3 |
+| T4 | `format_report` 全 7 sections 出现 + OK 推荐 | 2 |
+| T5 | split-suggestion 触发（WARN / 量级表 / 无触发不显 WARN / 阈值常数）| 4 |
+| **T6** | **T_PROFILE_READ_ONLY** PERMANENT — 8 mutation 黑名单 source-scan | 1 |
+| T7 | spillover §3 add_tools_panel_widget 三场景（懒创建 / dup_id 拒绝 / 方法存在）| 3 |
+| **T_TOOLS_SECTION_PERSISTS** | PERMANENT — `remove_tools_panel_widget` 不销毁 panel（source-scan）| 1 |
+| **T_CAVEAT_VISIBLE** | PERMANENT — perf caveat / `_K_CHOL` / configured value 三段必须在 report 出现 | 3 |
+| T8 | controller `profile_current_node` 不调 `ask_confirm`（read-only 无需 confirm）| 1 |
+| T9 | Tools 菜单走 `add_tools_action` spillover | 1 |
+| T10 | i18n 5 keys EN/CN parity | 1 |
+
+合计 **13 测试类，25 子测试**。**总测试数：374 + 25 = 399 / 399**。
+
+### M3.5.9 — 零回归
+
+- `core.py` **0 改动** —— 第 3 次连续零核心改动（M3.1 / M3.6 / M3.5）
+- `core_prune.analyse_node` 签名沿用（T_REUSE_PRUNE forward-compat 约束）
+- ToolsSection 是新增 collapsible，不影响既有 sections（General / VectorAngle / RBF / PoseEditor）
+- ProfileWidget 节点切换时显示 placeholder（不自动跑 profile，避免大节点卡顿）
+- 全量回归：374 + 25 = **399 / 399** 通过
+
+### M3.5.10 — Non-goals
+
+- ❌ 自动拆分 RBFtools 节点
+- ❌ 跨节点 / 全场景 profile
+- ❌ 历史 profile 对比 / Diff
+- ❌ Profile export 到 CSV / JSON（推 M5）
+- ❌ Live profile（compute 实时计时；推 M3.4 / M5 monitoring）
+- ❌ Cross-node comparison
+- ❌ "Apply suggested optimization" 按钮（profile 只读）
+- ❌ 暴露 `lastSolveMethod` 真实值（需 C++ 改动；红线"0 C++"拒绝）
+- ❌ Machine-calibrated 性能常数（M5 真实 benchmark 替换 `_K_*`）
+
+### M3.5.11 — 红线确认
+
+- ✅ 沿用 M3 / M3.0 / M3.2 / M3.7 / M3.3 / M3.1 / M3.6 全部红线
+- ✅ Profile **永远只读**（**T_PROFILE_READ_ONLY** PERMANENT）
+- ✅ 拆分建议**仅 informational**，永远不自动执行
+- ✅ ToolsSection collapsible **懒创建 + 一旦创建持久存在**（**T_TOOLS_SECTION_PERSISTS** PERMANENT）
+- ✅ Spillover §3 重复 widget_id → **RuntimeError 拒绝**
+- ✅ Solve 时间估算**显著标注** `[CONCEPTUAL — no machine calibration]`（**T_CAVEAT_VISIBLE** PERMANENT 3 sub）
+- ✅ Profile 复用 M3.1 `analyse_node`（T_REUSE_PRUNE）
+- ✅ **0 行 core.py 改动**（M3.1 / M3.6 / M3.5 三连续克制）
+- ✅ **0 行 C++ 改动**（F1 不暴露 lastSolveMethod）
+- ✅ M3.4 forward-compat：`add_tools_panel_widget` / `remove_tools_panel_widget` 签名锁定
+
+---
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```

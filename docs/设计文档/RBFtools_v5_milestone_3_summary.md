@@ -1,7 +1,7 @@
 # RBFtools v5 — Milestone 3 — Workflow Tools
 
-> **Status**: M3.0 + M3.2 + M3.7 + M3.3 + M3.1 + M3.6 Complete ✅ | M3.4-M3.5 Pending
-> **Test累计**: 374 / 374
+> **Status**: M3.0 + M3.2 + M3.7 + M3.3 + M3.1 + M3.6 + M3.5 Complete ✅ | M3.4 Pending
+> **Test累计**: 399 / 399
 > **Roadmap reference**: 设计方案 PART F Milestone 3
 > **Top-level decisions**: addendum §M3 顶层核查（本会话内决议）
 > **Detailed addendum**: `RBFtools_v5_addendum_20260424.md` §M3.0 (+ future §M3.x)
@@ -19,7 +19,8 @@
 | **M3.7** | aliasAttr auto-naming（M3.3 阻塞项 → 已解锁） | ✅ | `c7e07f2` | 31 | §M3.7 |
 | **M3.3** | JSON Import/Export（消费 M3.7 + M2.3）| ✅ | `67b0b3f` | 39 | §M3.3 + §M3.0-spillover §2 |
 | **M3.1** | Pose Pruner | ✅ | `862950e` | 26 | §M3.1 |
-| **M3.6** | Auto neutral sample (CMT-style) | ✅ | (this commit) | 18 | §M3.6 |
+| **M3.6** | Auto neutral sample (CMT-style) | ✅ | `f8925a3` | 18 | §M3.6 |
+| **M3.5** | Pose Profiler + ToolsSection (spillover §3) | ✅ | (this commit) | 25 | §M3.5 |
 | **M3.6** | Auto neutral samples（CMT 风格）| ⏳ | — | — | — |
 | **M3.5** | Pose Profiler + 拆分建议 | ⏳ | — | — | — |
 | **M3.4** | Live Edit Mode（algo only；mayapy 集成 → M1.5）| ⏳ | — | — | — |
@@ -232,7 +233,8 @@ M3 工作流工具 ← 进行中
   ├── M3.3 JSON IO ✅ (330 测试)
   ├── M3.1 Pose Pruner ✅ (356 测试)
   ├── M3.6 Auto neutral sample ✅ (374 测试)
-  ├── M3.5 Pose Profiler ← 下一站
+  ├── M3.5 Pose Profiler ✅ (399 测试)
+  ├── M3.4 Live Edit Mode ← 下一站
   ├── M3.1 Pose Pruner
   ├── M3.6 自动中性样本
   ├── M3.5 Pose Profiler

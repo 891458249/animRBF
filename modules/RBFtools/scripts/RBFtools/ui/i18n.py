@@ -163,6 +163,13 @@ _EN = {
     "status_import_starting":          "Importing...",
     "status_import_done":              "Import complete.",
     "status_import_failed":            "Import failed.",
+    # -- M3.5: Pose Profiler + ToolsSection (spillover §3) --
+    "section_tools":                   "Tools",
+    "menu_profile_to_se":              "Profile to Script Editor",
+    "btn_refresh_profile":             "Refresh Profile",
+    "status_profile_pending":
+        "Click 'Refresh Profile' to profile the current node.",
+    "status_profile_failed":           "Profile failed.",
     # -- M3.6: Auto-neutral sample --
     "menu_add_neutral_sample":         "Add Neutral Sample",
     "menu_reset_auto_neutral":         "Reset auto-neutral default",
@@ -368,6 +375,13 @@ _ZH = {
     "status_import_starting":          u"\u6b63\u5728\u5bfc\u5165...",
     "status_import_done":              u"\u5bfc\u5165\u5b8c\u6210\u3002",
     "status_import_failed":            u"\u5bfc\u5165\u5931\u8d25\u3002",
+    # -- M3.5 --
+    "section_tools":                   u"\u5de5\u5177",
+    "menu_profile_to_se":              u"\u8f93\u51fa Profile \u5230\u811a\u672c\u7f16\u8f91\u5668",
+    "btn_refresh_profile":             u"\u5237\u65b0 Profile",
+    "status_profile_pending":
+        u"\u70b9\u51fb \u201c\u5237\u65b0 Profile\u201d \u4ee5\u8bca\u65ad\u5f53\u524d\u8282\u70b9\u3002",
+    "status_profile_failed":           u"Profile \u751f\u6210\u5931\u8d25\u3002",
     # -- M3.6 --
     "menu_add_neutral_sample":         u"\u6dfb\u52a0\u4e2d\u6027\u6837\u672c",
     "menu_reset_auto_neutral":         u"\u91cd\u7f6e\u81ea\u52a8\u4e2d\u6027\u9ed8\u8ba4\u503c",

@@ -387,6 +387,34 @@ class MainController(QtCore.QObject):
             return None
 
     # =================================================================
+    #  M3.5 — Pose Profiler (read-only diagnostic; no path A confirm
+    #         because profile_node performs no scene mutation)
+    # =================================================================
+
+    def profile_current_node(self):
+        """Compute a profile report for the current node.
+
+        Returns the formatted ASCII report string, or None when no
+        node is selected. The dialog/widget caller is responsible
+        for displaying the text — the controller stays MVC-clean
+        and does not own UI rendering.
+        """
+        if not self._current_node:
+            cmds.warning("profile_current_node: no current node")
+            return None
+        from RBFtools import core_profile
+        return core_profile.profile_node_to_text(self._current_node)
+
+    def profile_to_script_editor(self):
+        """Tools menu side-channel: print the profile report to
+        the Script Editor. Useful for copy-paste / saving as a
+        text snapshot."""
+        text = self.profile_current_node()
+        if text:
+            print(text)
+        return text
+
+    # =================================================================
     #  M3.1 — Pose Pruner (path A consumer; 4th real-world consumer)
     # =================================================================
 

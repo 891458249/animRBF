@@ -451,6 +451,16 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._on_reset_auto_neutral)
         self._menu_edit.addAction(self._act_reset_auto_neutral)
 
+        # ---- M3.5: Pose Profiler entries + ToolsSection panel ----
+        # (M3.0-spillover §3 lazy creation happens inside the
+        # add_tools_panel_widget call below.)
+        from RBFtools.ui.widgets.profile_widget import ProfileWidget
+        self._profile_widget = ProfileWidget(self._ctrl, parent=self)
+        self.add_tools_panel_widget("profile_report", self._profile_widget)
+        self.add_tools_action(
+            "menu_profile_to_se", self._on_profile_to_script_editor)
+        self._ctrl.editorLoaded.connect(self._profile_widget.on_node_changed)
+
         # ---- M3.1: Pose Pruner entry + single-pose row delete ----
         self.add_tools_action("menu_prune_poses", self._on_prune_poses)
         self._pose_editor.add_pose_row_action(
@@ -518,6 +528,79 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Refresh the UI so the newly created target shows up in the
         # node selector.
         self._on_refresh()
+
+    # =================================================================
+    #  M3.5 — Pose Profiler entry + ToolsSection spillover §3
+    # =================================================================
+
+    def _on_profile_to_script_editor(self):
+        """Tools -> Profile to Script Editor. One-shot print of
+        the current node's profile to the Script Editor."""
+        self._ctrl.profile_to_script_editor()
+
+    def _ensure_tools_section(self):
+        """Lazily create the per-node ToolsSection collapsible.
+
+        First call instantiates a CollapsibleFrame and inserts it
+        into the section list right before the trailing stretch.
+        Subsequent calls return the existing instance.
+
+        Once created, the section persists for the session — even
+        if every registered widget is removed (T_TOOLS_SECTION_PERSISTS
+        permanent guard, addendum §M3.5 spillover §3 contract).
+        """
+        if getattr(self, "_tools_section", None) is None:
+            from RBFtools.ui.widgets.collapsible import CollapsibleFrame
+            self._tools_section = CollapsibleFrame(tr("section_tools"))
+            self._tools_panel_widgets = {}
+            # Insert just before the trailing addStretch() in the
+            # _sections layout (count - 1 is the stretch item).
+            self._sections.insertWidget(
+                self._sections.count() - 1, self._tools_section)
+        return self._tools_section
+
+    def add_tools_panel_widget(self, widget_id, widget):
+        """Register *widget* under *widget_id* in the per-node
+        ToolsSection collapsible (M3.0-spillover §3, added in
+        M3.5 commit). The collapsible is lazily created on first
+        call.
+
+        Raises RuntimeError when *widget_id* is already
+        registered — caller must :meth:`remove_tools_panel_widget`
+        first. Silent overwrite would risk M3.4 state leakage.
+
+        Returns the registered widget on success.
+        """
+        section = self._ensure_tools_section()
+        if widget_id in self._tools_panel_widgets:
+            raise RuntimeError(
+                "add_tools_panel_widget: widget_id {!r} already "
+                "registered; call remove_tools_panel_widget "
+                "first".format(widget_id))
+        section.add_widget(widget)
+        self._tools_panel_widgets[widget_id] = widget
+        return widget
+
+    def remove_tools_panel_widget(self, widget_id):
+        """Unregister and detach a previously-added Tools panel
+        widget. Returns True on success, False when *widget_id*
+        is unknown.
+
+        The ToolsSection itself is NOT destroyed even when the
+        last widget is removed — once created, it persists for
+        the session (T_TOOLS_SECTION_PERSISTS guard)."""
+        widgets = getattr(self, "_tools_panel_widgets", None)
+        if not widgets:
+            return False
+        w = widgets.pop(widget_id, None)
+        if w is None:
+            return False
+        try:
+            w.setParent(None)
+            w.deleteLater()
+        except Exception:
+            pass
+        return True
 
     # =================================================================
     #  M3.6 — Add Neutral Sample entry points
