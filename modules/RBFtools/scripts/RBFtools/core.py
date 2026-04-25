@@ -1202,6 +1202,191 @@ def _node_has_baseline_schema(node):
     return bool(ids)
 
 
+# =====================================================================
+#  11c. Local-Transform snapshot — Milestone 2.3 (v5 PART D.5 / 铁律 B10)
+# =====================================================================
+
+
+def capture_per_pose_local_transforms(driven_node, driven_attrs, poses):
+    """Replay each pose through *driven_node* and snapshot its local Transform.
+
+    **Single-sever / single-restore lifecycle** (v5 addendum §M2.3 —
+    refinement 1): incoming connections on ``driven_attrs`` are severed
+    ONCE before the loop and restored ONCE after. The replay loop only
+    runs ``setAttr`` and ``get_local_matrix`` — never disconnects nor
+    reconnects mid-loop. This avoids DG dirty-storms and short-lived
+    intermediate evaluation states that would corrupt downstream nodes.
+
+    **Non-driven-channel freeze contract** (addendum §M2.3 — refinement
+    2): transform channels NOT in ``driven_attrs`` keep their
+    Apply-time scene state throughout the replay. If the user left the
+    driven_node at a stale orientation at Apply time, that orientation
+    is baked into every pose's quaternion. Users should reset the
+    driven_node to rest before calling Apply; M3 UI will automate this.
+
+    Parameters
+    ----------
+    driven_node : str
+        Scene node whose local Transform is being captured.
+    driven_attrs : list[str]
+        Attributes to set per pose (typically a subset of transform
+        channels).
+    poses : list[PoseData]
+        Same ordering as the caller's ``poses`` — returned list aligns
+        element-wise.
+
+    Returns
+    -------
+    list[dict]
+        Per-pose ``{"translate":(3), "quat":(4), "scale":(3)}``.
+        Always the same length as *poses*. On ``driven_node`` missing
+        or ``is_blend_shape(driven_node)`` or empty ``driven_attrs``
+        the list is filled with :data:`IDENTITY_LOCAL_TRANSFORM`.
+    """
+    n_poses = len(poses)
+    if not _exists(driven_node):
+        return [IDENTITY_LOCAL_TRANSFORM] * n_poses
+    if is_blend_shape(driven_node):
+        # blendShape has no local Transform concept — see addendum
+        # §M2.3 decision (C)①.
+        return [IDENTITY_LOCAL_TRANSFORM] * n_poses
+    if not driven_attrs:
+        cmds.warning(
+            "capture_per_pose_local_transforms: driven_attrs is empty; "
+            "skipping local Transform capture.")
+        return [IDENTITY_LOCAL_TRANSFORM] * n_poses
+
+    # === single sever (before loop) ===
+    saved_conns = []
+    saved_values = []
+    for attr in driven_attrs:
+        plug = "{}.{}".format(driven_node, attr)
+        conn = _safe_disconnect_incoming(plug)
+        saved_conns.append((plug, conn))
+        try:
+            saved_values.append(cmds.getAttr(plug))
+        except Exception:
+            saved_values.append(None)
+
+    results = []
+    try:
+        # === replay loop: only setAttr + read matrix, never disconnect ===
+        for pose in poses:
+            for i, attr in enumerate(driven_attrs):
+                if i >= len(pose.values):
+                    break
+                plug = "{}.{}".format(driven_node, attr)
+                try:
+                    cmds.setAttr(plug, pose.values[i])
+                except Exception as exc:
+                    cmds.warning(
+                        "capture_per_pose_local_transforms: setAttr {} "
+                        "failed: {}".format(plug, exc))
+            mat = get_local_matrix(driven_node)
+            results.append(decompose_matrix_quat(mat))
+    finally:
+        # === single restore (after loop, even on exception) ===
+        for (plug, conn), orig in zip(saved_conns, saved_values):
+            if orig is not None:
+                try:
+                    cmds.setAttr(plug, orig)
+                except Exception as exc:
+                    cmds.warning(
+                        "capture_per_pose_local_transforms: restore "
+                        "setAttr {} failed: {}".format(plug, exc))
+            if conn is not None:
+                try:
+                    cmds.connectAttr(conn[0], conn[1])
+                except Exception as exc:
+                    cmds.warning(
+                        "capture_per_pose_local_transforms: reconnect "
+                        "{} -> {} failed: {}".format(conn[0], conn[1], exc))
+
+    # Pad if the replay bailed early for any reason.
+    while len(results) < n_poses:
+        results.append(IDENTITY_LOCAL_TRANSFORM)
+    return results
+
+
+def write_pose_local_transforms(node, local_transforms):
+    """Write per-pose Transform snapshots to shape.poses[p].poseLocalTransform.*."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    for p, xf in enumerate(local_transforms):
+        t = xf.get("translate", IDENTITY_LOCAL_TRANSFORM["translate"])
+        q = xf.get("quat",      IDENTITY_LOCAL_TRANSFORM["quat"])
+        s = xf.get("scale",     IDENTITY_LOCAL_TRANSFORM["scale"])
+        try:
+            cmds.setAttr(
+                "{}.poses[{}].poseLocalTransform.poseLocalTranslate".format(shape, p),
+                float(t[0]), float(t[1]), float(t[2]), type="double3")
+        except Exception as exc:
+            cmds.warning("write_pose_local_transforms: translate[{}] "
+                         "failed: {}".format(p, exc))
+        try:
+            # double4 has no native compound setAttr — set each child.
+            for i, v in enumerate(q):
+                cmds.setAttr(
+                    "{}.poses[{}].poseLocalTransform.poseLocalQuat{}".format(
+                        shape, p, i), float(v))
+        except Exception:
+            # Fall back: write as 4-tuple if Maya accepts it.
+            try:
+                cmds.setAttr(
+                    "{}.poses[{}].poseLocalTransform.poseLocalQuat".format(shape, p),
+                    float(q[0]), float(q[1]), float(q[2]), float(q[3]),
+                    type="double4")
+            except Exception as exc:
+                cmds.warning("write_pose_local_transforms: quat[{}] "
+                             "failed: {}".format(p, exc))
+        try:
+            cmds.setAttr(
+                "{}.poses[{}].poseLocalTransform.poseLocalScale".format(shape, p),
+                float(s[0]), float(s[1]), float(s[2]), type="double3")
+        except Exception as exc:
+            cmds.warning("write_pose_local_transforms: scale[{}] "
+                         "failed: {}".format(p, exc))
+
+
+def read_pose_local_transforms(node):
+    """Read back per-pose local Transforms. Returns empty list when the
+    node has no poseLocalTransform data (v4 rig / fresh node).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        ids = cmds.getAttr(shape + ".poses", multiIndices=True) or []
+    except Exception:
+        return []
+    if not ids:
+        return []
+    out = []
+    for p in sorted(ids):
+        try:
+            t = cmds.getAttr(
+                "{}.poses[{}].poseLocalTransform.poseLocalTranslate".format(
+                    shape, p))[0]
+        except Exception:
+            t = IDENTITY_LOCAL_TRANSFORM["translate"]
+        try:
+            q = cmds.getAttr(
+                "{}.poses[{}].poseLocalTransform.poseLocalQuat".format(
+                    shape, p))[0]
+        except Exception:
+            q = IDENTITY_LOCAL_TRANSFORM["quat"]
+        try:
+            s = cmds.getAttr(
+                "{}.poses[{}].poseLocalTransform.poseLocalScale".format(
+                    shape, p))[0]
+        except Exception:
+            s = IDENTITY_LOCAL_TRANSFORM["scale"]
+        out.append({"translate": tuple(t), "quat": tuple(q),
+                    "scale": tuple(s)})
+    return out
+
+
 def apply_poses(node, driver_node, driven_node,
                 driver_attrs, driven_attrs, poses):
     """Write pose data onto the solver node (no connections).
@@ -1257,7 +1442,17 @@ def apply_poses(node, driver_node, driven_node,
             driven_node, driven_attrs, poses=poses)
         write_output_baselines(node, baselines)
 
-        # 4 — trigger evaluation cycle
+        # 4 — M2.3: replay each pose through driven_node and snapshot
+        # its local Transform for engine-side consumption (PART D.5 /
+        # 铁律 B10). Single-sever / single-restore lifecycle keeps the
+        # scene clean. Non-driven channels are frozen at Apply-time
+        # scene state — users should reset driven_node to rest before
+        # Apply. See v5 addendum 2026-04-24 §M2.3.
+        local_xforms = capture_per_pose_local_transforms(
+            driven_node, driven_attrs, poses)
+        write_pose_local_transforms(node, local_xforms)
+
+        # 5 — trigger evaluation cycle
         cmds.setAttr(shape + ".evaluate", 0)
         cmds.setAttr(shape + ".evaluate", 1)
 
@@ -1614,6 +1809,58 @@ def get_local_matrix(node):
 
     # M_local = M_world * M_parent^{-1}
     return world * parent_world.inverse()
+
+
+# M2.3: identity local-Transform fallback. Used for blendShape driven
+# nodes (no local Transform concept) and as the safe default when the
+# Apply-time replay is skipped entirely. Layout matches the C++
+# poseLocalTransform compound: t(3) + q(4, q_w >= 0 canonical) + s(3).
+IDENTITY_LOCAL_TRANSFORM = {
+    "translate": (0.0, 0.0, 0.0),
+    "quat":      (0.0, 0.0, 0.0, 1.0),
+    "scale":     (1.0, 1.0, 1.0),
+}
+
+
+def decompose_matrix_quat(matrix):
+    r"""Decompose an ``MMatrix`` into ``translate / quat / scale``.
+
+    Returns
+    -------
+    dict
+        ``{"translate": (tx, ty, tz),
+           "quat":      (qx, qy, qz, qw),   # q_w >= 0 canonical
+           "scale":     (sx, sy, sz)}``
+
+    Differs from :func:`decompose_matrix` in two ways:
+
+    * Rotation is returned as a **unit quaternion**, not Euler angles.
+      This is rotateOrder-independent by construction — the caller
+      does NOT need to know the driven_node's rotateOrder (v5 addendum
+      §M2.3 A).
+    * The quaternion is canonicalised to the ``q_w >= 0`` hemisphere,
+      matching the sign convention used by M2.1b (SwingTwist encoding)
+      and M2.2 (QWA output).
+
+    Shear handling: ``MTransformationMatrix.scale()`` returns only the
+    3-D scale component; any shear in the input matrix is **silently
+    dropped**. M2.3 explicitly does not represent shear (v5 addendum
+    §M2.3 T7). Rigs that depend on driven-node shear should bake it
+    before Apply.
+    """
+    import maya.api.OpenMaya as om2
+    xform = om2.MTransformationMatrix(matrix)
+    t = xform.translation(om2.MSpace.kTransform)
+    q = xform.rotation(asQuaternion=True)
+    s = xform.scale(om2.MSpace.kTransform)
+    qx, qy, qz, qw = q.x, q.y, q.z, q.w
+    if qw < 0.0:
+        qx, qy, qz, qw = -qx, -qy, -qz, -qw
+    return {
+        "translate": (t.x, t.y, t.z),
+        "quat":      (qx, qy, qz, qw),
+        "scale":     (s[0], s[1], s[2]),
+    }
 
 
 def decompose_matrix(matrix):

@@ -744,6 +744,103 @@ def accumulate_qwa_matrix(phis, quats, clip_negative=True):
     return (M, any_clipped)
 
 
+# ----------------------------------------------------------------------
+# M2.3 — Local-Transform decomposition (pure-Python mirror)
+# ----------------------------------------------------------------------
+
+IDENTITY_LOCAL_TRANSFORM = {
+    "translate": (0.0, 0.0, 0.0),
+    "quat":      (0.0, 0.0, 0.0, 1.0),
+    "scale":     (1.0, 1.0, 1.0),
+}
+
+
+def _rotation_matrix_to_quat(R):
+    """3x3 rotation matrix (Maya row-major, post-multiply convention)
+    → (qx, qy, qz, qw). Shepperd-style branchless stable method; returns
+    q_w >= 0 canonical form.
+
+    NOTE on convention: textbook Shepperd assumes column-major M·v; for
+    Maya's row-major v·M (where M_row[i][j] == M_col[j][i]), the
+    off-diagonal index pairs in the qx/qy/qz expressions are swapped
+    relative to the textbook formula.
+    """
+    import math
+    m00, m01, m02 = R[0][0], R[0][1], R[0][2]
+    m10, m11, m12 = R[1][0], R[1][1], R[1][2]
+    m20, m21, m22 = R[2][0], R[2][1], R[2][2]
+    trace = m00 + m11 + m22
+    if trace > 0.0:
+        s = math.sqrt(trace + 1.0) * 2.0
+        qw = 0.25 * s
+        qx = (m12 - m21) / s
+        qy = (m20 - m02) / s
+        qz = (m01 - m10) / s
+    elif m00 > m11 and m00 > m22:
+        s = math.sqrt(1.0 + m00 - m11 - m22) * 2.0
+        qw = (m12 - m21) / s
+        qx = 0.25 * s
+        qy = (m10 + m01) / s
+        qz = (m20 + m02) / s
+    elif m11 > m22:
+        s = math.sqrt(1.0 + m11 - m00 - m22) * 2.0
+        qw = (m20 - m02) / s
+        qx = (m10 + m01) / s
+        qy = 0.25 * s
+        qz = (m21 + m12) / s
+    else:
+        s = math.sqrt(1.0 + m22 - m00 - m11) * 2.0
+        qw = (m01 - m10) / s
+        qx = (m20 + m02) / s
+        qy = (m21 + m12) / s
+        qz = 0.25 * s
+    if qw < 0.0:
+        qx, qy, qz, qw = -qx, -qy, -qz, -qw
+    return (qx, qy, qz, qw)
+
+
+def decompose_matrix_quat_pure(matrix):
+    """Pure-Python mirror of core.decompose_matrix_quat.
+
+    Maya stores matrices row-major with post-multiply convention: a row
+    vector is multiplied on the right by the matrix, so the translation
+    lives in the LAST ROW (M[3][0..2]) and the linear part in the
+    upper-left 3x3. Scale is the row-wise L2 norm of the 3x3; after
+    scale normalization the rows form an (approximately) orthogonal
+    rotation matrix which is converted to quaternion.
+
+    Shear is silently absorbed — addendum §M2.3 T7 contract.
+    """
+    import math
+    M = matrix
+    # Accept numpy or list-of-lists.
+    def g(i, j):
+        return float(M[i][j])
+    tx, ty, tz = g(3, 0), g(3, 1), g(3, 2)
+
+    row0 = (g(0, 0), g(0, 1), g(0, 2))
+    row1 = (g(1, 0), g(1, 1), g(1, 2))
+    row2 = (g(2, 0), g(2, 1), g(2, 2))
+    sx = math.sqrt(sum(c*c for c in row0))
+    sy = math.sqrt(sum(c*c for c in row1))
+    sz = math.sqrt(sum(c*c for c in row2))
+    if sx > 1e-12 and sy > 1e-12 and sz > 1e-12:
+        R = [
+            [row0[0]/sx, row0[1]/sx, row0[2]/sx],
+            [row1[0]/sy, row1[1]/sy, row1[2]/sy],
+            [row2[0]/sz, row2[1]/sz, row2[2]/sz],
+        ]
+        q = _rotation_matrix_to_quat(R)
+    else:
+        # Degenerate scale (rare) — emit identity rotation.
+        q = (0.0, 0.0, 0.0, 1.0)
+    return {
+        "translate": (tx, ty, tz),
+        "quat":      q,
+        "scale":     (sx, sy, sz),
+    }
+
+
 def get_swing_twist_block_distance(v1, v2):
     """Per-5-block composite: sqrt(d_swing² + d_twist²) aggregated L2."""
     assert len(v1) == len(v2)

@@ -78,6 +78,11 @@ MObject RBFtools::poseRotateOrder;
 MObject RBFtools::poses;
 MObject RBFtools::poseValue;
 MObject RBFtools::poseValues;
+// M2.3: pure-data per-pose local Transform snapshot.
+MObject RBFtools::poseLocalTransform;
+MObject RBFtools::poseLocalTranslate;
+MObject RBFtools::poseLocalQuat;
+MObject RBFtools::poseLocalScale;
 MObject RBFtools::restInput;
 // controls
 MObject RBFtools::allowNegative;
@@ -527,6 +532,29 @@ MStatus RBFtools::initialize()
     nAttr.setArray(true);
     nAttr.setUsesArrayDataBuilder(true);
 
+    // M2.3: per-pose local-Transform snapshot children. Pure data channel —
+    // compute() never reads these; they exist for downstream JSON export
+    // (M3) and engine-side bone-pose reconstruction (v5 PART D.5 / 铁律
+    // B10). Decomposition is 10-dim (t + q + s); rotateOrder-independent
+    // because quat extraction sidesteps Euler. See v5 addendum §M2.3.
+    poseLocalTranslate = nAttr.create("poseLocalTranslate", "plt",
+        MFnNumericData::k3Double);
+    nAttr.setStorable(true);
+    nAttr.setKeyable(false);
+    nAttr.setDefault(0.0, 0.0, 0.0);
+
+    poseLocalQuat = nAttr.create("poseLocalQuat", "plq",
+        MFnNumericData::k4Double);
+    nAttr.setStorable(true);
+    nAttr.setKeyable(false);
+    nAttr.setDefault(0.0, 0.0, 0.0, 1.0);   // identity quat, q_w canonical
+
+    poseLocalScale = nAttr.create("poseLocalScale", "pls",
+        MFnNumericData::k3Double);
+    nAttr.setStorable(true);
+    nAttr.setKeyable(false);
+    nAttr.setDefault(1.0, 1.0, 1.0);        // identity scale
+
     restInput = nAttr.create("restInput", "rin", MFnNumericData::kDouble);
     nAttr.setWritable(true);
     nAttr.setKeyable(true);
@@ -656,12 +684,27 @@ MStatus RBFtools::initialize()
     cAttr.addChild(controlNode);
     cAttr.addChild(pose);
 
+    // M2.3: build the poseLocalTransform compound BEFORE nesting it
+    // into poses[p], so the child registration order on the `poses`
+    // compound is: poseInput, poseValue, poseLocalTransform. The
+    // addChild calls below must happen AFTER poseLocalTransform is
+    // assembled here — Maya evaluates addChild in the cAttr current
+    // context; re-ordering would silently attach children to the
+    // wrong parent.
+    poseLocalTransform = cAttr.create("poseLocalTransform", "plxf");
+    cAttr.setStorable(true);
+    cAttr.setKeyable(false);
+    cAttr.addChild(poseLocalTranslate);
+    cAttr.addChild(poseLocalQuat);
+    cAttr.addChild(poseLocalScale);
+
     poses = cAttr.create("poses", "ps");
     cAttr.setKeyable(true);
     cAttr.setArray(true);
     cAttr.setUsesArrayDataBuilder(true);
     cAttr.addChild(poseInput);
     cAttr.addChild(poseValue);
+    cAttr.addChild(poseLocalTransform);   // M2.3
 
     //
     // MRampAttribute
@@ -708,6 +751,12 @@ MStatus RBFtools::initialize()
     addAttribute(poses);
     addAttribute(poseInput);
     addAttribute(poseValue);
+    // M2.3: local-Transform compound + children. No attributeAffects
+    // because this is a pure data channel (compute() never reads it).
+    addAttribute(poseLocalTranslate);
+    addAttribute(poseLocalQuat);
+    addAttribute(poseLocalScale);
+    addAttribute(poseLocalTransform);
     addAttribute(output);
     addAttribute(baseValue);
     addAttribute(outputIsScale);

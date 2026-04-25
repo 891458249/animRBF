@@ -750,6 +750,163 @@ getPoseWeights(..., kernelType,
 - ❌ `swingTwistWeight` 可调权重 → M3
 - ❌ 分字段 pose 存储 → M2.5
 
+---
+
+## §M2.3 — Local-Transform 双存储 (per-pose)
+
+v5 PART D.5 / 铁律 B10 落地。Apply 时刻在每个 pose 上**额外**快照 driven_node 的 local Transform（分解为 t/q/s），与 `poseValue` 标量并行存储。compute() **零消费**——这是为 M3 JSON Export + 引擎端 bone-pose 重建准备的纯数据通道。
+
+### M2.3.1 — 决议日志
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | 分解格式 | **① 10-dim t(3)+q(4)+s(3)** | quat 避免 gimbal + rotateOrder 二义性；与 M2.1b/M2.2 q_w≥0 规范统一 |
+| (B) | Apply 时点 | **① 统一抓** | 与 M1.2 baseline 捕获并行；用户期望 "Apply 一键搞定" |
+| (C) | blendShape fallback | **① identity，不加 valid flag** | schema 简洁；引擎端约定 "identity ⇒ no meaningful Transform" |
+| (D) | Per-pose 策略 | **① Replay 每 pose** via connection sever | faithful 快照；存得起 Apply 一次的代价 |
+| (E) | Replay 失败 | **① 跳过 + warning** | 对齐 M2.1/M2.2 fall-back 模式；DG 永不停 |
+| (F) | Matrix mode 是否写 | **① 不写** | `driverList[d].pose[p].poseMatrix` 已是等价来源 |
+| (G) | Schema 层级 | **① `poses[p].poseLocalTransform.{t,q,s}` compound 嵌套** | 与现存 `driverList[d].pose[p]` precedent 对齐 |
+
+### M2.3.2 — Schema 草案（C++ 实施版）
+
+```
+poses[p] (existing compound, multi)
+  ├── poseInput[]  (existing — driver scalars)
+  ├── poseValue[]  (existing — driven scalars)
+  └── poseLocalTransform (NEW, compound)        ← M2.3
+        ├── poseLocalTranslate (double3, default 0,0,0)
+        ├── poseLocalQuat      (double4, default 0,0,0,1)   ← q_w canonical
+        └── poseLocalScale     (double3, default 1,1,1)
+```
+
+- 4 个新 MObject，全部 `setStorable(true) + setKeyable(false)`
+- **零 `attributeAffects`**：pure data channel，compute() 不读
+- v4 rig 升级：multi 稀疏存储 + 不写则不占空间，老 rig 0 字节膨胀
+
+### M2.3.3 — **Non-driven-channel Freeze Contract**（强制契约）
+
+M2.3 replay **只 setAttr 用户选择的 `driven_attrs`**，其余 transform 通道保持 Apply 调用时刻 driven_node 的场景状态。这意味着：
+
+- 若用户在 Apply 时 driven_node 处于 rest pose，所有 pose 的 `poseLocalTransform` 共享该 rest 的 non-driven 通道值（理想情况）
+- 若用户在 Apply 时 driven_node 有 stale 非零值（例如 `rx=30°`），那 30° 会被冻结进**所有** `poseLocalTransform.poseLocalQuat` 里
+- 引擎端消费时应假定 non-driven 通道 = Apply 时刻快照，而非每 pose 独立
+
+**用户实践建议**：**Apply 前手动重置 driven_node 到 rest pose**（典型工作流：把 driven_node 的所有 transform 通道清零或回到绑定状态，再点 Apply）。
+
+**M3 UI Forward-pointer**：M3 阶段加 "Reset driven to rest before capture" 复选框自动化此步。M2.3 **不做** UI 侧处理，只埋契约。
+
+### M2.3.4 — Single-Sever / Single-Restore 生命周期（强制实施细节）
+
+`capture_per_pose_local_transforms` 实施约束：
+
+```
+def capture_per_pose_local_transforms(driven_node, driven_attrs, poses):
+    # === 一次断 (循环之前) ===
+    saved_conns = [...]    # 收集 incoming connections
+    saved_values = [...]   # 收集原始 attr 值
+    
+    try:
+        # === 循环内只 setAttr + 读 transform ===
+        for pose in poses:
+            for attr, v in zip(driven_attrs, pose.values):
+                cmds.setAttr(driven_node + "." + attr, v)
+            mat = get_local_matrix(driven_node)
+            results.append(decompose_matrix_quat(mat))
+    finally:
+        # === 一次连回 (即使异常) ===
+        for plug, orig in saved_values:
+            cmds.setAttr(plug, orig)
+        for src, dst in saved_conns:
+            cmds.connectAttr(src, dst)
+```
+
+**禁止**循环内重复断连/重连（会产生 DG dirty 风暴 + 中间态污染下游）。test T9 守护此契约。
+
+### M2.3.5 — Shear 处理契约（T7）
+
+`MTransformationMatrix::scale()` 只返回 3 维 scale；shear 由独立 `shear()` getter 提取。M2.3 **不读 shear**——shear 部分被静默丢弃。
+
+- **T7.a 纯 shear 输入**：分解 → t/q/s 接近 identity，**无 NaN，无 crash**
+- **T7.b 混合 SRT + shear**：t/q/s 正确提取，shear 部分丢失。Quat 模长偏离单位 O(shear) 量级（Shepperd 公式假设输入正交矩阵；shear 破坏正交性）
+
+**用户实践**：driven_node 有 shear 的 rig 应在 Apply 前烘焙 shear。M2.3 不处理 polar decomposition（M5 或专项）。
+
+### M2.3.6 — rotateOrder 无关性（关键技术红利）
+
+quat 分解通过 `MTransformationMatrix::rotation(asQuaternion=True)` 提取，**完全跳过 Euler 中间态**。意味着：
+
+- 用户切 driven_node 的 `rotateOrder` 不影响 `poseLocalQuat` 数值
+- M2.3 与 M2.1a 的 `driverInputRotateOrder[]`（输入端）**正交**——一个解 Euler→quat（输入），一个抓 matrix→quat（输出）
+- 这是选 (A)① 10-dim 而非 (A)③ 9-dim Euler 的核心收益
+
+### M2.3.7 — Compute() 零消费契约（架构红线）
+
+`poseLocalTransform` 及其 3 个 children **永远**不出现在 `compute()` 路径里：
+
+- 不在 `getPoseData` / `getPoseVectors` 读取
+- 不在 `getPoseDelta` / `getPoseWeights` 读取
+- 不在 `attributeAffects` 列表（无 DG dependency）
+- 不在 M1.2 baseline / M1.3 clamp / M1.4 solver / M2.1 encoding / M2.2 QWA 任何地方读取
+
+**唯一消费者**：M3 JSON Export 路径。本子任务**仅写入**。
+
+### M2.3.8 — JSON Export 前瞻契约（M3 锁定）
+
+`poseLocalTransform` compound 的 child 布局 = `{poseLocalTranslate(double3), poseLocalQuat(double4), poseLocalScale(double3)}`。翻译成 JSON 时保持 10 维定长，key 为 `t/q/s`：
+
+```json
+{
+  "local_transform": {
+    "t": [tx, ty, tz],
+    "q": [qx, qy, qz, qw],
+    "s": [sx, sy, sz]
+  }
+}
+```
+
+每 pose 一份，array 元素顺序与 `poses[p]` 索引对齐。blendShape driven → 全 pose 写 identity。M3 Export 按此约定读取，**不需二次协商**。
+
+### M2.3.9 — DG 副作用 caveat
+
+Replay 期间 driven_node 的属性被频繁 setAttr，下游连接的节点会短暂看到中间态。Interactive Maya 用户可能感知"画面轻微抖动 1 帧"。这是 Apply 动作固有代价，本子任务**不解决**——解决需要 `cmds.refresh(suspend=True)` + DG pause 包装，属 M3 UI 优化范畴。
+
+### M2.3.10 — 零回归契约
+
+- v4 rig 升级 + 未触发 Apply：`poses[p].poseLocalTransform` multi 稀疏不写入 → 0 字节膨胀
+- 已触发 Apply：`apply_poses` 追加调用 `capture_per_pose_local_transforms` + `write_pose_local_transforms`，但 compute() 路径完全不读，行为字节级等价 M2.2
+- M1+M2.1+M2.2 的 153 条测试在 M2.3 改动后全绿 ⇒ 零回归验证通过
+
+### M2.3.11 — Non-goals
+
+- ❌ JSON 导出实现 → **M3**
+- ❌ "Capture Local Transform" 独立按钮 → M3
+- ❌ "Reset driven to rest before capture" UI checkbox → M3
+- ❌ Polar decomposition / 精确 shear 处理 → M5 或专项（addendum T7 caveat 已备案）
+- ❌ Per-pose 非 driven 通道精确快照 → M4 专项（要求完整 driven_node state capture）
+- ❌ `cmds.refresh(suspend=True)` DG pause 包装 → M3 UI 优化
+- ❌ compute() 消费 `poseLocalTransform` → **永不**（架构红线）
+- ❌ Matrix mode 写入 → 不实施（`driverList[d].pose[p].poseMatrix` 已等价）
+- ❌ 引擎端 runtime 组件 → M5
+
+### M2.3.12 — 签名演化 / 新增 API
+
+```python
+# core.py 新增（M2.3）
+IDENTITY_LOCAL_TRANSFORM      # module-level dict 常量
+decompose_matrix_quat(matrix) → dict           # 新（与 decompose_matrix Euler 版并列）
+capture_per_pose_local_transforms(driven_node, driven_attrs, poses) → list[dict]
+write_pose_local_transforms(node, local_transforms) → None
+read_pose_local_transforms(node) → list[dict]  # 给 M3 Export 准备
+
+# apply_poses 流程追加 step 4
+#   3 baseline capture / write (M1.2)
+#   4 local Transform capture / write (M2.3, NEW)
+#   5 trigger evaluate
+```
+
+API 签名稳定。M3 JSON Export 直接消费 `read_pose_local_transforms` 输出。
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```

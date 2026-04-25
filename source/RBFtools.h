@@ -318,6 +318,13 @@ public:
     static MObject poses;
     static MObject poseValue;
     static MObject poseValues;
+    // M2.3: per-pose local-Transform snapshot (Generic mode). Compound
+    // child of poses[p]; pure data channel — never read by compute().
+    // See v5 addendum §M2.3 for the non-driven-channel freeze contract.
+    static MObject poseLocalTransform;   // compound
+    static MObject poseLocalTranslate;   // double3
+    static MObject poseLocalQuat;        // double4 (q_w canonical >= 0)
+    static MObject poseLocalScale;       // double3
     static MObject rbfMode;
     static MObject restInput;
     static MObject scale;
