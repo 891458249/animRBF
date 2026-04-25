@@ -163,6 +163,16 @@ _EN = {
     "status_import_starting":          "Importing...",
     "status_import_done":              "Import complete.",
     "status_import_failed":            "Import failed.",
+    # -- M3.6: Auto-neutral sample --
+    "menu_add_neutral_sample":         "Add Neutral Sample",
+    "menu_reset_auto_neutral":         "Reset auto-neutral default",
+    "reset_auto_neutral_done":         "Auto-neutral preference cleared",
+    "title_add_neutral":               "Add Neutral Sample",
+    "summary_add_neutral":
+        "A rest pose will be inserted at index 0; existing poses shift by 1.",
+    "status_neutral_starting":         "Adding neutral sample...",
+    "status_neutral_done":             "Neutral sample added.",
+    "status_neutral_failed":           "Add neutral sample failed.",
     # -- M3.1: Pose Pruner --
     "menu_prune_poses":                "Prune Poses...",
     "row_remove_this":                 "Remove this pose",
@@ -358,6 +368,16 @@ _ZH = {
     "status_import_starting":          u"\u6b63\u5728\u5bfc\u5165...",
     "status_import_done":              u"\u5bfc\u5165\u5b8c\u6210\u3002",
     "status_import_failed":            u"\u5bfc\u5165\u5931\u8d25\u3002",
+    # -- M3.6 --
+    "menu_add_neutral_sample":         u"\u6dfb\u52a0\u4e2d\u6027\u6837\u672c",
+    "menu_reset_auto_neutral":         u"\u91cd\u7f6e\u81ea\u52a8\u4e2d\u6027\u9ed8\u8ba4\u503c",
+    "reset_auto_neutral_done":         u"\u81ea\u52a8\u4e2d\u6027\u504f\u597d\u5df2\u6e05\u9664",
+    "title_add_neutral":               u"\u6dfb\u52a0\u4e2d\u6027\u6837\u672c",
+    "summary_add_neutral":
+        u"\u4f1a\u5728\u7d22\u5f15 0 \u63d2\u5165\u4e00\u4e2a rest pose\uff1b\u73b0\u6709 pose \u540e\u79fb\u4e00\u4f4d\u3002",
+    "status_neutral_starting":         u"\u6b63\u5728\u6dfb\u52a0\u4e2d\u6027\u6837\u672c...",
+    "status_neutral_done":             u"\u4e2d\u6027\u6837\u672c\u5df2\u6dfb\u52a0\u3002",
+    "status_neutral_failed":           u"\u6dfb\u52a0\u4e2d\u6027\u6837\u672c\u5931\u8d25\u3002",
     # -- M3.1 --
     "menu_prune_poses":                u"\u4fee\u526a Pose...",
     "row_remove_this":                 u"\u5220\u9664\u6b64 pose",

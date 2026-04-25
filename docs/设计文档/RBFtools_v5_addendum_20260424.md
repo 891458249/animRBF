@@ -2225,6 +2225,212 @@ M3.1 Driven Node State Requirement:
 
 ---
 
+## §M3.6 — Auto-Neutral Sample on Fresh Node
+
+Milestone 3 数据卫生子任务的"播种端"——新建 RBFtools 节点时自动注入一个 rest pose，避免用户漏加 baseline anchor 导致首次 RBF 训练数值退化。**0 行 C++ + 0 行 `core.py` 改动**（与 M3.1 对称——纯复用既有 helper）。
+
+### M3.6.F0 — CMT "3-pose" Pattern Does NOT Map to RBFtools v5
+
+设计文档 PART E.9 提到 "CMT-style 3 neutral samples"。**直读 CMT 源码**（`docs/源文档/chadvernon/cmt-master/scripts/cmt/rig/rbf.py:11-48`）发现这是个常见误读：
+
+```python
+# CMT cmt/rig/rbf.py:11-48  (Chad Vernon's reference RBF implementation)
+class RBF(object):
+    swing = 0
+    twist = 1
+    swing_twist = 2
+
+    @classmethod
+    def create(cls, ..., add_neutral_sample=True):
+        ...
+        if add_neutral_sample:
+            for i in range(3):
+                node.add_sample(
+                    output_values=output_values,
+                    output_rotations=output_rotations,
+                    rotation_type=i,    # ← per-sample metadata flag
+                )
+```
+
+CMT's `add_sample` 不传 `input_values` / `input_rotations` 时**默认读当前场景状态**（rbf.py:233-241）。三个 sample 的输入完全相同（identity at create-time），仅每个 sample 自带 `rotationType` flag (0/1/2 = swing/twist/swing+twist) 选择距离度量。
+
+**三个论点说明 CMT 模式不映射**：
+
+1. CMT `rotationType` 是 **per-sample** distance-metric flag —— 不是 input 角度变体
+2. RBFtools v5 把 metric 提到**节点级** `inputEncoding`（M2.1a/b: Raw / Quat / BendRoll / ExpMap / SwingTwist）—— 所有 sample 共享一个 encoding
+3. 因此正确等价是**单 rest pose**。复刻 CMT 字面 3-pose 在 RBFtools 上会注入 3 个 identical inputs，让 kernel 距离矩阵奇异 + 触发 M2.2 PSD guard fallback —— 数学冗余甚至病态
+
+### M3.6.F0+ — Verify-Before-Design Pattern (项目 cross-cut 范式)
+
+M3.6 F0 是项目第三次"先核查后设计"的实例：
+
+| Milestone | 先核查项 | 落地章节 |
+|---|---|---|
+| M3.7 commit retrospective | reverse-then-reapply 用 Edit + Python 替代 git add -p | addendum §M3.0 appendix |
+| M3.1 | F1-F4 helper 行为预核查（`auto_alias_outputs` clear stale alias / multi attr index 模型 / ConfirmDialog monospace / read+apply packed-rebuild）| addendum §M3.1.2 |
+| M3.6 | F0 直读 CMT 源码（rbf.py:11-48）发现 per-sample rotationType ≠ 角度变体 | 本节 |
+
+**通用规则**：任何 milestone 涉及"参考某个第三方实现"的子任务，先**直读源码**而非依赖二手描述/分析报告。CMT / AnimaDriver / Chad Vernon / Tekken 资料都适用。详见 §M3.0 reverse-then-reapply / §M3.1.2 F1-F4 / §M3.6 F0 三处 verify-before-design 标准入口。
+
+### M3.6.1 — 决议日志（9 项）
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | Neutral pose 数量 | **A.1** 单 rest pose | F0 验证 CMT 模式不适用 |
+| (B) | 触发时机 | **B.3** 双轨（auto on create + manual button）+ 默认 true | 与 M1.2 baseline 自动捕获一致；optionVar 关闭 |
+| (C) | optionVar 名 | **C.1** `RBFtools_auto_neutral_sample`（单数）| 反映 Q1 修订真实语义 |
+| (D) | Driven values 来源 | **D.2** 0/1 + isScale + quat W=1 | 当 driven_node 未连接时安全 placeholder |
+| (E) | UI 入口 | **E.1** Tools menu entry（不引入 spillover §3）| ToolsSection collapsible 推到 M3.5 真正需要 panel 时 |
+| (F) | Edit 菜单 reset | **F.2** 加 "Reset auto-neutral default" | 沿用 M3.0 reset_confirms 模式 |
+| (G) | 手动按钮 + existing | **G.3** confirm + insert at 0 | 与 M1.2 "pose[0] is rest" 约定一致 |
+| (H) | quat leader W=1 | **H.2** 强制 | 避免 PSD guard fallback；与 M2.2 SwingTwist `q_w >= 0` 规范一致 |
+| (I) | 命名 | **I.2** `add_neutral_sample` 单数 | 反映单 rest pose 语义 |
+
+### M3.6.2 — `add_neutral_sample` 加固契约（统一代码路径）
+
+```
+M3.6 unified-path contract:
+  add_neutral_sample(node) reads quat_group_starts and isScale
+  flags from the node ON EVERY CALL — does NOT assume empty
+  even on the auto-create-node path. Rationale: rare workflows
+  (template import, external scripting) may pre-set
+  outputQuaternionGroupStart on a fresh node before the
+  auto-trigger fires; honouring those values is essential.
+  Single code path covers auto + manual; no branching.
+```
+
+T_NEUTRAL_QUAT_W 三 sub-test 守护此规则（无 group / 单 group / 多 group）。
+
+### M3.6.3 — `generate_neutral_values` 算法（pure function）
+
+```python
+def generate_neutral_values(n_outputs, output_is_scale=None,
+                            quat_group_starts=None):
+    """Build the rest-pose driven-values vector.
+
+    Rules:
+      - Default 0.0 in every slot.
+      - is_scale=True slots forced to 1.0 (M1.2 contract).
+      - For each quat-group leader index s, slot s+3 (W comp of
+        identity quaternion) forced to 1.0.
+    """
+    flags = list(output_is_scale) if output_is_scale else []
+    while len(flags) < n_outputs:
+        flags.append(False)
+    out = [1.0 if flags[i] else 0.0 for i in range(n_outputs)]
+    for s in (quat_group_starts or []):
+        if 0 <= s + 3 < n_outputs:
+            out[s + 3] = 1.0
+    return out
+```
+
+### M3.6.4 — 创建顺序 & 流水线边界（write-only on poses[0]）
+
+```
+controller.create_node():
+  1. core.create_node()                         # 新 RBFtools shape
+  2. self.refresh_nodes() / _load_settings() / _load_editor()
+  3. ★ if _auto_neutral_enabled() AND .type == 1:
+        core_neutral.add_neutral_sample(transform)
+        self._load_editor()
+```
+
+**关键**：M3.6 **只**写 pose[0] 数据；**不**触发：
+
+- ❌ M3.7 `auto_alias_outputs`（首次 Apply 兜底）
+- ❌ M1.2 `capture_output_baselines`（首次 Apply 兜底）
+- ❌ M2.3 `capture_per_pose_local_transforms`（首次 Apply 兜底）
+
+T4b source-text scan 守护：`add_neutral_sample` 执行体内**不出现** `apply_poses` / `capture_output_baselines` / `capture_per_pose_local_transforms` / `auto_alias_outputs` 任何字符串（comment 也不出现 —— 我已统一改为"the Apply step"避免歧义）。
+
+### M3.6.5 — M3.6 与 M1.2 Baseline 一致性
+
+`controller.create_node` auto-seed 写 `pose[0]`（values 全 0 + isScale slot 1.0 + quat W=1），用户首次 Apply 时 M1.2 `capture_output_baselines` 优先用 `pose[0]` 的 driven values 作 baseline。**两者首次自动一致**：M3.6 的 rest pose values 即 M1.2 baseline 来源。
+
+后续 Apply 重 capture 时若 pose[0] 还是 rest → baseline 仍一致；若用户改了 pose[0] → baseline 跟随。**无 bug**，addendum 一行明记。
+
+### M3.6.6 — UI 入口
+
+| 入口 | 通道 |
+|---|---|
+| 自动触发 | `controller.create_node` 末尾（gated on optionVar + type==1）|
+| 手动按钮 | `Tools → Add Neutral Sample`（`add_tools_action`）|
+| optionVar 复位 | `Edit → Reset auto-neutral default`（不走 confirm，沿用 M3.0 reset_confirms 模式）|
+
+**未引入 ToolsSection collapsible** —— 推到 M3.5 Pose Profiler 真正需要 per-node 工具面板时再创建（spillover §3 候选）。
+
+### M3.6.7 — Action ID 注册表更新（addendum §M3.0.3）
+
+| action_id | Sub-task | Confirm 触发场景 |
+|---|---|---|
+| `add_neutral_with_existing` | M3.6 | 手动按钮 + pose[0] 已有用户 pose（非 rest）时 |
+| ~~`add_neutral_auto`~~ | M3.6 | **不**走 confirm（自动 create-time 触发，空节点无破坏）|
+| ~~`add_neutral_first`~~ | M3.6 | **不**走 confirm（手动按钮 + 空节点无破坏）|
+
+**第 5 个 path A 真实消费者**——前 4 个 mirror_create / mirror_overwrite / import_replace / force_regenerate_aliases / prune_poses 模式稳定运行；本次零 ConfirmDialog API 修改。
+
+### M3.6.8 — 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `core_neutral.py` | **新建** ~135 行（`generate_neutral_values` pure + `add_neutral_sample` Maya-touching + F0 docstring）|
+| `core.py` | **0 改动**（pruner-style 复用：`read_quat_group_starts` / `read_output_baselines` / `read_all_poses` / `_write_pose_to_node` / `clear_node_data` 全部既有 helper）|
+| `controller.py` | +`_auto_neutral_enabled` + `reset_auto_neutral_default` + `add_neutral_sample_to_current_node` + `create_node` auto-trigger ~80 行 |
+| `ui/main_window.py` | +Tools entry + Edit reset entry + 2 callbacks ~30 行 |
+| `ui/i18n.py` | +8 keys × 2 langs = 16 行 |
+| `tests/test_m3_6_neutral.py` | **新建** ~330 行（8 测试类，18 子测试）|
+| `docs/.../addendum_20260424.md` | §M3.6 ~135 行（含 F0 + verify-before-design 范式）|
+| `docs/.../milestone_3_summary.md` | 进度 + action_id 注册 |
+
+**总：~625 行**（含测试 + addendum）；**生产代码 ~260 行 < 800 上限** ——M3 系列最简子任务之一，与 M3.1 并列在"零 core.py 改动"克制层。
+
+### M3.6.9 — 测试矩阵
+
+| T# | 名称 | 子测 |
+|---|---|---|
+| T1 | `generate_neutral_values` 默认全 0 | 1 |
+| T2 | `generate_neutral_values` isScale=True 强制 1.0 + 短 flags 列表 padding | 2 |
+| **T3** | **T_NEUTRAL_QUAT_W** quat leader W=1（**3 sub: 无 group / 单 group / 多 group**）| 3 |
+| T4 | `add_neutral_sample` call sequencing：写 pose[0] / 不触发流水线 source-scan / 幂等 / 已有 pose shift +1 | 4 |
+| T5 | `controller.create_node` auto-trigger gating（optionVar 默认 / 关闭 / 源码守护）| 3 |
+| T6 | 手动按钮 + existing poses 触发 confirm（action_id 字符串守护 + 方法存在）| 2 |
+| T7 | Tools 菜单 + Edit reset 菜单 source-scan | 2 |
+| T8 | i18n 8 keys EN/CN parity | 1 |
+
+合计 **8 测试类，18 子测试**。**总测试数：356 + 18 = 374 / 374**。
+
+### M3.6.10 — 零回归
+
+- `core.py` **0 改动** —— 没有新 helper 引入回归面（M3 系列第二次零核心改动，与 M3.1 对称）
+- 自动触发 gated on type==1 —— `core.create_node` 当前默认 type=0（VectorAngle），所以 "New" 按钮流程下 M3.6 自动是 no-op；手动按钮是实际入口。未来若改 `create_node` 默认 type=1，自动路径自然激活
+- M3.7 alias / M1.2 baseline / M2.3 localXform 都没被 M3.6 触发 —— 首次 Apply 时全部由 `apply_poses` 兜底
+- 全量回归：356 + 18 = **374 / 374** 通过
+
+### M3.6.11 — Non-goals
+
+- ❌ CMT 字面 3-pose 复刻（F0 验证不适用）
+- ❌ inputEncoding 5 档 swing/twist 数学表（Q1 修订后不需要）
+- ❌ 用户自定义 neutral pose 角度 / 数量 —— 推 M3 后续 patch
+- ❌ Pruner 触发后自动重建 neutral —— 用户主动操作（沿用 M3.1 设计）
+- ❌ 引入 ToolsSection collapsible —— 推到 M3.5 Profiler
+- ❌ M3.6 不触发 alias / baseline / poseLocalTransform —— `apply_poses` 兜底
+- ❌ 自动 neutral 在 driver/driven 已配置后再次触发 —— 仅 create_node 一次
+
+### M3.6.12 — 红线确认
+
+- ✅ 沿用 M3 / M3.0 / M3.2 / M3.7 / M3.3 / M3.1 全部红线
+- ✅ M3.6 不主动 setAttr alias（M3.7 兜底）
+- ✅ M3.6 不主动 capture baseline / poseLocalTransform（apply 兜底）
+- ✅ M3.6 不修改既有 pose（仅 append；覆盖只发生在用户显式 confirm）
+- ✅ optionVar 复位入口不需 confirm
+- ✅ addendum §M3.6 F0 明文记录 CMT 模式不适用 RBFtools v5 的三个论点
+- ✅ optionVar 单数命名 `RBFtools_auto_neutral_sample`
+- ✅ `add_neutral_sample` 永远从节点查询 `quat_group_starts`（统一代码路径）
+- ✅ T_NEUTRAL_QUAT_W 永久守护（3 sub-cases）
+- ✅ T4b source-scan 守护流水线边界（write-only on poses[0]）
+
+---
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```

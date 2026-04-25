@@ -160,7 +160,85 @@ class MainController(QtCore.QObject):
         self._current_node = transform
         self._load_settings()
         self._load_editor()
+        # M3.6: auto-seed a rest pose on freshly created RBF nodes
+        # when the per-user optionVar is on. Gated on type == 1
+        # (RBF mode) so VectorAngle nodes are untouched. The "New"
+        # button currently creates type=0 nodes, making this a
+        # no-op in that flow today — the manual Tools menu entry
+        # is the practical entry point. See addendum §M3.6.
+        if self._auto_neutral_enabled() and \
+           core.safe_get(core.get_shape(transform) + ".type", 0) == 1:
+            from RBFtools import core_neutral
+            try:
+                if core_neutral.add_neutral_sample(transform):
+                    self._load_editor()
+            except Exception as exc:
+                cmds.warning(
+                    "create_node: auto-neutral seed failed: {} "
+                    "(continuing — neutral seed is advisory)".format(exc))
         return transform
+
+    # =================================================================
+    #  M3.6 — Auto-neutral-sample (path A consumer; 5th)
+    # =================================================================
+
+    AUTO_NEUTRAL_OPT_VAR = "RBFtools_auto_neutral_sample"
+
+    def _auto_neutral_enabled(self):
+        """Return the user's auto-neutral preference (default True)."""
+        try:
+            if cmds.optionVar(exists=self.AUTO_NEUTRAL_OPT_VAR):
+                return bool(cmds.optionVar(query=self.AUTO_NEUTRAL_OPT_VAR))
+        except Exception:
+            pass
+        return True
+
+    def reset_auto_neutral_default(self):
+        """Edit menu reset entry — wipe the optionVar so the next
+        node creation falls back to default-True. Mirrors the
+        M3.0 ``reset_all_skip_confirms`` pattern; no confirm
+        dialog (selecting the menu item is the user intent)."""
+        try:
+            if cmds.optionVar(exists=self.AUTO_NEUTRAL_OPT_VAR):
+                cmds.optionVar(remove=self.AUTO_NEUTRAL_OPT_VAR)
+        except Exception as exc:
+            cmds.warning(
+                "reset_auto_neutral_default failed: {}".format(exc))
+
+    def add_neutral_sample_to_current_node(self):
+        """Manual entry point — used by the Tools menu callback.
+        Walks path A confirm only when existing poses would be
+        pushed by the index-0 insertion (G.3 contract)."""
+        if not self._current_node:
+            cmds.warning("add_neutral_sample: no current node")
+            return False
+        from RBFtools import core_neutral
+        from RBFtools.ui.i18n import tr
+
+        existing = core.read_all_poses(self._current_node)
+        if existing:
+            preview = (
+                "Add Neutral Sample will INSERT a rest pose at "
+                "index 0,\npushing {} existing pose(s) to indices "
+                "1..{}.\n\nContinue?".format(len(existing), len(existing)))
+            proceed = self.ask_confirm(
+                title=tr("title_add_neutral"),
+                summary=tr("summary_add_neutral"),
+                preview_text=preview,
+                action_id="add_neutral_with_existing",
+            )
+            if not proceed:
+                return False
+
+        try:
+            wrote = core_neutral.add_neutral_sample(self._current_node)
+        except Exception as exc:
+            cmds.warning(
+                "add_neutral_sample failed: {}".format(exc))
+            return False
+        if wrote:
+            self._load_editor()
+        return wrote
 
     def delete_node(self):
         """Delete the current node."""

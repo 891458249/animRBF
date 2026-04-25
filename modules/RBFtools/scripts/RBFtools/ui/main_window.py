@@ -439,6 +439,18 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             "menu_export_selected", self._on_export_selected)
         self.add_file_action("menu_export_all", self._on_export_all)
 
+        # ---- M3.6: Add Neutral Sample entry ----
+        self.add_tools_action(
+            "menu_add_neutral_sample", self._on_add_neutral_sample)
+        # Edit-menu reset for the auto-neutral optionVar (mirrors
+        # the M3.0 reset_all_skip_confirms pattern; no confirm
+        # dialog because selecting the menu item is the user intent).
+        self._act_reset_auto_neutral = QtWidgets.QAction(
+            tr("menu_reset_auto_neutral"), self)
+        self._act_reset_auto_neutral.triggered.connect(
+            self._on_reset_auto_neutral)
+        self._menu_edit.addAction(self._act_reset_auto_neutral)
+
         # ---- M3.1: Pose Pruner entry + single-pose row delete ----
         self.add_tools_action("menu_prune_poses", self._on_prune_poses)
         self._pose_editor.add_pose_row_action(
@@ -506,6 +518,22 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Refresh the UI so the newly created target shows up in the
         # node selector.
         self._on_refresh()
+
+    # =================================================================
+    #  M3.6 — Add Neutral Sample entry points
+    # =================================================================
+
+    def _on_add_neutral_sample(self):
+        """Tools -> Add Neutral Sample. Delegates to controller's
+        path A consumer (confirm only if existing poses)."""
+        self._ctrl.add_neutral_sample_to_current_node()
+
+    def _on_reset_auto_neutral(self):
+        """Edit -> Reset auto-neutral default. Clears the optionVar
+        so the next create_node falls back to default-True."""
+        self._ctrl.reset_auto_neutral_default()
+        if hasattr(self, "_progress_ctrl") and self._progress_ctrl:
+            self._progress_ctrl.end(tr("reset_auto_neutral_done"))
 
     # =================================================================
     #  M3.1 — Pose Pruner entry points
