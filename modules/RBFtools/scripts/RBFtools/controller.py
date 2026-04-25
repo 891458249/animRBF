@@ -182,10 +182,21 @@ class MainController(QtCore.QObject):
         self.settingsLoaded.emit(data)
 
     def set_attribute(self, attr, value):
-        """Write a single attribute on the current node."""
+        """Write a single attribute on the current node.
+
+        Dispatch by value type:
+          * ``list`` / ``tuple`` → multi-instance write via
+            :func:`core.set_node_multi_attr` (transactional;
+            clear-then-write under a single undo chunk per
+            v5 addendum §M2.4a refinement 2).
+          * scalar (int / float / bool) → :func:`core.set_node_attr`.
+        """
         if not self._current_node:
             return
-        core.set_node_attr(self._current_node, attr, value)
+        if isinstance(value, (list, tuple)):
+            core.set_node_multi_attr(self._current_node, attr, value)
+        else:
+            core.set_node_attr(self._current_node, attr, value)
 
     # =================================================================
     #  3. Kernel / radius interactions

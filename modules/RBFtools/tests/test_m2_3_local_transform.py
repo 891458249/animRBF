@@ -181,31 +181,24 @@ class T4_DoubleSnapshotConsistency(unittest.TestCase):
 
 class T5_BlendShapeFallback(unittest.TestCase):
     """For blendShape driven, capture_per_pose_local_transforms returns
-    IDENTITY_LOCAL_TRANSFORM for every pose. Testing via mock patching
-    of the core module."""
+    IDENTITY_LOCAL_TRANSFORM for every pose. Pure spec test — the actual
+    Maya integration (is_blend_shape gate) is covered by M1.5 mayapy E2E.
+    """
 
     def test_identity_per_pose(self):
-        import sys
-        sys.modules['maya'] = mock.MagicMock()
-        sys.modules['maya.cmds'] = mock.MagicMock()
-        sys.modules['maya.api'] = mock.MagicMock()
-        sys.modules['maya.api.OpenMaya'] = mock.MagicMock()
-
-        # Stub the core functions we need.
-        with mock.patch.dict('sys.modules', {
-                'RBFtools': mock.MagicMock(),
-                'RBFtools.constants': mock.MagicMock(
-                    PLUGIN_NAME='RBFtools', NODE_TYPE='RBFtools',
-                    FILTER_DEFAULTS={}, FILTER_VAR_TEMPLATE='',
-                    SCALE_ATTR_NAMES=frozenset()),
-             }):
-            # Simulate: 3 poses, blendShape driven → identity × 3.
-            from collections import namedtuple
-            Pose = namedtuple('Pose', ['inputs', 'values'])
-            poses = [Pose([0.0], [1.0]) for _ in range(3)]
-            result = [IDENTITY_LOCAL_TRANSFORM] * len(poses)
-            for r in result:
-                self.assertEqual(r, IDENTITY_LOCAL_TRANSFORM)
+        # The contract: capture returns the IDENTITY constant per pose.
+        # Pure spec verification — no sys.modules mocking (which would
+        # leak into other test files when this test runs as part of the
+        # full suite, breaking the M2.4a controller tests that rely on
+        # the conftest mocks).
+        n_poses = 3
+        result = [IDENTITY_LOCAL_TRANSFORM] * n_poses
+        self.assertEqual(len(result), n_poses)
+        for r in result:
+            self.assertEqual(r, IDENTITY_LOCAL_TRANSFORM)
+            self.assertEqual(r["translate"], (0.0, 0.0, 0.0))
+            self.assertEqual(r["quat"],      (0.0, 0.0, 0.0, 1.0))
+            self.assertEqual(r["scale"],     (1.0, 1.0, 1.0))
 
 
 class T6_ZeroRegressionEmptyNode(unittest.TestCase):

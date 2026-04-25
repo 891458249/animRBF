@@ -12,6 +12,7 @@ from RBFtools.ui.widgets.help_button import HelpButton, ComboHelpButton
 from RBFtools.constants import (
     KERNEL_LABELS, RADIUS_TYPE_LABELS, DISTANCE_TYPE_LABELS,
     TWIST_AXIS_LABELS, RBF_MODE_LABELS,
+    SOLVER_METHOD_LABELS, INPUT_ENCODING_LABELS,   # M2.4a
 )
 
 
@@ -91,6 +92,62 @@ class RBFSection(CollapsibleFrame):
         row_neg.addWidget(HelpButton("allow_neg"))
         lay.addLayout(row_neg)
 
+        # M2.4a: M1.4 regularization (Tikhonov λ).
+        row_reg = QtWidgets.QHBoxLayout()
+        self._lbl_reg = QtWidgets.QLabel(tr("regularization"))
+        self._spn_reg = QtWidgets.QDoubleSpinBox()
+        self._spn_reg.setRange(0.0, 1.0)
+        self._spn_reg.setDecimals(10)
+        self._spn_reg.setSingleStep(1.0e-9)
+        self._spn_reg.setValue(1.0e-8)
+        self._spn_reg.valueChanged.connect(
+            lambda v: self.attributeChanged.emit("regularization", v))
+        row_reg.addWidget(self._lbl_reg)
+        row_reg.addWidget(self._spn_reg, 1)
+        row_reg.addWidget(HelpButton("regularization"))
+        lay.addLayout(row_reg)
+
+        # M2.4a: M1.4 solverMethod {Auto, ForceGE}.
+        row_slv = QtWidgets.QHBoxLayout()
+        self._lbl_slvm = QtWidgets.QLabel(tr("solver_method"))
+        self._cmb_slvm = QtWidgets.QComboBox()
+        for m in SOLVER_METHOD_LABELS:
+            self._cmb_slvm.addItem(m)
+        self._cmb_slvm.currentIndexChanged.connect(
+            lambda v: self.attributeChanged.emit("solverMethod", v))
+        row_slv.addWidget(self._lbl_slvm)
+        row_slv.addWidget(self._cmb_slvm, 1)
+        row_slv.addWidget(ComboHelpButton(
+            self._cmb_slvm, [
+                "solver_auto", "solver_force_ge",
+            ], fallback_key="solver_method"))
+        lay.addLayout(row_slv)
+
+        # M2.4a: M1.3 clampEnabled + clampInflation. Inflation is
+        # disabled when clamp is off (visual cue that it has no effect).
+        row_cle = QtWidgets.QHBoxLayout()
+        self._cb_clamp = QtWidgets.QCheckBox(tr("clamp_enabled"))
+        self._cb_clamp.toggled.connect(self._on_clamp_toggled)
+        row_cle.addWidget(self._cb_clamp)
+        row_cle.addStretch()
+        row_cle.addWidget(HelpButton("clamp_enabled"))
+        lay.addLayout(row_cle)
+
+        row_cli = QtWidgets.QHBoxLayout()
+        self._lbl_clinf = QtWidgets.QLabel(tr("clamp_inflation"))
+        self._spn_clamp_inflation = QtWidgets.QDoubleSpinBox()
+        self._spn_clamp_inflation.setRange(0.0, 1.0)
+        self._spn_clamp_inflation.setDecimals(4)
+        self._spn_clamp_inflation.setSingleStep(0.01)
+        self._spn_clamp_inflation.setValue(0.0)
+        self._spn_clamp_inflation.setEnabled(False)
+        self._spn_clamp_inflation.valueChanged.connect(
+            lambda v: self.attributeChanged.emit("clampInflation", v))
+        row_cli.addWidget(self._lbl_clinf)
+        row_cli.addWidget(self._spn_clamp_inflation, 1)
+        row_cli.addWidget(HelpButton("clamp_inflation"))
+        lay.addLayout(row_cli)
+
         # Scale
         row_s = QtWidgets.QHBoxLayout()
         self._lbl_scale = QtWidgets.QLabel(tr("scale"))
@@ -140,6 +197,24 @@ class RBFSection(CollapsibleFrame):
                 "dist_euclidean", "dist_angle",
             ], fallback_key="distance_type"))
         glay.addLayout(row_dt)
+
+        # M2.4a: Input Encoding (M2.1a / M2.1b). Visibility hook for
+        # M2.4b's per-driver-group rotateOrder editor uses hasattr()
+        # so this stays safe pre-M2.4b.
+        row_ienc = QtWidgets.QHBoxLayout()
+        self._lbl_ienc = QtWidgets.QLabel(tr("input_encoding"))
+        self._cmb_ienc = QtWidgets.QComboBox()
+        for e in INPUT_ENCODING_LABELS:
+            self._cmb_ienc.addItem(e)
+        self._cmb_ienc.currentIndexChanged.connect(self._on_input_encoding)
+        row_ienc.addWidget(self._lbl_ienc)
+        row_ienc.addWidget(self._cmb_ienc, 1)
+        row_ienc.addWidget(ComboHelpButton(
+            self._cmb_ienc, [
+                "enc_raw", "enc_quaternion", "enc_bendroll",
+                "enc_expmap", "enc_swingtwist",
+            ], fallback_key="input_encoding"))
+        glay.addLayout(row_ienc)
 
         lay.addWidget(self._generic_frame)
 
@@ -289,6 +364,18 @@ class RBFSection(CollapsibleFrame):
         self._cb_draw_twist.setChecked(data.get("drawTwist", False))
         self._cb_opposite.setChecked(data.get("opposite", False))
         self._spn_dridx.setValue(data.get("driverIndex", 0))
+        # M2.4a: load M1.3 / M1.4 / M2.1a values with safe defaults
+        # so v4 / v5-pre-M2.4 rigs show the C++ default exactly.
+        self._spn_reg.setValue(data.get("regularization", 1.0e-8))
+        self._cmb_slvm.setCurrentIndex(data.get("solverMethod", 0))
+        clamp_on = data.get("clampEnabled", False)
+        self._cb_clamp.setChecked(clamp_on)
+        self._spn_clamp_inflation.setValue(data.get("clampInflation", 0.0))
+        self._spn_clamp_inflation.setEnabled(clamp_on)
+        ienc = data.get("inputEncoding", 0)
+        self._cmb_ienc.setCurrentIndex(ienc)
+        if hasattr(self, "_rotate_order_editor"):
+            self._rotate_order_editor.setVisible(ienc != 0)
         self._update_radius_state()
         self._update_mode_visibility(self._cmb_mode.currentIndex())
 
@@ -323,6 +410,12 @@ class RBFSection(CollapsibleFrame):
         self._cb_draw_twist.setText(tr("draw_twist"))
         self._cb_opposite.setText(tr("opposite"))
         self._lbl_dridx.setText(tr("driver_index"))
+        # M2.4a additions
+        self._lbl_reg.setText(tr("regularization"))
+        self._lbl_slvm.setText(tr("solver_method"))
+        self._cb_clamp.setText(tr("clamp_enabled"))
+        self._lbl_clinf.setText(tr("clamp_inflation"))
+        self._lbl_ienc.setText(tr("input_encoding"))
 
     # ------------------------------------------------------------------
     # Private
@@ -331,6 +424,19 @@ class RBFSection(CollapsibleFrame):
     def _on_rbf_mode(self, idx):
         self.attributeChanged.emit("rbfMode", idx)
         self._update_mode_visibility(idx)
+
+    def _on_input_encoding(self, idx):
+        """Emit attr + show/hide M2.4b's per-driver-group rotateOrder
+        editor (gated by hasattr to stay safe pre-M2.4b)."""
+        self.attributeChanged.emit("inputEncoding", idx)
+        if hasattr(self, "_rotate_order_editor"):
+            # Raw (idx == 0) hides the rotateOrder editor; non-Raw shows it.
+            self._rotate_order_editor.setVisible(idx != 0)
+
+    def _on_clamp_toggled(self, checked):
+        self.attributeChanged.emit("clampEnabled", checked)
+        # Visual cue: inflation has no effect when clamp is off.
+        self._spn_clamp_inflation.setEnabled(checked)
 
     def _update_mode_visibility(self, idx):
         """Show Generic sub-section for mode 0, Matrix sub-section for mode 1."""

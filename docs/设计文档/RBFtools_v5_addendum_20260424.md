@@ -907,6 +907,120 @@ read_pose_local_transforms(node) → list[dict]  # 给 M3 Export 准备
 
 API 签名稳定。M3 JSON Export 直接消费 `read_pose_local_transforms` 输出。
 
+---
+
+## §M2.4a — UI Surface (Scalar / Enum / Bool 控件 + outputIsScale[])
+
+Milestone 2 第一个 view-side-only 子任务。把 M1.3 / M1.4 / M2.1a / M2.1b 引入的 5 个标量/枚举属性 + M1.2 的 `outputIsScale[]` 在 RBF UI 暴露给用户。**0 行 C++ 改动**——schema 已冻结。
+
+### M2.4a.1 — 决议日志
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | M2.4 拆分 | **① M2.4a + M2.4b** | a 700 行 / b 500 行，分两次 commit 更可 review |
+| (B) | `outputIsScale[]` 编辑位置 | **① 独立 OutputScaleEditor** | 不动 attribute_list（selection model 风险大）|
+| (C) | Multi list editor UI | **① 轻量 QListWidget + setItemWidget** | M2.4b 落地；本次只埋占位 |
+| (D) | quat group validation | **① Deferred via 节点 warning** | 复用 M2.2 `resolveQuaternionGroups` |
+| (E) | Controller signal | **① 零新 signal** | 全走 `set_attribute(attr, value)` 通用通道 |
+| (F) | 测试范式 | **① 结构 + 纯函数 mock** | 真实 QApplication 推迟 M1.5 |
+| (G) | i18n 提交 | **① 与 widget 同 commit** | 避免半英文中间态 |
+| (H) | RBFSection 嵌入 | **① Inline 5 widget** | 沿用现 `_add_float_to` 模板 |
+| (I) | `set_node_multi_attr` 位置 | **① `core.py` 新函数** | 保持 controller 薄 |
+
+### M2.4a.2 — `set_node_multi_attr` 事务性契约（强制实施细节）
+
+```python
+def set_node_multi_attr(node, attr, list_values, max_length=10000):
+    # 1) Type guard: list/tuple only
+    # 2) Length cap: > max_length → truncate + warning
+    # 3) Wrap in undo_chunk
+    # 4) Step A: removeMultiInstance for every existing index
+    # 5) Step B: setAttr for index 0..len-1, in order
+    # 6) On per-index failure: warning, continue (undo_chunk is rollback)
+```
+
+**禁止**部分恢复（"还原一半")。失败时由 `undo_chunk` 兜底，用户 Ctrl+Z 全量回滚。测试 T0a/b/c/d/e 五子覆盖：全量写入 / 中途失败 / 空 list / 长度截断 / 类型守护。
+
+### M2.4a.3 — i18n 永久守护（test_i18n_no_hardcoded_strings.py）
+
+新增**永久测试**扫描 `widgets/` 所有 `.py`：抓 `setText` / `addItem` / `setToolTip` / `setWindowTitle` / `setPlaceholderText` / `setStatusTip` / `setWhatsThis` 调用，flag 任何字面字符串（非 `tr()` 包装）。
+
+- **白名单 `KNOWN_VIOLATIONS`**：维护 pre-existing 合法例外（如 `pose_table.py` 的 `'{:.3f}'` 格式 spec —— 不是用户翻译串）
+- **新违规 0 容忍**：未来任何 widget 加硬编码字符串立即测试挂掉
+- **效果**：M2.4 起所有可见字符串 100% 走 `tr()`；i18n 表是唯一真相源
+
+### M2.4a.4 — PySide Mock 陷阱与降级（关键工程发现）
+
+**陷阱**：`MagicMock` 实例作为 widget 基类时（`class Foo(QtWidgets.QWidget):`），Python 元类机制**返回 MagicMock 子类**，不是真实 class——子类的用户定义方法被 MagicMock 自动属性机制吞没，`getattr(Foo, "method")` 返回 MagicMock 不是真实函数引用。
+
+**降级方案**（用户在批示中预授权）：`conftest.py` 使用**最小真实类 shim**而非纯 MagicMock：
+
+- `_Stub` 基类：accepts any constructor, auto-creates MagicMock attrs on access
+- `_StubSignal` 类：替换 `QtCore.Signal`，提供 `connect/disconnect/emit` 的 no-op
+- 关键 widget 类（`QWidget`, `QFrame`, `QLabel`, ...）通过 `type(name, (_Stub,), {})` 动态创建为真实 class
+
+**优先级**：尝试导入真实 `PySide6` → fallback `PySide2` → fallback shim。本地装了 PySide 的开发者跑真实 binding；CI / 纯 Python 跑 shim。
+
+### M2.4a.5 — Widget 改动清单
+
+| 文件 | 改动 | 行数 |
+|---|---|---|
+| `constants.py` | +`SOLVER_METHOD_LABELS` / `INPUT_ENCODING_LABELS` / `DRIVER_INPUT_ROTATE_ORDER_LABELS` | +20 |
+| `core.py` | +`set_node_multi_attr`（事务性）| +95 |
+| `controller.py` | `set_attribute` 扩展 list dispatch | +12 |
+| `ui/i18n.py` | +15 EN + 15 CN 条目 | +35 |
+| `ui/help_texts.py` | +5 EN + 5 CN 帮助文本段 | +90 |
+| `ui/widgets/rbf_section.py` | +5 inline 控件 + 2 handler + load/retranslate 扩展 | +95 |
+| `ui/widgets/output_scale_editor.py` | 新建 | +110 |
+| `ui/widgets/pose_editor.py` | 嵌入 OutputScaleEditor + 新 signal | +20 |
+| `tests/conftest.py` | 新建（Maya + PySide mock + 路径注入）| +180 |
+| `tests/test_m2_4a_core.py` | T0a-e | +160 |
+| `tests/test_m2_4a_widgets.py` | T1-T6 | +200 |
+| `tests/test_i18n_no_hardcoded_strings.py` | 永久守护 | +90 |
+
+### M2.4a.6 — Visibility 联动（M2.4b 占位）
+
+`_on_input_encoding(idx)` 调用 `attributeChanged.emit("inputEncoding", idx)` + 检查 `hasattr(self, "_rotate_order_editor")`：
+
+```python
+if hasattr(self, "_rotate_order_editor"):
+    self._rotate_order_editor.setVisible(idx != 0)
+```
+
+**M2.4a 阶段**：`_rotate_order_editor` **不存在**，`hasattr` 返回 False，分支不进。
+**M2.4b 阶段**：实例化 `OrderedEnumListEditor` 赋给 `self._rotate_order_editor`，visibility 联动激活。
+
+这是 forward-compat 钩子，**M2.4a 不破坏 M2.4b 的入口**。
+
+### M2.4a.7 — 零回归契约
+
+- v4 / v5-pre-M2.4a rig 加载：所有 M2.4a 控件显示 C++ schema 默认值（`regularization=1e-8` / `solverMethod=0` / `inputEncoding=0` / `clampEnabled=False` / `clampInflation=0.0` / `outputIsScale[]` 全 False）
+- `RBFSection.load(data)` 使用 `data.get("attr", default)` 模式，老 rig 无该 key 时回退到 default
+- 168 条 M1+M2.1+M2.2+M2.3 测试在 M2.4a 改动后全绿 ⇒ 零回归验证
+
+### M2.4a.8 — Test 矩阵
+
+T0a-e（core 事务性）+ T1-T6（widget 结构性）+ T_HC（永久 i18n 守护）= 20 子测试（含 1 skipped 当 widgets dir 不存在时的防御）。全量 188/188 通过。
+
+### M2.4a.9 — Non-goals（推迟到 M2.4b）
+
+- ❌ `OrderedIntListEditor` / `OrderedEnumListEditor` 实现 → **M2.4b**
+- ❌ `outputQuaternionGroupStart[]` UI → M2.4b
+- ❌ `driverInputRotateOrder[]` UI → M2.4b
+- ❌ "Reset driven to rest" Apply 时复选框 → M3
+- ❌ JSON Import/Export UI → M3
+- ❌ Mirror / Pose Pruner / Live Edit Mode 等 M3 工具 → M3
+- ❌ E2E QApplication 测试 → M1.5 / mayapy 集成
+- ❌ stylesheet 主题大调整 → 永不
+
+### M2.4a.10 — MVC 红线守护
+
+- ✅ Widget 不 import `RBFtools.core`（grep 验证：`output_scale_editor.py` / `rbf_section.py` 中 0 命中 `from RBFtools import core`）
+- ✅ Controller 仅 `set_attribute` 扩展，无新 signal
+- ✅ C++ schema 0 改动（diff 验证：`source/` 0 修改）
+- ✅ Stylesheet 不动（`style.py` 不在改动文件列表）
+- ✅ 默认值显示与 C++ enum 同步（T1/T2 守护）
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```

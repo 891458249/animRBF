@@ -14,6 +14,7 @@ from RBFtools.ui.i18n import tr
 from RBFtools.ui.widgets.collapsible import CollapsibleFrame
 from RBFtools.ui.widgets.attribute_list import AttributeList
 from RBFtools.ui.widgets.pose_table import PoseTable
+from RBFtools.ui.widgets.output_scale_editor import OutputScaleEditor
 
 
 class PoseEditor(CollapsibleFrame):
@@ -30,6 +31,7 @@ class PoseEditor(CollapsibleFrame):
     updatePose = QtCore.Signal(int)
     deletePose = QtCore.Signal(int)
     autoFillChanged = QtCore.Signal(bool)
+    outputIsScaleChanged = QtCore.Signal(list)        # M2.4a
 
     def __init__(self, parent=None):
         super(PoseEditor, self).__init__(
@@ -65,6 +67,15 @@ class PoseEditor(CollapsibleFrame):
 
         split.addWidget(self._driven_list, 1)
         lay.addLayout(split)
+
+        # M2.4a: per-driven-attribute outputIsScale checkbox list.
+        # Sits below the driver/driven split so it shadows the driven
+        # selection visually. Hidden until set_attributes is called by
+        # the parent with the resolved driven attr names.
+        self._output_scale_editor = OutputScaleEditor()
+        self._output_scale_editor.isScaleChanged.connect(
+            self.outputIsScaleChanged)
+        lay.addWidget(self._output_scale_editor)
 
         # Wire child signals
         self._driver_list.selectNodeRequested.connect(
@@ -120,6 +131,13 @@ class PoseEditor(CollapsibleFrame):
     def pose_table(self):
         return self._pose_table
 
+    @property
+    def output_scale_editor(self):
+        """Public accessor used by main_window/controller to populate
+        the per-driven-attribute scale flag rows after the driven attrs
+        are resolved."""
+        return self._output_scale_editor
+
     def set_auto_fill(self, checked):
         blocked = self._cb_auto.blockSignals(True)
         self._cb_auto.setChecked(checked)
@@ -134,6 +152,7 @@ class PoseEditor(CollapsibleFrame):
         self._driver_list.retranslate()
         self._driven_list.retranslate()
         self._pose_table.retranslate()
+        self._output_scale_editor.retranslate()
         self._btn_add.setText(tr("add_pose"))
         self._btn_apply.setText(tr("apply"))
         self._btn_connect.setText(tr("connect"))

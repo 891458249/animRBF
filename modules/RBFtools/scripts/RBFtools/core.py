@@ -184,6 +184,78 @@ def set_node_attr(node, attr, value):
             cmds.warning("Cannot set {}: {}".format(plug, exc))
 
 
+def set_node_multi_attr(node, attr, list_values, max_length=10000):
+    """Transactional write to a Maya multi-instance attribute on *node*.
+
+    Strategy (v5 addendum §M2.4a — refinement 2):
+
+    1. Wrap in :func:`undo_chunk` so a partial-write failure rolls back
+       cleanly via Ctrl+Z.
+    2. **Clear all existing indices first** (``removeMultiInstance``),
+       then write new values in order. Avoids the half-old / half-new
+       hybrid that destination-only ``setAttr`` would leave on failure.
+    3. Length cap (default 10000) prevents an oversized list from
+       deadlocking the DG; emit warning + truncate.
+    4. Per-index ``setAttr`` failure issues a warning but does NOT
+       attempt partial recovery — the surrounding ``undo_chunk`` is
+       the canonical rollback.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape name.
+    attr : str
+        Short multi-attr name (e.g. ``"outputQuaternionGroupStart"``,
+        ``"driverInputRotateOrder"``).
+    list_values : list
+        Ordered values to write at indices 0..len-1. Empty list is
+        equivalent to clearing the multi.
+    max_length : int
+        Safety cap. Lists longer than this are truncated with a warning.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+
+    if not isinstance(list_values, (list, tuple)):
+        cmds.warning(
+            "set_node_multi_attr: list_values must be list/tuple; "
+            "got {}".format(type(list_values).__name__))
+        return
+
+    if len(list_values) > max_length:
+        cmds.warning(
+            "set_node_multi_attr: {} values exceeds cap {}; truncating. "
+            "If this is legitimate, raise max_length explicitly.".format(
+                len(list_values), max_length))
+        list_values = list(list_values)[:max_length]
+
+    base = "{}.{}".format(shape, attr)
+    with undo_chunk("RBFtools: set multi {}".format(attr)):
+        # Step 1: clear existing indices.
+        try:
+            existing = cmds.getAttr(base, multiIndices=True) or []
+        except Exception:
+            existing = []
+        for idx in existing:
+            try:
+                cmds.removeMultiInstance("{}[{}]".format(base, idx), b=True)
+            except Exception as exc:
+                cmds.warning(
+                    "set_node_multi_attr: removeMultiInstance "
+                    "{}[{}] failed: {}".format(base, idx, exc))
+
+        # Step 2: write new values 0..len-1.
+        for i, v in enumerate(list_values):
+            plug = "{}[{}]".format(base, i)
+            try:
+                cmds.setAttr(plug, v)
+            except Exception as exc:
+                cmds.warning(
+                    "set_node_multi_attr: setAttr {} failed: {}; "
+                    "undo_chunk will roll back.".format(plug, exc))
+
+
 def get_all_settings(node):
     """Bulk-read every UI-relevant attribute from *node* → ``dict``.
 

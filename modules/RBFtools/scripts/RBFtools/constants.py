@@ -105,3 +105,25 @@ SCALE_ATTR_NAMES = frozenset({
     "scaleX", "scaleY", "scaleZ",
     "sx", "sy", "sz",
 })
+
+# ------------------------------------------------------------------
+# M1.4 / M2.1a / M2.1b enum labels (M2.4a UI surfaces)
+# ------------------------------------------------------------------
+# Order MUST match the C++ eAttr.addField sequence in
+# source/RBFtools.cpp::initialize() — UI dropdowns send the index
+# back as the int value the C++ enum reads.
+
+# M1.4: solverMethod enum {Auto, ForceGE}.
+SOLVER_METHOD_LABELS = ["Auto", "ForceGE"]
+
+# M2.1a: inputEncoding enum {Raw, Quaternion, BendRoll, ExpMap, SwingTwist}.
+INPUT_ENCODING_LABELS = [
+    "Raw", "Quaternion", "BendRoll", "ExpMap", "SwingTwist",
+]
+
+# M2.1a: driverInputRotateOrder enum (matches Maya native rotateOrder).
+# Surfaced in M2.4b's per-driver-group editor; defined here so the
+# constant lives next to its siblings.
+DRIVER_INPUT_ROTATE_ORDER_LABELS = [
+    "xyz", "yzx", "zxy", "xzy", "yxz", "zyx",
+]

@@ -352,6 +352,50 @@ _EN = {
         "The rotation matrix is split into a twist component around Z "
         "and a swing component perpendicular to Z. "
         "Use for joints whose primary roll axis is Z.",
+
+    # -- M2.4a: M1.4 / M2.1a / M1.3 attrs --
+
+    "regularization":
+        "Tikhonov regularization strength (lambda).\n\n"
+        "Added to the kernel matrix diagonal before solve to prevent "
+        "near-singular configurations from blowing up the weight "
+        "matrix. Default 1e-8 follows v5 PART G.1 Step 2; absolute "
+        "units (NOT scale-adaptive) so it works on Linear / Thin "
+        "Plate kernels where the diagonal is zero.",
+
+    "solver_method":
+        "Auto: Cholesky first; falls back to GE (Gaussian Elimination) "
+        "on non-SPD kernel matrices.\n"
+        "ForceGE: skips Cholesky entirely, useful for debugging or "
+        "rigs that exhibit numeric quirks under Cholesky.\n\n"
+        "M4.5 will extend this enum to {Auto, ForceCholesky, ForceQR, "
+        "ForceLU, ForceSVD} once Eigen integration lands the full "
+        "four-tier fallback chain.",
+
+    "input_encoding":
+        "How driver attributes are encoded before distance computation:\n"
+        "  Raw       - scalars passed through unchanged (v4 default).\n"
+        "  Quaternion - (rx, ry, rz) triples → unit quat.\n"
+        "  BendRoll   - swing/twist split + stereographic projection.\n"
+        "  ExpMap     - log-quaternion in R^3.\n"
+        "  SwingTwist - 5-tuple (swing quat + twist scalar).\n\n"
+        "Non-Raw encodings require driver inputs to be (rx, ry, rz) "
+        "triples; otherwise the node falls back to Raw with a warning.",
+
+    "clamp_enabled":
+        "Clip live driver inputs to the per-dimension min/max bounds of "
+        "the registered pose samples before kernel evaluation. Prevents "
+        "out-of-training-range inputs from blowing up RBF activations.",
+
+    "clamp_inflation":
+        "Symmetric outward inflation as a fraction of the per-dim range. "
+        "0.0 is hard clamp (PART G.7); small positive values give a "
+        "softer hull to dampen edge-pop on near-boundary inputs.",
+
+    "output_is_scale":
+        "Mark this output channel as a SCALE component. Scale outputs "
+        "anchor at 1.0 instead of the captured rest value, defending "
+        "against t-pose mesh collapse when the captured baseline is 0.",
 }
 
 _ZH = {
@@ -658,6 +702,39 @@ _ZH = {
         u"\u56f4\u7ed5 Z \u8f74\u5206\u89e3\u626d\u8f6c\u3002\n\n"
         u"\u65cb\u8f6c\u77e9\u9635\u88ab\u5206\u89e3\u4e3a\u56f4\u7ed5 Z \u7684\u626d\u8f6c\u5206\u91cf\u548c\u5782\u76f4\u4e8e Z \u7684\u6446\u52a8\u5206\u91cf\u3002"
         u"\u9002\u7528\u4e8e\u4e3b\u8981\u6eda\u52a8\u8f74\u4e3a Z \u7684\u5173\u8282\u3002",
+
+    # -- M2.4a --
+
+    "regularization":
+        u"Tikhonov \u6b63\u5219\u5316\u5f3a\u5ea6 (lambda)\u3002\n\n"
+        u"\u6c42\u89e3\u524d\u52a0\u5728\u6838\u77e9\u9635\u5bf9\u89d2\u7ebf\u4e0a\uff0c\u9632\u8fd1\u5947\u5f02\u73af\u5883\u4e0b\u6743\u91cd\u77e9\u9635\u7206\u53d1\u3002"
+        u"\u9ed8\u8ba4 1e-8\uff08v5 PART G.1\uff09\uff0c\u7edd\u5bf9\u503c\u4e0d\u968f\u6838\u77e9\u9635\u5c3a\u5ea6\u81ea\u9002\u5e94\u3002",
+
+    "solver_method":
+        u"Auto\uff1aCholesky \u4f18\u5148\uff0c\u975e SPD \u77e9\u9635\u56de\u9000 GE\u3002\n"
+        u"ForceGE\uff1a\u8df3\u8fc7 Cholesky\uff0c\u8c03\u8bd5\u7528\u3002\n\n"
+        u"M4.5 \u5f15\u5165 Eigen \u540e\u6269\u5c55\u4e3a 5 \u6863\u5b8c\u6574 fallback\u3002",
+
+    "input_encoding":
+        u"\u9a71\u52a8\u5c5e\u6027\u8fdb\u5165\u8ddd\u79bb\u8ba1\u7b97\u524d\u7684\u7f16\u7801\u65b9\u5f0f\uff1a\n"
+        u"  Raw\uff1a\u539f\u59cb\u6807\u91cf\u76f4\u901a\uff08v4 \u9ed8\u8ba4\uff09\u3002\n"
+        u"  Quaternion\uff1a(rx, ry, rz) \u4e09\u5143\u7ec4 \u2192 \u56db\u5143\u6570\u3002\n"
+        u"  BendRoll\uff1a\u6446-\u626d\u5206\u89e3 + \u7acb\u4f53\u6295\u5f71\u3002\n"
+        u"  ExpMap\uff1aR\u00b3 \u4e2d\u7684\u5bf9\u6570\u56db\u5143\u6570\u3002\n"
+        u"  SwingTwist\uff1a5 \u5143\u7ec4\uff08swing quat + twist scalar\uff09\u3002\n\n"
+        u"\u975e Raw \u7f16\u7801\u8981\u6c42\u9a71\u52a8\u5c5e\u6027\u662f (rx, ry, rz) \u4e09\u5143\u7ec4\u3002",
+
+    "clamp_enabled":
+        u"\u5728 kernel \u8ba1\u7b97\u524d\u5c06\u9a71\u52a8\u8f93\u5165\u949b\u5236\u5230\u8bad\u7ec3\u59ff\u6001\u96c6\u7684\u6bcf\u7ef4\u8fb9\u754c\u3002"
+        u"\u9632\u6b62\u8d85\u51fa\u8bad\u7ec3\u8303\u56f4\u7684\u8f93\u5165\u5f15\u8d77 RBF \u6fc0\u6d3b\u7206\u53d1\u3002",
+
+    "clamp_inflation":
+        u"\u949b\u5236\u8fb9\u754c\u5411\u5916\u81a8\u80c0\u7684\u6bd4\u4f8b\uff080-1\uff09\u3002"
+        u"0.0 \u4e3a\u786c\u949b\u5236\uff08PART G.7\uff09\uff1b\u6b63\u503c\u63d0\u4f9b\u8f6f\u8fb9\u754c\u4ee5\u51cf\u8f7b\u8fb9\u7f18\u8df3\u53d8\u3002",
+
+    "output_is_scale":
+        u"\u5c06\u8be5\u8f93\u51fa\u901a\u9053\u6807\u8bb0\u4e3a\u7f29\u653e\u5206\u91cf\u3002"
+        u"\u7f29\u653e\u8f93\u51fa anchor \u4e3a 1.0\uff0c\u9632\u6b62\u6355\u83b7\u57fa\u7ebf\u4e3a 0 \u65f6\u5728 t-pose \u4e0b mesh \u584c\u9677\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}
