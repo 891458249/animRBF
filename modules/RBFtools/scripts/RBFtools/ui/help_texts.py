@@ -396,6 +396,29 @@ _EN = {
         "Mark this output channel as a SCALE component. Scale outputs "
         "anchor at 1.0 instead of the captured rest value, defending "
         "against t-pose mesh collapse when the captured baseline is 0.",
+
+    # -- M2.4b: per-driver-group rotateOrder + quat group editors --
+
+    "driver_rotate_order":
+        "Per-driver-group rotateOrder for non-Raw input encodings.\n\n"
+        "When inputEncoding != Raw, driver attributes are consumed in "
+        "(rx, ry, rz) triples; each triple is one driver group whose "
+        "Euler-to-quaternion conversion needs the matching rotateOrder. "
+        "The list ordering is [group0, group1, ...] aligned with the "
+        "driver inputs in left-to-right order.\n\n"
+        "Use the +/- buttons to add/remove groups; enum values match "
+        "Maya's native rotateOrder dropdown (xyz / yzx / zxy / xzy / "
+        "yxz / zyx). Missing entries fall back to xyz.",
+
+    "quat_group_start":
+        "Output indices that start a 4-slot quaternion group (M2.2 "
+        "QWA). Each entered start S declares output[S..S+3] is a unit "
+        "quaternion that should be solved via quaternion-weighted "
+        "average instead of scalar weighted sum.\n\n"
+        "Invalid entries (out-of-range, overlapping, or colliding with "
+        "an outputIsScale flag inside the 4-slot range) are dropped at "
+        "compute() time with a one-time warning — the rig keeps "
+        "evaluating; the dropped groups simply revert to scalar output.",
 }
 
 _ZH = {
@@ -735,6 +758,23 @@ _ZH = {
     "output_is_scale":
         u"\u5c06\u8be5\u8f93\u51fa\u901a\u9053\u6807\u8bb0\u4e3a\u7f29\u653e\u5206\u91cf\u3002"
         u"\u7f29\u653e\u8f93\u51fa anchor \u4e3a 1.0\uff0c\u9632\u6b62\u6355\u83b7\u57fa\u7ebf\u4e3a 0 \u65f6\u5728 t-pose \u4e0b mesh \u584c\u9677\u3002",
+
+    # -- M2.4b --
+
+    "driver_rotate_order":
+        u"\u975e Raw \u8f93\u5165\u7f16\u7801\u4e0b\u7684\u6bcf\u9a71\u52a8\u7ec4 rotateOrder\u3002\n\n"
+        u"\u5f53 inputEncoding \u975e Raw\uff0c\u9a71\u52a8\u5c5e\u6027\u4ee5 (rx, ry, rz) \u4e09\u5143\u7ec4\u6d88\u8d39\uff1b"
+        u"\u6bcf\u4e2a\u4e09\u5143\u7ec4\u662f\u4e00\u4e2a\u9a71\u52a8\u7ec4\uff0c\u5176 Euler\u2192\u56db\u5143\u6570\u8f6c\u6362\u9700\u8981\u5bf9\u5e94 rotateOrder\u3002"
+        u"\u5217\u8868\u987a\u5e8f [group0, group1, ...] \u4e0e\u9a71\u52a8\u8f93\u5165\u4ece\u5de6\u5230\u53f3\u5bf9\u9f50\u3002\n\n"
+        u"\u4f7f\u7528 +/- \u6309\u94ae\u589e\u5220\u7ec4\uff1benum \u503c\u5bf9\u9f50 Maya \u539f\u751f rotateOrder \u4e0b\u62c9\u6846 "
+        u"(xyz / yzx / zxy / xzy / yxz / zyx)\u3002\u7f3a\u5931\u6761\u76ee fall-back \u5230 xyz\u3002",
+
+    "quat_group_start":
+        u"\u542f\u52a8 4-slot \u56db\u5143\u6570\u7ec4\u7684\u8f93\u51fa\u7d22\u5f15\uff08M2.2 QWA\uff09\u3002"
+        u"\u6bcf\u4e2a\u8f93\u5165\u7684\u8d77\u59cb S \u58f0\u660e output[S..S+3] \u662f\u5355\u4f4d\u56db\u5143\u6570\uff0c"
+        u"\u5e94\u8d70\u56db\u5143\u6570\u52a0\u6743\u5e73\u5747\u800c\u975e\u6807\u91cf\u52a0\u6743\u548c\u3002\n\n"
+        u"\u65e0\u6548\u6761\u76ee\uff08\u8d8a\u754c / \u91cd\u53e0 / \u4e0e 4-slot \u8303\u56f4\u5185 outputIsScale flag \u51b2\u7a81\uff09\u5728 compute() "
+        u"\u65f6\u88ab\u4e22\u5f03\u4e0e\u4e00\u6b21\u6027 warning\u2014\u2014rig \u7ee7\u7eed\u8fd0\u884c\uff0c\u88ab\u4e22\u7684\u7ec4\u4ec5\u9000\u56de\u6807\u91cf\u8f93\u51fa\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

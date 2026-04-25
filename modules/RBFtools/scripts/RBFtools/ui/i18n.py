@@ -87,6 +87,21 @@ _EN = {
     # -- M2.4a: per-output scale flag (OutputScaleEditor) --
     "output_is_scale":     "Output Is Scale",
     "output_is_scale_hdr": "Mark scale-channel outputs (M1.2 anchor 1.0)",
+    # -- M2.4b: ordered-list editors for M2.1a / M2.2 multi attrs --
+    "driver_rotate_order_label":   "Driver Input Rotate Order:",
+    "rotate_order_empty_hint":     "No driver rotate orders defined.",
+    "quat_group_start_label":      "Quaternion Group Starts (output index):",
+    "quat_group_empty_hint":       "No quaternion groups defined.",
+    "quat_group_start_value_tip":
+        "Output start index — group spans 4 outputs (S, S+1, S+2, S+3)",
+    "list_editor_add":             "+",
+    "list_editor_remove":          u"\u2212",   # minus sign
+    "list_editor_move_up":         u"\u2191",   # up arrow
+    "list_editor_move_down":       u"\u2193",   # down arrow
+    "list_editor_add_tip":         "Append a new entry",
+    "list_editor_remove_tip":      "Remove selected entry",
+    "list_editor_move_up_tip":     "Move selected up",
+    "list_editor_move_down_tip":   "Move selected down",
     # -- pose editor --
     "rbf_pose_editor":     "RBF Pose Editor",
     "auto_fill_bs":        "Auto Fill BlendShape",
@@ -183,6 +198,21 @@ _ZH = {
     "clamp_inflation":     u"\u949b\u5236\u81a8\u80c0\u6bd4\u4f8b\uff1a",
     "output_is_scale":     u"\u8f93\u51fa\u4e3a\u7f29\u653e",
     "output_is_scale_hdr": u"\u6807\u8bb0\u7f29\u653e\u901a\u9053\u8f93\u51fa\uff08M1.2 anchor 1.0\uff09",
+    # -- M2.4b: ordered-list editors --
+    "driver_rotate_order_label":   u"\u9a71\u52a8\u8f93\u5165\u65cb\u8f6c\u987a\u5e8f\uff1a",
+    "rotate_order_empty_hint":     u"\u672a\u5b9a\u4e49\u9a71\u52a8\u65cb\u8f6c\u987a\u5e8f\u3002",
+    "quat_group_start_label":      u"\u56db\u5143\u6570\u7ec4\u8d77\u59cb\u7d22\u5f15\uff08\u8f93\u51fa\u7d22\u5f15\uff09\uff1a",
+    "quat_group_empty_hint":       u"\u672a\u5b9a\u4e49\u56db\u5143\u6570\u7ec4\u3002",
+    "quat_group_start_value_tip":
+        u"\u8f93\u51fa\u8d77\u59cb\u7d22\u5f15\u2014\u2014\u7ec4\u5360 4 \u4e2a\u8f93\u51fa (S, S+1, S+2, S+3)",
+    "list_editor_add":             "+",
+    "list_editor_remove":          u"\u2212",
+    "list_editor_move_up":         u"\u2191",
+    "list_editor_move_down":       u"\u2193",
+    "list_editor_add_tip":         u"\u8ffd\u52a0\u65b0\u6761\u76ee",
+    "list_editor_remove_tip":      u"\u5220\u9664\u9009\u4e2d\u6761\u76ee",
+    "list_editor_move_up_tip":     u"\u4e0a\u79fb\u9009\u4e2d",
+    "list_editor_move_down_tip":   u"\u4e0b\u79fb\u9009\u4e2d",
     "rbf_pose_editor":     u"RBF \u59ff\u6001\u7f16\u8f91\u5668",
     "auto_fill_bs":        u"\u81ea\u52a8\u586b\u5145\u878d\u5408\u53d8\u5f62",
     "driver":              u"\u9a71\u52a8",

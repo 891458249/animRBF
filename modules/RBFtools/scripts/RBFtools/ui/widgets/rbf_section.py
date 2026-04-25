@@ -13,6 +13,13 @@ from RBFtools.constants import (
     KERNEL_LABELS, RADIUS_TYPE_LABELS, DISTANCE_TYPE_LABELS,
     TWIST_AXIS_LABELS, RBF_MODE_LABELS,
     SOLVER_METHOD_LABELS, INPUT_ENCODING_LABELS,   # M2.4a
+    DRIVER_INPUT_ROTATE_ORDER_LABELS,              # M2.4b
+)
+from RBFtools.ui.widgets.ordered_enum_list_editor import (
+    OrderedEnumListEditor,
+)
+from RBFtools.ui.widgets.ordered_int_list_editor import (
+    OrderedIntListEditor,
 )
 
 
@@ -177,6 +184,20 @@ class RBFSection(CollapsibleFrame):
             ], fallback_key="rbf_mode"))
         lay.addLayout(row_m)
 
+        # M2.4b: outputQuaternionGroupStart[] editor. Sits at top-level
+        # (not in Generic subsection) because QWA is an output-side
+        # concept that applies to both Generic and Matrix modes — though
+        # M2.2 only acts in Generic, the schema is shared. Always
+        # visible (no encoding-driven gating).
+        self._quat_group_editor = OrderedIntListEditor(
+            value_min=0, value_max=9999)
+        self._quat_group_editor.set_label(tr("quat_group_start_label"))
+        self._quat_group_editor.set_empty_hint(tr("quat_group_empty_hint"))
+        self._quat_group_editor.listChanged.connect(
+            lambda lst: self.attributeChanged.emit(
+                "outputQuaternionGroupStart", lst))
+        lay.addWidget(self._quat_group_editor)
+
         lay.addWidget(self._separator())
 
         # -- Generic RBF --
@@ -215,6 +236,20 @@ class RBFSection(CollapsibleFrame):
                 "enc_expmap", "enc_swingtwist",
             ], fallback_key="input_encoding"))
         glay.addLayout(row_ienc)
+
+        # M2.4b: per-driver-group rotateOrder editor. Lives in the
+        # Generic subsection because rotateOrder is irrelevant to
+        # Matrix mode. Visibility is gated by inputEncoding via
+        # `_update_encoding_visibility`; default Raw → hidden.
+        self._rotate_order_editor = OrderedEnumListEditor(
+            DRIVER_INPUT_ROTATE_ORDER_LABELS)
+        self._rotate_order_editor.set_label(tr("driver_rotate_order_label"))
+        self._rotate_order_editor.set_empty_hint(tr("rotate_order_empty_hint"))
+        self._rotate_order_editor.listChanged.connect(
+            lambda lst: self.attributeChanged.emit(
+                "driverInputRotateOrder", lst))
+        self._rotate_order_editor.setVisible(False)
+        glay.addWidget(self._rotate_order_editor)
 
         lay.addWidget(self._generic_frame)
 
@@ -374,8 +409,19 @@ class RBFSection(CollapsibleFrame):
         self._spn_clamp_inflation.setEnabled(clamp_on)
         ienc = data.get("inputEncoding", 0)
         self._cmb_ienc.setCurrentIndex(ienc)
+        # M2.4b: rotateOrder + quat-group multi editors. set_values()
+        # is signal-suspended internally — never round-trips back into
+        # the controller (addendum §M2.4b refinement / contract).
         if hasattr(self, "_rotate_order_editor"):
-            self._rotate_order_editor.setVisible(ienc != 0)
+            self._rotate_order_editor.set_values(
+                data.get("driverInputRotateOrder", []))
+        if hasattr(self, "_quat_group_editor"):
+            self._quat_group_editor.set_values(
+                data.get("outputQuaternionGroupStart", []))
+        # Sync visibility AFTER set_values so the v5 rig opening with
+        # encoding=2 sees the populated editor visible immediately
+        # (addendum §M2.4b Q2).
+        self._update_encoding_visibility(ienc)
         self._update_radius_state()
         self._update_mode_visibility(self._cmb_mode.currentIndex())
 
@@ -416,6 +462,19 @@ class RBFSection(CollapsibleFrame):
         self._cb_clamp.setText(tr("clamp_enabled"))
         self._lbl_clinf.setText(tr("clamp_inflation"))
         self._lbl_ienc.setText(tr("input_encoding"))
+        # M2.4b: multi list editors — push label / hint / button text
+        # through the editor's own retranslate plus the per-instance
+        # set_label / set_empty_hint helpers (the editor's retranslate
+        # only re-translates the +/-/up/down button strings).
+        if hasattr(self, "_rotate_order_editor"):
+            self._rotate_order_editor.set_label(tr("driver_rotate_order_label"))
+            self._rotate_order_editor.set_empty_hint(
+                tr("rotate_order_empty_hint"))
+            self._rotate_order_editor.retranslate()
+        if hasattr(self, "_quat_group_editor"):
+            self._quat_group_editor.set_label(tr("quat_group_start_label"))
+            self._quat_group_editor.set_empty_hint(tr("quat_group_empty_hint"))
+            self._quat_group_editor.retranslate()
 
     # ------------------------------------------------------------------
     # Private
@@ -426,11 +485,20 @@ class RBFSection(CollapsibleFrame):
         self._update_mode_visibility(idx)
 
     def _on_input_encoding(self, idx):
-        """Emit attr + show/hide M2.4b's per-driver-group rotateOrder
-        editor (gated by hasattr to stay safe pre-M2.4b)."""
+        """Emit attr + sync visibility via the dedicated helper. The
+        helper is also called from load() so a v5 rig opening with
+        encoding != Raw shows the rotateOrder editor immediately."""
         self.attributeChanged.emit("inputEncoding", idx)
+        self._update_encoding_visibility(idx)
+
+    def _update_encoding_visibility(self, idx):
+        """Single source of truth for the rotateOrder editor visibility.
+
+        ``hasattr`` guard preserved per addendum §M2.4b (D)①: defends
+        against future ``_build`` reordering that might construct the
+        editor after a callback fires."""
         if hasattr(self, "_rotate_order_editor"):
-            # Raw (idx == 0) hides the rotateOrder editor; non-Raw shows it.
+            # Raw (idx == 0) hides; non-Raw shows.
             self._rotate_order_editor.setVisible(idx != 0)
 
     def _on_clamp_toggled(self, checked):
