@@ -1554,6 +1554,220 @@ T_ROLLBACK 行为验证：mock `apply_poses` 注入异常 → 验证异常未被
 
 ---
 
+## §M3.7 — aliasAttr Auto-Naming
+
+Milestone 3 第三个工作流工具——M3.3 JSON Import/Export 的关键路径前置。**0 行 C++**。把 `<shape>.input[i]` / `<shape>.output[k]` 多实例 plug 自动起人可读 alias，让 channel-box / scriptEditor / 引擎侧 JSON export 都能用 `out_shoulderBlend` 替代 `output[5]`。
+
+### M3.7.1 — 决议日志
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | Maya `cmds.aliasAttr` API 信任 | **A.3** 文档 + mock 测试覆盖 | 与 M3.0/M3.2 风格一致；T6 双路径覆盖 PASS + FAIL 行为 |
+| (B) | 触发时机 | **B.4** `apply_poses` 末尾自动 + Tools 菜单兜底 | 与 M1.2 baseline / M2.3 localXform 自动捕获一致；用户零认知负担 + 修复入口 |
+| (C.1) | Alias 适用范围 | **C.1.b** output + input | 完整对称；pose 内部数组**不**起 alias（C.1.c 过度） |
+| (C.2) | 命名模板 | **C.2.β** `out_<x>` / `in_<x>` 前缀 + quat group `<base>QX/QY/QZ/QW` | 防止与 shape 自身 attr 冲突；quat group 沿用社区惯例 |
+| (C.3) | 冲突处理 | **a + b + c 全采纳** | 互不冲突；E.1 保留 + `_<idx>` 后缀兜底 + 同 shape 名字碰撞同退化 |
+| (D) | Schema 关系 | **D.1 + D.3** SCHEMA_VERSION 不变 | alias 是 Maya 元数据，不属于 RBFtools shape schema；M3.3 JSON 字段扩展不需要 bump version |
+| (E) | 既有 alias | **E.1 + E.3** 保留 + 显式覆盖入口 | E.1 默认保护；E.3 force 入口走 confirm（破坏性） |
+
+### M3.7.2 — Driven/Driver Node Write-Boundary Contract（**M3.x 第一次写非 RBFtools-shape 节点的边界**）
+
+```
+M3.7 Driven Node Write Boundary Contract:
+  - M3.7 alias generation invokes cmds.aliasAttr on the RBFtools SHAPE,
+    not on the driver/driven scene nodes themselves
+    (input[i] / output[k] are plugs on the shape; the shape is owned
+    end-to-end by RBFtools, so alias writes there are fully internal)
+  - Distinct from M3.2 mirror's "never modify source node" contract:
+    M3.2 was 100% read-only on the source; M3.7 writes aliases that
+    *describe* the rig wiring even though wiring itself is unchanged
+  - Scope strictly limited to:
+    * <shape>.input[i] for i in range(len(driver_attrs))
+    * <shape>.output[k] for k in range(len(driven_attrs))
+    * Alias names follow C.2.β template (out_<x> / in_<x> /
+      <base>QX/QY/QZ/QW)
+  - Out of scope (NEVER touched):
+    * Non-listed attributes on driver/driven (M2.3 freeze contract analog)
+    * Any attribute on third-party scene nodes
+    * Any non-RBFtools-managed alias on the shape (E.1 protection,
+      enforced by core_alias.is_rbftools_managed_alias)
+```
+
+未来 M3.5 / M3.6 / 其他 milestone 如有"修改非 RBFtools-shape 节点"需求都参照本契约模板写入边界范围。
+
+### M3.7.3 — Multi-Instance Plug Alias 行为（**caveat**）
+
+`cmds.aliasAttr` 对 multi-instance plug（`<shape>.output[5]`）的支持**未在真实 Maya 端验证**——执行者无 mayapy 环境。
+
+**采用 PASS 假设实施**，T6 测试覆盖 PASS / FAIL 双路径：
+
+- **PASS 路径**（默认行为）：`apply_aliases` 成功写入 alias，`read_aliases` 反查可还原 `{idx → alias}` 映射
+- **FAIL 路径**（fallback）：`cmds.aliasAttr` 抛 `RuntimeError` → `_set_one_alias` 捕获 + `cmds.warning` + 跳过；apply_poses 调用方收到空 dict 但 Apply 主流程**不**中断
+
+**回归触发**：M1.5 mayapy headless 集成测试就位时，对 multi-instance plug alias 行为做一次实测：
+
+- 若**实测 PASS** → 当前实现就是终态
+- 若**实测 FAIL** → core_alias 退化方案：
+  - `apply_aliases` 改为**仅返回名字映射**，不调 `cmds.aliasAttr`
+  - 名字映射作为 in-memory metadata，由 M3.3 export 直接消费写入 JSON
+  - **D.1 仍成立**：依然不动 SCHEMA_VERSION，不新增节点 attr
+
+**警告**：T6 FAIL 路径走完后 `result == {"input": {}, "output": {}}`——M3.3 import 时**不能**假设 alias dict 非空，必须有 index-only fallback。
+
+### M3.7.4 — `is_rbftools_managed_alias` 精确性契约（**永久守护**）
+
+清理范围必须严格区分 "RBFtools 自动生成" vs "用户手动设置"。检测规则（来自 `core_alias.py`）：
+
+| 规则 | 判定 | 例 |
+|---|---|---|
+| 1 | `name` 以 `"in_"` 开头且后有非空 base | `in_rotateX` ✅ managed |
+| 2 | `name` 以 `"out_"` 开头且后有非空 base | `out_blendValue` ✅ managed |
+| 3 | `name` 末尾匹配 `QX/QY/QZ/QW` 且 base 非空 | `aimQuatQX` ✅ managed |
+| 否则 | 非 managed | `myCustomName` ❌ user-set |
+
+**已知边界**：用户手动起的 alias **凑巧**末尾是 `QX/QY/QZ/QW`（如手工命名 `someThingQX`）会被误判 managed。这是文档化 trade-off：
+
+- RBFtools 拥有 `<base>QX/QY/QZ/QW` 四元命名约定的所有权
+- 用户冲撞此约定的命名属于知情后果
+- Tools → Force Regenerate Aliases（confirm 守门）是兜底逃生口
+
+**T_MANAGED_ALIAS_DETECT 永久守护**（`test_m3_7_alias.py::T4_ManagedAliasDetect`）—— 6 子测试覆盖 in_ / out_ / quat sibling / user / 边界（裸 `in_` 不算）/ empty。
+
+### M3.7.5 — Path A 第二次真实压力测试
+
+`controller.regenerate_aliases_for_current_node()` —— **不走** confirm（非破坏性，只是 progress 反馈）：
+
+```python
+prog = self.progress()
+if prog is not None:
+    prog.begin(tr("status_alias_starting"))
+core.auto_alias_outputs(...)
+prog.end(tr("status_alias_done"))
+```
+
+`controller.force_regenerate_aliases_for_current_node()` —— **必走** confirm（破坏性）：
+
+```python
+proceed = self.ask_confirm(
+    title=tr("title_force_alias"),
+    summary=tr("summary_force_alias"),
+    preview_text=preview,                       # user-set + managed 列表
+    action_id="force_regenerate_aliases",
+)
+if not proceed:
+    return None
+```
+
+零 M3.0 API 修改需求 —— path A 经受住第二次真实压力。
+
+### M3.7.6 — `action_id` 注册表更新（addendum §M3.0.3）
+
+| action_id | Sub-task | Confirm 触发场景 |
+|---|---|---|
+| `force_regenerate_aliases` | M3.7 | Force Regenerate Aliases（覆盖既有 user alias） |
+| ~~`regenerate_aliases`~~ | M3.7 | **不**走 confirm（非破坏性，仅 progress 反馈，无注册）|
+
+### M3.7.7 — 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `core_alias.py` | **新建** ~270 行（sanitize + 命名生成 + managed 检测 + apply/read/clear helpers + write-boundary 契约 docstring + M3.3 forward-compat docstring）|
+| `core.py` | +60 行（`auto_alias_outputs` orchestrator + `apply_poses` 末尾 try/warning 调用）|
+| `controller.py` | +110 行（`regenerate_aliases_for_current_node` + `force_regenerate_aliases_for_current_node`）|
+| `ui/main_window.py` | +18 行（2 个 `add_tools_action` 调用 + 2 个 callback stub）|
+| `ui/i18n.py` | +14 行（7 EN + 7 CN）|
+| `tests/test_m3_7_alias.py` | **新建** ~340 行（13 测试类，31 子测试）|
+| `docs/.../addendum_20260424.md` | §M3.7 ~140 行 |
+| `docs/.../milestone_3_summary.md` | §1 进度矩阵 + §3.1 注册表更新 |
+
+**总：~960 行**；生产代码 ~470 行 < 800 上限（预测 ~270，实际超过是因为 controller force_regenerate 的 preview 文本生成 + 详细 docstring；不影响子任务性质）。
+
+### M3.7.8 — 测试矩阵
+
+| T# | 名称 | 子测 |
+|---|---|---|
+| T1 | `_sanitize` 五条 | 5 |
+| T2 | `generate_alias_name` 五形态 | 5 |
+| T3 | `quat_group_alias_names` 四 sibling + sanitised base | 2 |
+| T4 / T_MANAGED_ALIAS_DETECT | `is_rbftools_managed_alias` 永久守护 | 6 |
+| T5 | `clear_managed_aliases` 保留 user alias（E.1） | 1 |
+| T6 | `apply_aliases` PASS + FAIL multi-plug 双路径 | 2 |
+| T7 | `read_aliases` 反查（含 foreign alias 忽略） | 1 |
+| T8 | 冲突 `_<idx>` 后缀兜底 | 1 |
+| T9 | `apply_poses` 调用 `auto_alias_outputs`（source-text）| 2 |
+| T10 | controller path A 方法存在 + action_id 字面量 | 3 |
+| T11 | i18n 7 keys EN/CN parity | 1 |
+| T12 | SCHEMA_VERSION 仍为 `"rbftools.v5.m3"` | 1 |
+| T13 | Tools 菜单走 `add_tools_action` spillover | 1 |
+
+合计 **13 测试类，31 子测试**。
+
+### M3.7.9 — 零回归
+
+- `apply_poses` 第 5 步是 try/except 包裹的纯增量 —— alias 失败仅 warning，evaluate 步骤照常触发
+- 新菜单项空闲时不触发任何 cmds.aliasAttr 调用
+- 现有 `cmds.aliasAttr` 在源码中**之前从未被引用** —— 引入是首次（grep 验证）
+- 全量回归：260 + 31 = **291 / 291** 通过
+
+### M3.7.10 — Non-goals（M3.x 后续）
+
+- ❌ Per-pose 内部数组（`poses[p].poseInput[i]`）alias —— 过度污染 channel box（C.1.c 决议拒绝）
+- ❌ Bidirectional sync："用户改了 alias → 反向更新 driver/driven attr 名" —— alias 永远是 RBFtools-side 别名，不传播
+- ❌ Per-rig optionVar 关闭自动 alias —— 当前 force-only 入口已足够；如有需求 M3.x 后续 patch
+- ❌ 自动 alias 名国际化 —— alias 是引擎侧消费的 ASCII identifier，不应翻译（i18n 仅菜单文本）
+
+### M3.7.11 — 红线确认
+
+- ✅ 沿用 M3.0/M3.2 全部红线（0 C++ / MVC / i18n / undo_chunk / float_eq / no kFailure / spillover helpers / path A）
+- ✅ **SCHEMA_VERSION 不变** = `"rbftools.v5.m3"`（D.1 决议；T12 守护）
+- ✅ **保留用户手动 alias**（E.1 默认；E.3 force 入口走 confirm）
+- ✅ **`is_rbftools_managed_alias` 精确**（T_MANAGED_ALIAS_DETECT 永久守护）
+- ✅ 写权限边界严格限制到 `<shape>.input[i]` / `<shape>.output[k]`（M3.7.2 契约）
+- ✅ Multi-instance plug alias caveat 文档化（M3.7.3，M1.5 mayapy 回归触发）
+- ✅ Tools 菜单经 `add_tools_action` spillover helper（T13 守护）
+
+### M3.7.12 — M3.3 Forward-Compat Contract
+
+M3.3 JSON Import/Export 将直接消费 M3.7 的以下 API。签名稳定承诺 —— M3.3 实施时**调用即可**，M3.7 不再变更：
+
+```python
+# 1. Pure name generation (no Maya cmds touched).
+core_alias.generate_alias_name(attr_name, idx, role,
+                               is_quat_group_leader=False) -> str
+core_alias.quat_group_alias_names(leader_attr_name) -> tuple[str x 4]
+
+# 2. Reverse lookup (Maya cmds — read-only).
+core_alias.read_aliases(shape) -> {"input": {idx: alias},
+                                    "output": {idx: alias}}
+
+# 3. Managed-alias classifier (pure).
+core_alias.is_rbftools_managed_alias(name) -> bool
+
+# 4. Public constants.
+core_alias.MANAGED_PREFIX_INPUT  = "in_"
+core_alias.MANAGED_PREFIX_OUTPUT = "out_"
+core_alias.QUAT_SUFFIXES = ("QX", "QY", "QZ", "QW")
+```
+
+M3.3 export schema 推荐字段（**不**改 SCHEMA_VERSION）：
+
+```json
+{
+  "schema_version": "rbftools.v5.m3",
+  "outputs": [
+    {"index": 5, "alias": "out_shoulderBlend",
+     "drivenAttr": "shoulderBlend"}
+  ],
+  "inputs": [
+    {"index": 0, "alias": "in_rotateX", "driverAttr": "rotateX"}
+  ]
+}
+```
+
+M3.3 import 优先 alias → fallback index。alias 在 PASS 路径下持久（Maya 保存到 `.ma`/`.mb`），FAIL 路径下也由 export-time `read_aliases` 反查兜底（FAIL 路径需 M3.3 前补完整退化）。
+
+---
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```

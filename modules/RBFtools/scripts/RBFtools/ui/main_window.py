@@ -433,6 +433,16 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._pose_editor.add_pose_row_action(
             "row_mirror_this", self._on_mirror_pose, danger=False)
 
+        # ---- M3.7: alias regeneration entries via M3.0-spillover ----
+        # Non-destructive (preserves user aliases) — no confirm dialog.
+        self.add_tools_action(
+            "menu_regenerate_aliases", self._on_regenerate_aliases)
+        # Destructive (wipes user aliases) — confirm gate inside
+        # controller.force_regenerate_aliases_for_current_node.
+        self.add_tools_action(
+            "menu_force_regenerate_aliases",
+            self._on_force_regenerate_aliases)
+
     # =================================================================
     #  M3.0 — Menu bar
     # =================================================================
@@ -485,6 +495,15 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Refresh the UI so the newly created target shows up in the
         # node selector.
         self._on_refresh()
+
+    def _on_regenerate_aliases(self):
+        """Tools -> Regenerate Aliases (M3.7, non-destructive)."""
+        self._ctrl.regenerate_aliases_for_current_node()
+
+    def _on_force_regenerate_aliases(self):
+        """Tools -> Force Regenerate Aliases (M3.7, destructive,
+        confirm-gated). Walks path A via controller."""
+        self._ctrl.force_regenerate_aliases_for_current_node()
 
     def _on_mirror_pose(self, row_idx):
         """Right-click pose-table -> Mirror this pose (M3.2 single-pose

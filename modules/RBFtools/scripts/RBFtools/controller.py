@@ -308,6 +308,117 @@ class MainController(QtCore.QObject):
                 prog.end("Mirror failed")
             return None
 
+    # =================================================================
+    #  M3.7 — auto-alias dispatchers (path A consumers)
+    # =================================================================
+
+    def regenerate_aliases_for_current_node(self):
+        """Re-run alias generation in *preserve-user-aliases* mode
+        (E.1 default). No confirm dialog — non-destructive.
+
+        Returns the dict from :func:`core.auto_alias_outputs`, or None
+        if there is no current node.
+        """
+        if not self._current_node:
+            return None
+        from RBFtools import core
+        from RBFtools.ui.i18n import tr
+
+        driver_node, driver_attrs = core.read_driver_info(self._current_node)
+        driven_node, driven_attrs = core.read_driven_info(self._current_node)
+        # driver_node / driven_node are unused at this layer — alias
+        # writes target the shape only, not the rig nodes (write-
+        # boundary contract, addendum §M3.7).
+        del driver_node, driven_node
+
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_alias_starting"))
+        try:
+            result = core.auto_alias_outputs(
+                self._current_node, driver_attrs, driven_attrs,
+                force=False)
+        except Exception as exc:
+            cmds.warning("regenerate_aliases failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_alias_failed"))
+            return None
+        if prog is not None:
+            prog.end(tr("status_alias_done"))
+        return result
+
+    def force_regenerate_aliases_for_current_node(self):
+        """Re-run alias generation in *force* mode — wipes ALL aliases
+        on the shape (managed AND user-set) before regenerating.
+
+        Goes through :meth:`ask_confirm` (path A) with
+        ``action_id="force_regenerate_aliases"`` because this is a
+        destructive operation against any user-managed aliases.
+        """
+        if not self._current_node:
+            return None
+        from RBFtools import core, core_alias
+        from RBFtools.ui.i18n import tr
+
+        shape = core.get_shape(self._current_node)
+        # Build preview: list every existing alias the user is about
+        # to lose. Two sections so user-set vs managed are visible.
+        existing_pairs = core_alias._query_existing_aliases(shape) if shape else []
+        managed = [a for a, _ in existing_pairs
+                   if core_alias.is_rbftools_managed_alias(a)]
+        user_set = [a for a, _ in existing_pairs
+                    if not core_alias.is_rbftools_managed_alias(a)]
+        preview_lines = [
+            "Force regenerate will WIPE all aliases on:",
+            "  Shape:  {}".format(shape or "(none)"),
+            "",
+            "User-set aliases that will be LOST ({}):".format(len(user_set)),
+        ]
+        if user_set:
+            preview_lines.extend("  - {}".format(a) for a in user_set)
+        else:
+            preview_lines.append("  (none)")
+        preview_lines.extend([
+            "",
+            "RBFtools-managed aliases that will be regenerated ({}):".format(
+                len(managed)),
+        ])
+        if managed:
+            preview_lines.extend("  - {}".format(a) for a in managed)
+        else:
+            preview_lines.append("  (none)")
+        preview = "\n".join(preview_lines)
+
+        proceed = self.ask_confirm(
+            title=tr("title_force_alias"),
+            summary=tr("summary_force_alias"),
+            preview_text=preview,
+            action_id="force_regenerate_aliases",
+        )
+        if not proceed:
+            return None
+
+        driver_node, driver_attrs = core.read_driver_info(self._current_node)
+        driven_node, driven_attrs = core.read_driven_info(self._current_node)
+        del driver_node, driven_node
+
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_alias_starting"))
+        try:
+            result = core.auto_alias_outputs(
+                self._current_node, driver_attrs, driven_attrs,
+                force=True)
+        except Exception as exc:
+            cmds.warning(
+                "force_regenerate_aliases failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_alias_failed"))
+            return None
+        if prog is not None:
+            prog.end(tr("status_alias_done"))
+        return result
+
     def ask_confirm(self, title, summary, preview_text, action_id):
         """Synchronous user-confirmation prompt (addendum §M3.0).
 

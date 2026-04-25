@@ -1769,6 +1769,69 @@ def read_pose_local_transforms(node):
     return out
 
 
+def auto_alias_outputs(node, driver_attrs, driven_attrs, force=False):
+    """Generate human-readable aliases on the shape's input[]/output[]
+    multi plugs (Milestone 3.7).
+
+    Default-mode (``force=False``) preserves user-set aliases by only
+    clearing those classified as RBFtools-managed via
+    :func:`core_alias.is_rbftools_managed_alias` (E.1 contract).
+
+    Force-mode (``force=True``) wipes every alias on the shape before
+    regenerating — meant for the "Force Regenerate" Tools menu entry
+    behind a confirm dialog.
+
+    Quat-group leaders (output indices in ``outputQuaternionGroupStart[]``)
+    receive the ``<base>QX/QY/QZ/QW`` quartet instead of the standard
+    ``out_<x>`` form.
+
+    See addendum §M3.7 for the driven/driver write-boundary contract:
+    aliases are written to the **shape**'s plugs, NOT to the
+    driver/driven scene nodes themselves.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of the RBFtools node.
+    driver_attrs, driven_attrs : list[str]
+        Ordered attribute names — must match the input[]/output[]
+        index ordering. Pass empty list to skip a side.
+    force : bool, optional
+        Clear ALL aliases (managed + user-set) before regenerating.
+        Default False.
+
+    Returns
+    -------
+    dict
+        ``{"input": {idx: alias}, "output": {idx: alias}}``.
+    """
+    from RBFtools import core_alias
+
+    shape = get_shape(node)
+    if not _exists(shape):
+        return {"input": {}, "output": {}}
+
+    quat_starts = []
+    try:
+        ids = cmds.getAttr(
+            shape + ".outputQuaternionGroupStart",
+            multiIndices=True) or []
+        for i in ids:
+            quat_starts.append(int(cmds.getAttr(
+                "{}.outputQuaternionGroupStart[{}]".format(shape, i))))
+    except Exception:
+        quat_starts = []
+
+    with undo_chunk("RBFtools: auto-alias outputs"):
+        return core_alias.apply_aliases(
+            shape,
+            driver_attrs or [],
+            driven_attrs or [],
+            quat_group_starts=quat_starts,
+            force=force,
+        )
+
+
 def apply_poses(node, driver_node, driven_node,
                 driver_attrs, driven_attrs, poses):
     """Write pose data onto the solver node (no connections).
@@ -1834,7 +1897,19 @@ def apply_poses(node, driver_node, driven_node,
             driven_node, driven_attrs, poses)
         write_pose_local_transforms(node, local_xforms)
 
-        # 5 — trigger evaluation cycle
+        # 5 — M3.7: auto-generate human-readable aliases on input[] /
+        # output[] multi plugs. Preserves user-set aliases (E.1).
+        # Failures emit warnings but never break the Apply chain — see
+        # core_alias module docstring for the write-boundary contract.
+        try:
+            auto_alias_outputs(node, driver_attrs, driven_attrs,
+                               force=False)
+        except Exception as exc:
+            cmds.warning(
+                "apply_poses: auto-alias step failed: {} "
+                "(continuing — aliases are advisory)".format(exc))
+
+        # 6 — trigger evaluation cycle
         cmds.setAttr(shape + ".evaluate", 0)
         cmds.setAttr(shape + ".evaluate", 1)
 

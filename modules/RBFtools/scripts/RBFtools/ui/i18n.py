@@ -141,6 +141,15 @@ _EN = {
     "warn_name_unchanged":          "Mirror would produce identical name - check rule",
     "warn_name_no_match":           "Source name does not match selected rule",
     "summary_mirror_node":          "Mirror node configuration:",
+    # -- M3.7: aliasAttr auto-naming --
+    "menu_regenerate_aliases":         "Regenerate Aliases",
+    "menu_force_regenerate_aliases":   "Force Regenerate Aliases...",
+    "title_force_alias":               "Force Regenerate Aliases",
+    "summary_force_alias":
+        "Force regenerate will WIPE user-set aliases on this shape.",
+    "status_alias_starting":           "Regenerating aliases...",
+    "status_alias_done":               "Aliases regenerated.",
+    "status_alias_failed":             "Alias regeneration failed.",
     # -- pose editor --
     "rbf_pose_editor":     "RBF Pose Editor",
     "auto_fill_bs":        "Auto Fill BlendShape",
@@ -291,6 +300,15 @@ _ZH = {
     "warn_name_unchanged":          u"\u955c\u50cf\u540e\u540d\u5b57\u672a\u53d8\u2014\u2014\u68c0\u67e5\u89c4\u5219",
     "warn_name_no_match":           u"\u6e90\u540d\u4e0d\u5339\u914d\u9009\u4e2d\u89c4\u5219",
     "summary_mirror_node":          u"\u955c\u50cf\u8282\u70b9\u914d\u7f6e\uff1a",
+    # -- M3.7 --
+    "menu_regenerate_aliases":         u"\u91cd\u65b0\u751f\u6210\u522b\u540d",
+    "menu_force_regenerate_aliases":   u"\u5f3a\u5236\u91cd\u751f\u522b\u540d...",
+    "title_force_alias":               u"\u5f3a\u5236\u91cd\u751f\u522b\u540d",
+    "summary_force_alias":
+        u"\u5f3a\u5236\u91cd\u751f\u5c06\u6e05\u9664\u8be5 shape \u4e0a\u7528\u6237\u624b\u52a8\u8bbe\u7f6e\u7684\u522b\u540d\u3002",
+    "status_alias_starting":           u"\u6b63\u5728\u751f\u6210\u522b\u540d...",
+    "status_alias_done":               u"\u522b\u540d\u5df2\u751f\u6210\u3002",
+    "status_alias_failed":             u"\u522b\u540d\u751f\u6210\u5931\u8d25\u3002",
     "rbf_pose_editor":     u"RBF \u59ff\u6001\u7f16\u8f91\u5668",
     "auto_fill_bs":        u"\u81ea\u52a8\u586b\u5145\u878d\u5408\u53d8\u5f62",
     "driver":              u"\u9a71\u52a8",

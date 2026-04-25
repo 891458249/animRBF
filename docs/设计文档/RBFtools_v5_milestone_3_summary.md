@@ -1,7 +1,7 @@
 # RBFtools v5 — Milestone 3 — Workflow Tools
 
-> **Status**: M3.0 + M3.2 Complete ✅ | M3.1, M3.3-M3.7 Pending
-> **Test累计**: 260 / 260
+> **Status**: M3.0 + M3.2 + M3.7 Complete ✅ | M3.1, M3.3-M3.6 Pending
+> **Test累计**: 291 / 291
 > **Roadmap reference**: 设计方案 PART F Milestone 3
 > **Top-level decisions**: addendum §M3 顶层核查（本会话内决议）
 > **Detailed addendum**: `RBFtools_v5_addendum_20260424.md` §M3.0 (+ future §M3.x)
@@ -15,9 +15,9 @@
 | Sub-task | Purpose | Status | Commit | Tests | Addendum |
 |---|---|---|---|---|---|
 | **M3.0** | Shared infrastructure (ConfirmDialog / Progress / JSON IO / select_rig) | ✅ | `74ed12c` | 18 | §M3.0 |
-| **M3.2** | Mirror Tool (L↔R quat/translate flip + name remap) | ✅ | (this commit) | 31 | §M3.0-spillover + §M3.2 |
-| **M3.7** | aliasAttr auto-naming（M3.3 阻塞项）| ⏳ Next | — | — | — |
-| **M3.3** | JSON Import/Export（消费 M3.7 + M2.3）| ⏳ | — | — | — |
+| **M3.2** | Mirror Tool (L↔R quat/translate flip + name remap) | ✅ | `9cd02f2` | 31 | §M3.0-spillover + §M3.2 |
+| **M3.7** | aliasAttr auto-naming（M3.3 阻塞项 → 已解锁） | ✅ | (this commit) | 31 | §M3.7 |
+| **M3.3** | JSON Import/Export（消费 M3.7 + M2.3）| ⏳ Next | — | — | — |
 | **M3.1** | Pose Pruner | ⏳ | — | — | — |
 | **M3.6** | Auto neutral samples（CMT 风格）| ⏳ | — | — | — |
 | **M3.5** | Pose Profiler + 拆分建议 | ⏳ | — | — | — |
@@ -65,6 +65,7 @@ M3.4 (Live Edit — 复杂度最高 + 优先级最低)
 | `prune_poses` | M3.1（待登记）| Pose Pruner 删除批量 poses 前 |
 | `mirror_create` | M3.2 ✅ | Mirror 创建新目标节点前 |
 | `mirror_overwrite` | M3.2 ✅ | Mirror 目标已存在时覆盖前 |
+| `force_regenerate_aliases` | M3.7 ✅ | Force Regenerate Aliases（覆盖既有 user alias）前 |
 | `import_solver_overwrite` | M3.3（待登记）| Import 覆盖现有节点前 |
 | `live_edit_enable` | M3.4（待登记，可选）| Live Edit Mode 首次启用提示 |
 
@@ -223,9 +224,9 @@ M2 输入/输出编码闭环 ✅ (211 测试，主体收官)
   └── M2.5 pose 分字段缓存 (forward-compat 锁定，可任意插入)
 M3 工作流工具 ← 进行中
   ├── M3.0 共享基础设施 ✅ (229 测试)
-  ├── M3.2 Mirror ← 下一站
-  ├── M3.7 aliasAttr
-  ├── M3.3 JSON IO
+  ├── M3.2 Mirror ✅ (260 测试)
+  ├── M3.7 aliasAttr ✅ (291 测试)
+  ├── M3.3 JSON IO ← 下一站
   ├── M3.1 Pose Pruner
   ├── M3.6 自动中性样本
   ├── M3.5 Pose Profiler
