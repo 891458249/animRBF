@@ -67,6 +67,8 @@ def _install_maya_mocks():
     if 'maya.OpenMayaUI' not in sys.modules:
         sys.modules['maya.OpenMayaUI'] = mock.MagicMock(
             name='maya.OpenMayaUI')
+    if 'maya.utils' not in sys.modules:
+        sys.modules['maya.utils'] = mock.MagicMock(name='maya.utils')
 
 
 # ----------------------------------------------------------------------

@@ -1202,6 +1202,206 @@ T9 通过**源码扫描**断言契约（不依赖 instantiation 与真实 Qt sig
 - **M1.5** — mayapy headless C++ 集成测试（环境就位时一次性覆盖 M1.1-M2.3 的 C++ 路径）
 - **M2.5** — pose 分字段缓存（forward-compat 契约见上）
 
+---
+
+## §M3.0 — Shared Infrastructure for Milestone 3 Workflow Tools
+
+Milestone 3 共 7 个子任务（M3.1–M3.7）都是工作流工具，反复需要 confirm 对话框 + 进度反馈 + 节点选中辅助 + JSON I/O 工具。M3.0 是**预备子任务**，把这 4 项基础设施一次性抽出，避免每个 M3.x 重复造轮子。**0 行 C++ 改动**。
+
+### M3.0.1 — 决议日志
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | 预览区域 widget | **① QPlainTextEdit read-only monospace** | 3/3 caller 实际需求都是 multi-line 文本摘要；callers 序列化到 ASCII，避免 widget 复杂化 |
+| (B) | Modal vs Non-modal | **① Modal (`exec_()`)** | confirm 语义本就是同步阻塞；Qt 惯例；API 简单 |
+| (C) | `enumerate_rbf_nodes` 是否新增 | **① 不新增**，复用 [`core.list_all_nodes()`](modules/RBFtools/scripts/RBFtools/core.py:127) | 现有 v4 helper 完全等价，新增是冗余 |
+| (D) | `core_json.py` 文件位置 | **① 新文件** | core.py 已 1860 行；I/O 序列化与 DG ops 正交；M3.3 还要扩展 ~200 行 |
+| (E) | Confirm 容器 | **① QDialog 子类** | 需要 preview pane + Don't-ask-again checkbox，QMessageBox 不支持 |
+| (F) | menuBar 实例化时机 | **① `_build_ui` 末尾** | 与 `StatusProgressController` 实例化对齐；统一在 build 结束后做 wiring |
+| (G) | `reset_all_skip_confirms` 二次确认 | **① 不需要** | 选择菜单项即用户意图；二次确认是冗余 |
+
+### M3.0.2 — Schema Version Immutability Contract（**永久不变量**）
+
+`core_json.SCHEMA_VERSION` = `"rbftools.v5.m3"` 是**永久不变量**。
+
+任何 schema 演化必须：
+
+1. 引入**新**版本字符串（如 `"rbftools.v5.m3.1"` 或 `"rbftools.v6"`）—— 永远不能修改既有字符串而让字段语义在底下漂移
+2. `read_json_with_schema_check` 扩展为**多版本 reader**，同时支持读旧版 + 写新版
+3. 在本 addendum 新建 `§M3.x-extension-YYYYMMDD` 子节记录变更
+
+**三层守护**：
+
+- **Layer 1 — 源码注释**：`core_json.py` 模块 docstring + `SCHEMA_VERSION` 行尾注释
+- **Layer 2 — addendum 契约**：本节
+- **Layer 3 — 永久测试**：`tests/test_m3_0_infrastructure.py::T0_SchemaVersionImmutability::test_schema_version_unchanged_M3_0` —— 标注 `# PERMANENT GUARD — DO NOT REMOVE` 并 fail 时给出"读 §M3.0 contract"指引
+
+任何一层丢失都会被 review 注意到。三层同时丢失即破坏契约——**这种情况禁止**。
+
+### M3.0.3 — Don't-Ask-Again optionVar 命名规则（锁定）
+
+```
+RBFtools_skip_confirm_<action_id>
+```
+
+- `<action_id>`：snake_case 字符串，由 M3.x 子任务自定义（`prune_poses` / `mirror_node` / `import_solver` / ...）
+- 作用域：**全局** optionVar（不 per-rig）—— 用户在某个项目勾掉 "Don't ask again" 跨项目都生效
+- 复位入口：`Tools → Reset confirm dialogs` 菜单项一键清所有 `RBFtools_skip_confirm_*` —— 给后悔药
+- 持久化函数：`core.should_show_confirm_dialog(action_id)` / `core.set_skip_confirm(action_id, skip)` / `core.reset_all_skip_confirms()` —— 与 `core.get_filter_state` / `core.set_filter_state` 共栖一个文件，所有 optionVar 持久化集中在 core.py
+
+`action_id` 注册表（M3.x 完工时各自补充）：
+
+| action_id | 子任务 | 触发场景 |
+|---|---|---|
+| (待 M3.1 注册) `prune_poses` | M3.1 | Pose Pruner 删除批量 poses 前 |
+| (待 M3.2 注册) `mirror_node` | M3.2 | Mirror 创建镜像节点前 |
+| (待 M3.3 注册) `import_solver_overwrite` | M3.3 | Import 覆盖现有节点前 |
+| ... | ... | ... |
+
+### M3.0.4 — M3.x 访问路径契约（加固 1）
+
+`StatusProgressController` 与 `ConfirmDialog` 实例化在 `RBFToolsWindow`，但 M3.x 子任务工具通过两条路径访问：
+
+**路径 A（推荐 + 默认）**：经 `MainController`
+
+```python
+# In M3.x sub-task widget code (or controller method):
+ctrl = self.controller   # the MainController instance
+
+# Confirm prompt:
+proceed = ctrl.ask_confirm(
+    title=tr("title_prune_poses"),
+    summary=tr("summary_prune_poses"),
+    preview_text=preview_str,
+    action_id="prune_poses",
+)
+if not proceed:
+    return
+
+# Progress feedback:
+prog = ctrl.progress()
+if prog:
+    prog.begin(tr("status_prune_starting"))
+    # ... work loop ...
+    prog.step(i, total, tr("status_prune_step"))
+    prog.end(tr("status_prune_done"))
+```
+
+`MainController.ask_confirm` 内部 lazy-imports `ConfirmDialog`，把 parent widget 设为 `controller.parent()`（即主窗口）。M3.x 子任务**不直接 import `ConfirmDialog`**——MVC 边界由 controller 守护。
+
+**路径 B（不推荐但允许）**：直接调用
+
+```python
+from RBFtools.ui.widgets.confirm_dialog import ConfirmDialog
+proceed = ConfirmDialog.confirm(...)
+```
+
+**仅当**工具是"独立 utility 而非 sub-task widget"时才走路径 B（罕见），且必须在子任务 addendum 里**论证**走 B 的理由。
+
+`StatusProgressController` 同理——M3.x 通过 `controller.progress()` 访问，不直接读 `main_window._progress_ctrl` 私有成员。
+
+### M3.0.5 — 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `core_json.py` | **新建**（115 行）—— SCHEMA_VERSION + atomic_write_json + read_json_with_schema_check + 三层守护源码注释 |
+| `core.py` | +97 行 —— `select_rig_for_node` + `should_show_confirm_dialog` / `set_skip_confirm` / `reset_all_skip_confirms` + `CONFIRM_OPT_VAR_TEMPLATE` |
+| `controller.py` | +40 行 —— `set_progress_controller` / `progress` / `ask_confirm` |
+| `ui/main_window.py` | +85 行 —— `StatusProgressController` 类 + `_build_menu_bar` + `_on_reset_confirms` + wiring |
+| `ui/widgets/confirm_dialog.py` | **新建**（120 行）—— ConfirmDialog QDialog 子类 + `@classmethod confirm` |
+| `ui/i18n.py` | +20 行 —— 9 EN + 9 CN 条目 |
+| `tests/conftest.py` | +2 行 —— mock `maya.utils` (M3.0 测试需) |
+| `tests/test_m3_0_infrastructure.py` | **新建**（330 行）—— T0-T8（18 子测试） |
+
+**总：~+810 行**（含测试 + 新文件）；纯代码（不计测试）~520 行。
+
+### M3.0.6 — 测试矩阵
+
+| T# | 名称 | 子测 |
+|---|---|---|
+| **T0** | `SCHEMA_VERSION` 永久守护 | 1（PERMANENT GUARD）|
+| T1 | `should_show_confirm_dialog` 三状态 | 3 |
+| T2 | optionVar 命名规则 + 模板格式 | 2 |
+| T3 | `reset_all_skip_confirms` 仅清匹配前缀 | 1 |
+| T4 | `atomic_write_json` 写入 + 替换 + 无残留 | 3 |
+| T5 | `read_json_with_schema_check` 通过/失败/缺字段 | 3 |
+| T6 | `select_rig_for_node` invalid role defensive | 1 |
+| T7 | `StatusProgressController` begin/step/end | 3 |
+| T8 | M3.0 i18n keys 双语完整 | 1 |
+
+合计 **9 测试类，18 子测试**。
+
+### M3.0.7 — 零回归
+
+- 主窗口加 menuBar 不影响现有布局（menuBar 在标题栏下方独立）
+- `MainController` 加 3 个 method 不破坏现有 signal 连接
+- `core.py` 加 4 个函数不影响现有 callers
+- 新文件 `core_json.py` 完全独立
+- 全量回归：211 + 18 = **229 / 229** 通过
+
+### M3.0.8 — Non-goals（M3.x 子任务自己做）
+
+- ❌ 实际工具按钮 / 菜单项 entries（M3.1–M3.7 各自 add）
+- ❌ 工具特定的 confirm 提示文本 / preview 序列化（caller 实现）
+- ❌ JSON 实际 schema 字段定义（M3.3 实现 export/import）
+- ❌ 工具栏图标 / 第三层 UI 入口（顶层报告已决议不做）
+
+### M3.0.9 — 红线确认
+
+- ✅ 沿用 M3 顶层全部红线（0 C++ / MVC / i18n / v4 兼容 / 无新依赖）
+- ✅ `SCHEMA_VERSION` 三层守护（源码 + addendum + 测试 T0）
+- ✅ optionVar 命名规则 `RBFtools_skip_confirm_<action_id>` 锁定
+- ✅ M3.x 默认走 `controller.ask_confirm` / `controller.progress()`，路径 B 直接调用须在子任务 addendum 论证
+- ✅ `ConfirmDialog` API 向后兼容契约：caller 升级新参数不能 break 既有调用点（classmethod 用 default kwargs 扩展）
+- ✅ 单子任务 ≤ 800 行硬上限：M3.0 估 ~520 代码 + ~290 测试 = ~810 总，**生产代码 520 < 800 上限**
+
+### M3.0.10 — M3.x 子任务复用模板（"如何使用 M3.0"）
+
+```python
+# Step 1: confirm prompt (when about to do something destructive)
+preview = "\n".join(
+    "Pose [{}]: {}".format(p.idx, reason)
+    for p, reason in items_to_remove
+)
+if not self._ctrl.ask_confirm(
+    title=tr("title_prune_poses"),
+    summary=tr("summary_prune_poses").format(count=len(items_to_remove)),
+    preview_text=preview,
+    action_id="prune_poses",
+):
+    return
+
+# Step 2: progress feedback during the work
+prog = self._ctrl.progress()
+if prog:
+    prog.begin(tr("status_prune_starting"))
+for i, (p, _r) in enumerate(items_to_remove):
+    if prog:
+        prog.step(i + 1, len(items_to_remove),
+                  tr("status_prune_step").format(idx=p.idx))
+    self._ctrl.delete_pose_at(p.idx)
+if prog:
+    prog.end(tr("status_prune_done"))
+
+# Step 3: JSON I/O (M3.3 export example)
+from RBFtools import core_json
+core_json.atomic_write_json(path, {
+    "schema_version": core_json.SCHEMA_VERSION,
+    "node": node_name,
+    ...
+})
+data = core_json.read_json_with_schema_check(path)   # raises on mismatch
+
+# Step 4: rig role selection (utility; one click "show me the driver")
+core.select_rig_for_node(self._ctrl.current_node(), "driver")
+```
+
+每 M3.x 子任务在自己的 addendum 中：
+1. 注册 `action_id` 到 §M3.0.3 的"action_id 注册表"
+2. 在子任务 addendum 列出"使用了哪些 M3.0 helper"以便 review 追溯
+
+---
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```

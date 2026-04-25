@@ -343,6 +343,89 @@ def set_filter_state(role, key, value):
     cmds.optionVar(iv=(_filter_var_name(role, key), int(value)))
 
 
+# =====================================================================
+#  Confirm-dialog optionVar persistence — Milestone 3.0
+# =====================================================================
+# Centralised here (alongside filter persistence) per addendum §M3.0
+# soft-suggestion: all optionVar persistence lives in core.py so the
+# i18n / MVC scanners always find a single owner. ConfirmDialog imports
+# these via lazy `from RBFtools import core` inside its classmethod.
+
+CONFIRM_OPT_VAR_TEMPLATE = "RBFtools_skip_confirm_{action_id}"
+
+
+def should_show_confirm_dialog(action_id):
+    """Return ``True`` iff the user has NOT silenced this action via
+    "Don't ask again". Pure function — testable through mocked
+    :func:`cmds.optionVar`.
+
+    Parameters
+    ----------
+    action_id : str
+        snake_case identifier of the action (e.g. ``"prune_poses"``).
+        Maps to optionVar ``RBFtools_skip_confirm_<action_id>`` per
+        addendum §M3.0 naming contract.
+    """
+    var = CONFIRM_OPT_VAR_TEMPLATE.format(action_id=action_id)
+    if not cmds.optionVar(exists=var):
+        return True
+    return not bool(cmds.optionVar(query=var))
+
+
+def set_skip_confirm(action_id, skip):
+    """Persist the "Don't ask again" preference for *action_id*."""
+    var = CONFIRM_OPT_VAR_TEMPLATE.format(action_id=action_id)
+    cmds.optionVar(iv=(var, int(bool(skip))))
+
+
+def reset_all_skip_confirms():
+    """Clear every ``RBFtools_skip_confirm_*`` optionVar.
+
+    Backed by the ``Tools → Reset confirm dialogs`` menu item per
+    addendum §M3.0 (a one-click escape hatch — there is intentionally
+    no "are you sure" dialog because the act of selecting the menu
+    item already constitutes user intent).
+    """
+    prefix = "RBFtools_skip_confirm_"
+    names = cmds.optionVar(list=True) or []
+    for name in names:
+        if name.startswith(prefix):
+            cmds.optionVar(remove=name)
+
+
+# =====================================================================
+#  Rig role selection — Milestone 3.0
+# =====================================================================
+
+
+def select_rig_for_node(node, role):
+    """Select the driver or driven scene object connected to *node*.
+
+    Composes the existing :func:`read_driver_info` /
+    :func:`read_driven_info` helpers with ``cmds.select`` — M3.x tools
+    (Mirror, Profiler, etc.) need this one-step "show me the rig" UX
+    primitive without each tool re-implementing the connection lookup.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of an RBFtools node.
+    role : str
+        ``"driver"`` or ``"driven"``. Anything else emits a warning
+        and no-ops.
+    """
+    if role == "driver":
+        target, _attrs = read_driver_info(node)
+    elif role == "driven":
+        target, _attrs = read_driven_info(node)
+    else:
+        cmds.warning(
+            "select_rig_for_node: invalid role {!r}".format(role))
+        return
+    if target and _exists(target):
+        cmds.select(target, replace=True)
+
+
 def get_all_filters(role):
     """Return the complete filter dict for *role* (``'driver'`` / ``'driven'``)."""
     return {k: get_filter_state(role, k) for k in FILTER_DEFAULTS}

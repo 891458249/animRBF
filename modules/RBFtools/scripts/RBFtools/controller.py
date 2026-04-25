@@ -181,6 +181,45 @@ class MainController(QtCore.QObject):
         data = core.get_all_settings(self._current_node)
         self.settingsLoaded.emit(data)
 
+    # =================================================================
+    #  M3.0 — Shared infrastructure access (addendum §M3.0 path A)
+    # =================================================================
+    #
+    # M3.x sub-tasks reach the StatusProgressController and the
+    # ConfirmDialog through the controller, NOT through main_window
+    # private members. Keeps the MVC red line clean: sub-task widgets
+    # only know the controller, never the window's private layout.
+
+    def set_progress_controller(self, ctrl):
+        """Inject the StatusProgressController. Called by main_window
+        after ``_build_ui`` finishes (the progress widget is created
+        there, AFTER MainController.__init__)."""
+        self._status_progress = ctrl
+
+    def progress(self):
+        """Return the StatusProgressController, or None when running
+        headlessly (no main window) — callers must guard against None
+        in test / CI contexts."""
+        return getattr(self, "_status_progress", None)
+
+    def ask_confirm(self, title, summary, preview_text, action_id):
+        """Synchronous user-confirmation prompt (addendum §M3.0).
+
+        Returns True if the user clicked OK (or had previously silenced
+        this action via "Don't ask again"), False on Cancel / close.
+        Sub-tasks call this instead of importing ConfirmDialog
+        directly — keeps MVC clean and centralises the parent-widget
+        wiring.
+        """
+        from RBFtools.ui.widgets.confirm_dialog import ConfirmDialog
+        return ConfirmDialog.confirm(
+            title, summary, preview_text, action_id,
+            parent=self.parent())
+
+    # =================================================================
+    #  Generic attribute write
+    # =================================================================
+
     def set_attribute(self, attr, value):
         """Write a single attribute on the current node.
 

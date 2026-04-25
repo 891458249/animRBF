@@ -253,6 +253,45 @@ def _hline():
 #  Main Window
 # =====================================================================
 
+class StatusProgressController(object):
+    """Encapsulates the 3-state status-bar progress lifecycle (M3.0).
+
+    Decouples M3.x sub-tasks from the private QProgressBar attribute on
+    the main window: callers go through ``MainController.progress()``
+    which returns this object, then ``begin / step / end``. Future
+    migration to a different progress widget is one place.
+
+    States:
+      * ``begin(message)`` — show the bar in indeterminate mode (range
+        0,0 sweep), set status label.
+      * ``step(current, total, message)`` — switch to determinate mode
+        and update fill + label.
+      * ``end(message)`` — hide the bar, restore status label to
+        *message* (or empty).
+    """
+
+    def __init__(self, progress_bar, status_label):
+        self._bar = progress_bar
+        self._label = status_label
+
+    def begin(self, message=""):
+        self._bar.setRange(0, 0)
+        self._bar.setVisible(True)
+        if message:
+            self._label.setText(message)
+
+    def step(self, current, total, message=""):
+        self._bar.setRange(0, max(1, int(total)))
+        self._bar.setValue(int(current))
+        if message:
+            self._label.setText(message)
+
+    def end(self, message=""):
+        self._bar.setVisible(False)
+        self._bar.setRange(0, 0)
+        self._label.setText(message or "")
+
+
 class RBFToolsWindow(QtWidgets.QMainWindow):
     """Singleton main window for RBF Tools."""
 
@@ -335,6 +374,51 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         status_row.addWidget(self._progress)
         status_row.addWidget(self._status_label, 1)
         root.addLayout(status_row)
+
+        # ---- M3.0: shared infrastructure wiring ----
+        self._progress_ctrl = StatusProgressController(
+            self._progress, self._status_label)
+        # Hand the progress controller to the controller so M3.x
+        # sub-tasks reach it via `controller.progress()` (addendum
+        # §M3.0 access path A — the recommended MVC route).
+        self._ctrl.set_progress_controller(self._progress_ctrl)
+
+        # ---- M3.0: top-level menu bar ----
+        self._build_menu_bar()
+
+    # =================================================================
+    #  M3.0 — Menu bar
+    # =================================================================
+
+    def _build_menu_bar(self):
+        """Create the top-level menu bar (M3.0 baseline + M3.x add-ons).
+
+        Each M3.x sub-task adds its own actions to the appropriate
+        menu (File / Edit / Tools / Help) — M3.0 only seeds the four
+        empty top-level menus + the Tools → Reset confirm dialogs
+        baseline action (addendum §M3.0).
+        """
+        mb = self.menuBar()
+        self._menu_file  = mb.addMenu(tr("menu_file"))
+        self._menu_edit  = mb.addMenu(tr("menu_edit"))
+        self._menu_tools = mb.addMenu(tr("menu_tools"))
+        self._menu_help  = mb.addMenu(tr("menu_help"))
+
+        # Tools → Reset confirm dialogs.
+        # No "are you sure" — selecting the menu item already
+        # constitutes user intent (addendum §M3.0 (G)①).
+        self._act_reset_confirms = QtWidgets.QAction(
+            tr("menu_reset_confirms"), self)
+        self._act_reset_confirms.triggered.connect(self._on_reset_confirms)
+        self._menu_tools.addAction(self._act_reset_confirms)
+
+    def _on_reset_confirms(self):
+        # Lazy import keeps this menu callback decoupled from core
+        # at module import time.
+        from RBFtools import core
+        core.reset_all_skip_confirms()
+        if hasattr(self, "_progress_ctrl") and self._progress_ctrl:
+            self._progress_ctrl.end(tr("reset_confirms_done"))
 
     # =================================================================
     #  Signal wiring
