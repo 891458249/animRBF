@@ -163,6 +163,20 @@ _EN = {
     "status_import_starting":          "Importing...",
     "status_import_done":              "Import complete.",
     "status_import_failed":            "Import failed.",
+    # -- M3.1: Pose Pruner --
+    "menu_prune_poses":                "Prune Poses...",
+    "row_remove_this":                 "Remove this pose",
+    "title_prune_poses":               "Pose Pruner",
+    "summary_prune_poses":
+        "Pose Pruner will rebuild this RBF node with the selected reductions.",
+    "prune_cb_duplicates":             "Remove duplicate poses",
+    "prune_cb_redundant":              "Remove redundant driver dimensions",
+    "prune_cb_constant":               "Remove constant outputs",
+    "label_prune_preview":             "Dry-run preview:",
+    "btn_prune":                       "Prune",
+    "status_prune_starting":           "Pruning...",
+    "status_prune_done":               "Prune complete.",
+    "status_prune_failed":             "Prune failed.",
     # -- M3.7: aliasAttr auto-naming --
     "menu_regenerate_aliases":         "Regenerate Aliases",
     "menu_force_regenerate_aliases":   "Force Regenerate Aliases...",
@@ -344,6 +358,20 @@ _ZH = {
     "status_import_starting":          u"\u6b63\u5728\u5bfc\u5165...",
     "status_import_done":              u"\u5bfc\u5165\u5b8c\u6210\u3002",
     "status_import_failed":            u"\u5bfc\u5165\u5931\u8d25\u3002",
+    # -- M3.1 --
+    "menu_prune_poses":                u"\u4fee\u526a Pose...",
+    "row_remove_this":                 u"\u5220\u9664\u6b64 pose",
+    "title_prune_poses":               u"Pose \u4fee\u526a\u5668",
+    "summary_prune_poses":
+        u"Pose \u4fee\u526a\u5668\u5c06\u6309\u9009\u4e2d\u7684\u7c7b\u522b\u91cd\u5efa\u8be5 RBF \u8282\u70b9\u3002",
+    "prune_cb_duplicates":             u"\u5220\u9664\u91cd\u590d pose",
+    "prune_cb_redundant":              u"\u5220\u9664\u5197\u4f59 driver \u7ef4\u5ea6",
+    "prune_cb_constant":               u"\u5220\u9664\u5e38\u91cf output",
+    "label_prune_preview":             u"\u9884\u68c0\u9884\u89c8\uff1a",
+    "btn_prune":                       u"\u4fee\u526a",
+    "status_prune_starting":           u"\u6b63\u5728\u4fee\u526a...",
+    "status_prune_done":               u"\u4fee\u526a\u5b8c\u6210\u3002",
+    "status_prune_failed":             u"\u4fee\u526a\u5931\u8d25\u3002",
     # -- M3.7 --
     "menu_regenerate_aliases":         u"\u91cd\u65b0\u751f\u6210\u522b\u540d",
     "menu_force_regenerate_aliases":   u"\u5f3a\u5236\u91cd\u751f\u522b\u540d...",

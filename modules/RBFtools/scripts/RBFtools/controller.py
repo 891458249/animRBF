@@ -309,6 +309,126 @@ class MainController(QtCore.QObject):
             return None
 
     # =================================================================
+    #  M3.1 — Pose Pruner (path A consumer; 4th real-world consumer)
+    # =================================================================
+
+    def prune_current_node(self, opts=None):
+        """Two-phase prune: dry-run analysis -> path A confirm ->
+        execute. Returns the result dict from
+        :func:`core_prune.execute_prune`, or None on cancellation /
+        no-op.
+        """
+        if not self._current_node:
+            cmds.warning("prune_current_node: no current node")
+            return None
+        from RBFtools import core_prune
+        from RBFtools.ui.i18n import tr
+
+        action = core_prune.analyse_node(self._current_node, opts)
+        if not action.has_changes() and not action.conflict_pairs:
+            cmds.warning("Pose Pruner: nothing to prune.")
+            return None
+
+        preview = self._format_prune_report(self._current_node, action)
+        if not action.has_changes():
+            # Conflict pairs only — display warning, no actual action.
+            cmds.warning(
+                "Pose Pruner: conflict pairs reported (informational).\n"
+                + preview)
+            return None
+
+        proceed = self.ask_confirm(
+            title=tr("title_prune_poses"),
+            summary=tr("summary_prune_poses"),
+            preview_text=preview,
+            action_id="prune_poses",
+        )
+        if not proceed:
+            return None
+
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_prune_starting"))
+        try:
+            result = core_prune.execute_prune(self._current_node, action)
+        except Exception as exc:
+            cmds.warning("prune_current_node failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_prune_failed"))
+            return None
+        if prog is not None:
+            prog.end(tr("status_prune_done"))
+        # Pose count / column shape may have changed — refresh editor.
+        self._load_editor()
+        return result
+
+    @staticmethod
+    def _format_prune_report(node_name, action):
+        """Render a :class:`core_prune.PruneAction` as ASCII for the
+        ConfirmDialog preview pane."""
+        lines = ["Pose Pruner Preview", "  Node:   {}".format(node_name), ""]
+
+        if action.duplicate_pose_indices:
+            lines.append("  Duplicate poses ({} found)".format(
+                len(action.duplicate_pose_indices)))
+            for idx in action.duplicate_pose_indices:
+                lines.append("        pose[{}]  duplicate (same input AND value)"
+                             .format(idx))
+        if action.redundant_input_indices:
+            lines.append("  Redundant driver dims ({} found)".format(
+                len(action.redundant_input_indices)))
+            for idx in action.redundant_input_indices:
+                nm = (action.driver_attr_names[idx]
+                      if idx < len(action.driver_attr_names) else "?")
+                lines.append("        input[{}] ({}):  all poses same value"
+                             .format(idx, nm))
+        if action.constant_output_indices:
+            lines.append("  Constant outputs ({} found)".format(
+                len(action.constant_output_indices)))
+            for idx in action.constant_output_indices:
+                nm = (action.driven_attr_names[idx]
+                      if idx < len(action.driven_attr_names) else "?")
+                lines.append("        output[{}] ({}):  all poses same value"
+                             .format(idx, nm))
+        if action.conflict_pairs:
+            lines.append("")
+            lines.append("  ! Conflicting poses ({} pair(s), NOT auto-removed)"
+                         .format(len(action.conflict_pairs)))
+            for a, b in action.conflict_pairs:
+                lines.append("        pose[{}] vs pose[{}]: same input, "
+                             "different values".format(a, b))
+            lines.append("        Manual review needed.")
+
+        # Side effects on quat groups.
+        invalid = [e for e in action.quat_group_effects if e.invalidated]
+        shifted = [e for e in action.quat_group_effects
+                   if not e.invalidated and e.new_start != e.old_start]
+        if invalid or shifted:
+            lines.append("")
+            lines.append("  ! Side effects:")
+            for e in shifted:
+                lines.append(
+                    "        quat group[{}]: start {} -> {} (index shift)"
+                    .format(e.group_idx, e.old_start, e.new_start))
+            for e in invalid:
+                lines.append(
+                    "        quat group[{}] (start={}): INVALID after prune; "
+                    "C++ will silently skip".format(e.group_idx, e.old_start))
+
+        # After-prune summary.
+        lines.append("")
+        lines.append("  After prune: {} poses -> {} poses".format(
+            action.n_poses_before,
+            action.n_poses_before - len(action.duplicate_pose_indices)))
+        lines.append("               {} driver dims -> {} driver dims".format(
+            action.n_inputs_before,
+            action.n_inputs_before - len(action.redundant_input_indices)))
+        lines.append("               {} driven dims -> {} driven dims".format(
+            action.n_outputs_before,
+            action.n_outputs_before - len(action.constant_output_indices)))
+        return "\n".join(lines)
+
+    # =================================================================
     #  M3.3 — JSON Import / Export (path A consumers)
     # =================================================================
 

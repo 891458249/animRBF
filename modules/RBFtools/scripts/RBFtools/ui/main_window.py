@@ -439,6 +439,11 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             "menu_export_selected", self._on_export_selected)
         self.add_file_action("menu_export_all", self._on_export_all)
 
+        # ---- M3.1: Pose Pruner entry + single-pose row delete ----
+        self.add_tools_action("menu_prune_poses", self._on_prune_poses)
+        self._pose_editor.add_pose_row_action(
+            "row_remove_this", self._on_remove_pose_row, danger=True)
+
         # ---- M3.7: alias regeneration entries via M3.0-spillover ----
         # Non-destructive (preserves user aliases) — no confirm dialog.
         self.add_tools_action(
@@ -501,6 +506,38 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Refresh the UI so the newly created target shows up in the
         # node selector.
         self._on_refresh()
+
+    # =================================================================
+    #  M3.1 — Pose Pruner entry points
+    # =================================================================
+
+    def _on_prune_poses(self):
+        """Tools -> Prune Poses... opens PruneDialog. The dialog
+        gathers the per-class checkbox state and delegates to
+        controller.prune_current_node, which runs the path A
+        confirm + execute. After execute the pose editor is
+        repopulated so the table reflects the pruned shape."""
+        from RBFtools.ui.widgets.prune_dialog import PruneDialog
+        node = self._ctrl.current_node
+        if not node:
+            from maya import cmds as _cmds
+            _cmds.warning("Pose Pruner: pick an RBF node first.")
+            return
+        dlg = PruneDialog(node, self._ctrl, parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        opts = dlg.get_options()
+        self._ctrl.prune_current_node(opts)
+
+    def _on_remove_pose_row(self, row_idx):
+        """Right-click pose-table -> Remove this pose (M3.1 single
+        pose path, addendum §M3.1 F.2). No confirm dialog — single
+        pose removal is low-risk; warning gives the user basic
+        expectation that the RBF will need re-Apply."""
+        from maya import cmds as _cmds
+        self._ctrl.delete_pose(row_idx)
+        _cmds.warning(
+            "Pose removed; you may want to re-Apply to retrain RBF.")
 
     # =================================================================
     #  M3.3 — File menu callbacks (path A consumers)

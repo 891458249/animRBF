@@ -2032,6 +2032,199 @@ M3.3 Cross-Scene Limitation:
 
 ---
 
+## §M3.1 — Pose Pruner
+
+Milestone 3 数据卫生工具 —— TD 周用工具，删除 RBFtools 节点上的冗余 pose / driver 维度 / 常数 output。**0 行 C++**。
+
+M3.1 的工程价值不在算法（三个独立 pure-function 扫描），而在与 **M3.7 alias 系统** + **M2.2 quat group 系统** + **M2.3 freeze 契约** 的边界交互处理。
+
+### M3.1.1 — 决议日志
+
+11 项决议（现状核查会话）：
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | duplicate 判定 | **A.2** (input AND value) 都同才删 | 防止数据丢失；input 同 value 不同 = 用户错误 |
+| (B) | redundant driver 语义 | **B.2** 删 RBFtools 的 input[] 引用 | 不动 driver 节点；保护 rig 拓扑 |
+| (C) | 阈值 | **C.1** `1e-6`（同 `core.float_eq`）| 一处事实来源 |
+| (D) | quat group 副作用 | **D.3** warning + 继续 + (γ3.b) shift 索引 | 用户语义保留 + 信息全告知 |
+| (E) | invalid group 处理 | **E.2** start 保留原值 | 用户语义不擦除；C++ silently skip |
+| (F) | 单 pose 右键 | **F.2** 直接删 + warning | 单 pose 低风险；轻量 |
+| (G) | UI 控件 | **G.2** 三 QCheckBox 独立勾选 | 用户精细控制 |
+| (H) | conflict pairs | **H.3** informational only | 不自动决定用户错误 |
+| (I) | execute 路径 | **I.2** 复用 `apply_poses` 主路径 | 最小 blast radius；零新代码 |
+| (J) | alias 操作 | **J.2** 完全委托 `auto_alias_outputs` 兜底 | F1 验证可行；M3.7 单一来源 |
+| (K) | 作用范围 | **K.1** 当前节点 | 批量推后续 |
+
+加固 1：T4 `shift_quat_starts` 边界守护扩展为 **7 子测试**（T4.a-g）。
+加固 2：`analyse_node` 0 mutation 升级为 **T13 PERMANENT** source-scan。
+
+### M3.1.2 — F1-F4 现状核查（在选项之前先验证）
+
+执行者在产出 (A)-(K) 选项**之前**先验证现成 helper 的实际行为，把 4 个关键依赖从假设提升到已验证：
+
+| # | 验证项 | 结论 | 影响 |
+|---|---|---|---|
+| F1 | `auto_alias_outputs` 是否清理 stale alias? | ✅ `apply_aliases` non-force 路径首步调 `clear_managed_aliases` | (J.2) 兜底方案可行 |
+| F2 | `read_output_baselines` / `write_output_baselines` 索引模型 | ✅ clear-then-write 模式 | (Q6) sparse shift bug 风险消解 |
+| F3 | ConfirmDialog 预览渲染 | ✅ 已用 monospace QPlainTextEdit | 多列 ASCII 报告无需扩展 API |
+| F4 | `read_all_poses` / `apply_poses` 重建路径 | ✅ packed `enumerate(poses)` | (I.2) execute 复用整条路径 |
+
+**F1-F4 是 M3.x 跨子任务交互场景的标准 review 入口**——任何依赖既有 helper 行为的子任务都应先做这一步。
+
+### M3.1.3 — `shift_quat_starts` 算法（**T_QUAT_GROUP_SHIFT 永久守护，7 子测试**）
+
+```python
+def shift_quat_starts(starts, removed_output_indices):
+    """Pure function — no scene access.
+
+    For each *start* in *starts*:
+      - if any removed index in [start, start+3] → output None (invalid)
+      - else → output (start - count(removed indices < start))
+    """
+    rm = sorted(set(int(r) for r in removed_output_indices))
+    new = []
+    for s in starts:
+        if any(s <= r <= s + 3 for r in rm):
+            new.append(None)
+        else:
+            new.append(s - sum(1 for r in rm if r < s))
+    return new
+```
+
+7 边界场景（T4.a-g）锁定全行为空间：
+
+| Sub | 场景 | 期望 |
+|---|---|---|
+| T4.a | 不重叠不需 shift | start 不变 |
+| T4.b | 范围内失效 | None |
+| T4.c | 不重叠需 shift | `start - count_before` |
+| T4.d | 多 removed 多 group 独立 | 各独立计算 |
+| T4.e | removed 为空 | identity |
+| T4.f | starts 为空 | `[]` |
+| T4.g | 同 group 多 removed in range | None（同 b）|
+
+### M3.1.4 — Cross-sub-task 副作用处理范例（M3.x / M4.x 参考）
+
+M3.1 是 v5 设计中**首次**跨子任务副作用处理：触及 M2.2 quat group 用户语义的同时不能越权修改。决策模式：
+
+1. **F1-F4 现状验证**：先确认现成 helper 行为再选方案
+2. **(D.3.b) shift 索引但不改语义**：未受影响 group 的 start 值随 packed 索引调整以**保持原指向**；改 start 是为了**不改语义**
+3. **(E.2) invalid group start 保留原值**：被破坏的 group **不擦除**用户的声明；C++ 端 silently skip 是 defensive logic 兜底
+4. **dialog warning 全告知**：用户得到完整副作用清单，自主决定是否继续
+5. **零自动修复**：pruner 不"帮"用户修破坏，仅信息透明
+
+这套模式在未来 M4.x（附加 solver）/ M5（性能优化）触及用户已有声明时**值得参考**。原则归纳：
+
+```
+用户语义保留 > 自动修复
+信息透明 > 静默处理
+最小侵入 > 全面接管
+defensive C++ + warning UI > 阻塞 dialog
+```
+
+### M3.1.5 — 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `core_prune.py` | **新建** ~270 行（PruneOptions + PruneAction + QuatGroupEffect + 4 pure scan helpers + shift_quat_starts + analyse_node + execute_prune）|
+| `controller.py` | +`prune_current_node` + `_format_prune_report` ~120 行 |
+| `ui/main_window.py` | +`_on_prune_poses` + `_on_remove_pose_row` + 2 spillover 注册 ~30 行 |
+| `ui/widgets/prune_dialog.py` | **新建** ~95 行（3 QCheckBox + preview + Prune button enabled-state）|
+| `ui/i18n.py` | +12 keys × 2 langs = 24 行 |
+| `tests/test_m3_1_prune.py` | **新建** ~430 行（13 测试类，26 子测试）|
+| `docs/.../addendum_20260424.md` | §M3.1 ~140 行 |
+| `docs/.../milestone_3_summary.md` | 进度 + action_id 注册 |
+
+**总：~1110 行**（含测试 + addendum）；生产代码 ~440 行 < 800 上限。
+
+`core.py` **0 改动** —— pruner 完全复用 `apply_poses` + `write_quat_group_starts` 既有 API。
+
+### M3.1.6 — 测试矩阵
+
+| T# | 名称 | 子测 |
+|---|---|---|
+| T1 | `_scan_duplicates` (input AND value) + conflict 分离 | 3 |
+| T2 | `_scan_redundant_inputs` | 2 |
+| T3 | `_scan_constant_outputs` | 2 |
+| **T4** | **`shift_quat_starts` 7 边界场景**（**T_QUAT_GROUP_SHIFT PERMANENT**）| 7 |
+| T5 | `analyse_node` end-to-end + has_changes 语义 | 3 |
+| T6 | `execute_prune` apply_poses + write_quat_group_starts 调用序列 | 1 |
+| T7 | controller path A wire（action_id="prune_poses"）| 2 |
+| T8 | Tools 菜单走 add_tools_action | 1 |
+| T9 | pose-row 走 add_pose_row_action(danger=True) | 1 |
+| T10 | i18n 12 keys EN/CN parity | 1 |
+| T11 | Pruner 不直接调 cmds.aliasAttr（source-scan）| 1 |
+| **T12** | **invalid quat group 保留原 start 值**（E.2 契约）| 1 |
+| **T13** | **`analyse_node` read-only**（**T_ANALYSE_READ_ONLY PERMANENT**，source-scan 7 mutations）| 1 |
+
+合计 **13 测试类，26 子测试**。**总测试数：330 + 26 = 356 / 356**。
+
+### M3.1.7 — Action ID 注册表更新（addendum §M3.0.3）
+
+| action_id | Sub-task | Confirm 触发场景 |
+|---|---|---|
+| `prune_poses` | M3.1 | Pose Pruner 在 dry-run 后 execute 前 |
+
+**第 4 个 path A 真实消费者**——前 3 个 mirror_create / mirror_overwrite / import_replace / force_regenerate_aliases 都已经稳定运行；本次零 ConfirmDialog API 修改。
+
+### M3.1.8 — Mirror sibling 边界（addendum 明记）
+
+```
+M3.1 Mirror Sibling Boundary:
+  - Pruning RBF_L_arm does NOT cascade to RBF_R_arm (mirror sibling)
+  - M3.2 mirror is a one-shot copy operation; subsequent edits on
+    either side are independent
+  - To sync prune across siblings, re-run mirror manually after prune
+  - M3 后续 patch 可考虑 "sync siblings" UX, but not in M3.1 scope
+```
+
+### M3.1.9 — Driven node rest-pose responsibility (M2.3 freeze 契约的延伸)
+
+```
+M3.1 Driven Node State Requirement:
+  - execute_prune calls apply_poses internally, which triggers
+    capture_per_pose_local_transforms (M2.3 step 4)
+  - capture path requires driven_node to be in rest pose (non-driven
+    channels frozen at Apply-time scene state, per §M2.3 freeze contract)
+  - User must reset driven_node to rest before pruning, OR accept
+    that non-driven channels capture whatever the current scene says
+  - This mirrors the M2.3 user education in §M2.3
+```
+
+### M3.1.10 — 零回归
+
+- `core.py` 0 改动 —— 没有新 read/write helper 引入回归面
+- M3.0 spillover §1 复用（add_tools_action / add_pose_row_action（danger=True 渲染））—— 既有测试守护
+- M3.7 alias 单一来源未破坏 —— T11 source-scan 守护
+- M2.2 quat group 用户语义未越权修改 —— T_QUAT_GROUP_SHIFT 7 子测试 + T12 invalid 保留 守护
+- 全量回归：330 + 26 = **356 / 356** 通过
+
+### M3.1.11 — Non-goals
+
+- ❌ 批量节点 prune（多 RBF 同时跑）
+- ❌ Pruner 自动修改 `outputQuaternionGroupStart` 用户语义
+- ❌ Pruner 内部 alias 操作 —— 完全委托 M3.7
+- ❌ Mirror sibling 自动同步
+- ❌ "Auto-resolve conflicting poses" —— 仅 informational
+- ❌ 删 driver_node / driven_node 上的 attr
+- ❌ 删 RBFtools 节点本身
+
+### M3.1.12 — 红线确认
+
+- ✅ 沿用 M3 / M3.0 / M3.2 / M3.7 / M3.3 全部红线
+- ✅ Pruner 0 行 `cmds.aliasAttr` 直接调用（T11）
+- ✅ Pruner 不修改用户 quat group 语义（T_QUAT_GROUP_SHIFT + T12）
+- ✅ Pruner 不动 driver_node / driven_node attrs
+- ✅ Pruner 不删除 RBFtools 节点本身
+- ✅ Mirror sibling 不同步（设计如此，addendum 明记）
+- ✅ Path A confirm（`action_id="prune_poses"`）—— 第 4 真实消费者
+- ✅ `shift_quat_starts` 通过 7 个边界场景测试（T4.a-g PERMANENT）
+- ✅ `analyse_node` 永远 read-only（T13 source-scan PERMANENT）
+- ✅ 单 pose 右键删除发 warning（addendum §M3.1.9 用户 expectation）
+
+---
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```
