@@ -1402,6 +1402,23 @@ core.select_rig_for_node(self._ctrl.current_node(), "driver")
 
 ---
 
+## §M3.0 — Appendix: Reverse-then-Reapply Pattern (M3.7 commit retrospective)
+
+When two sub-tasks land mixed in the working tree (the M3.2 + M3.7 handoff incident, executor commit `c7e07f2`), `git add -p` is **not** available in non-interactive automation. The deterministic alternative:
+
+1. Save the M3.x-only **new** files (the ones that don't exist in HEAD) into a holdout directory (`.m3_x_holdout/`) so unittest discovery cannot find them.
+2. Use `Edit` (or a small Python script for large blocks) to **reverse-apply** every M3.x change inside shared files —— restore them to the M3.{x-1}-only state.
+3. Verify the M3.{x-1} test count passes on the reversed worktree.
+4. Stage the M3.{x-1} files + commit + push.
+5. Restore the holdout files to their original locations.
+6. Use `Edit` to **re-apply** the M3.x changes to shared files (often this is just running each Edit operation again — your operations log doubles as a forward patch).
+7. Verify the M3.x test count passes.
+8. Stage + commit + push M3.x.
+
+This is **deterministic** (no interactive hunk picking), idempotent (rerunning step 2 always lands at the same M3.{x-1} state), and leaves clean per-sub-task commit boundaries on the published history. It is the canonical M3.x reuse-pattern fall-back when working-tree commingling happens at handoff.
+
+---
+
 ## §M3.0-spillover — `add_tools_action` / `add_pose_row_action` (added in M3.2 commit)
 
 **追溯**：M3.0 落地后，**M3.2 实施时**发现 `_build_menu_bar` 与 `_show_row_menu` 缺少**子任务扩展接口**——M3.x 各自直接修改 `main_window.py` 会破坏 MVC（sub-task 不应改 window 内部）。
@@ -1765,6 +1782,253 @@ M3.3 export schema 推荐字段（**不**改 SCHEMA_VERSION）：
 ```
 
 M3.3 import 优先 alias → fallback index。alias 在 PASS 路径下持久（Maya 保存到 `.ma`/`.mb`），FAIL 路径下也由 export-time `read_aliases` 反查兜底（FAIL 路径需 M3.3 前补完整退化）。
+
+---
+
+## §M3.0-spillover §2 — `add_file_action` (added in M3.3 commit)
+
+**追溯**：M3.3 实施时发现 `_build_menu_bar` 创建的 `_menu_file` 自 M3.0 起一直为空 —— M3.0-spillover §1 仅给 Tools 菜单提供 `add_tools_action`，File 菜单缺对应扩展接口。M3.3 是首个 File 菜单消费者，**顺手**补 §2，归 §M3.0-spillover 章节群继续追加。
+
+### API
+
+```python
+# RBFToolsWindow
+def add_file_action(self, label_key, callback) -> QAction:
+    """Mirror of add_tools_action for the File menu. Returns the
+    QAction so callers can hold a reference for enable/disable
+    state."""
+```
+
+### 契约（M3 全程红线）
+
+1. 后续 M3.x 子任务的 File 菜单扩展**必须**走此 helper —— 禁止再直接修改 `_build_menu_bar` 的 File 段
+2. 测试守护：`tests/test_m3_3_jsonio.py::T_AddFileActionExists` + `T_FileMenuExtensionContract`（source-text scan `_menu_file` 的存在 + addAction 调用）
+3. M3.3 是首个真实消费者（3 个 File entries：Import / Export Selected / Export All）
+
+### M3.3 是首个真实消费者
+
+`RBFToolsWindow._build_ui` 末尾：
+```python
+self.add_file_action("menu_import_rbf", self._on_import_rbf)
+self.add_file_action("menu_export_selected", self._on_export_selected)
+self.add_file_action("menu_export_all", self._on_export_all)
+```
+
+未来如有其他 File 菜单需求（如 "Recent Files" 列表），本节是它们的"使用手册"。
+
+---
+
+## §M3.3 — JSON Import / Export
+
+Milestone 3 体量最大子任务 —— 全双向 JSON IO。**关键路径下游**：消费 M3.7 的 alias 系统 + M2.3 的 poseLocalTransform 双存储 + M3.0 的 core_json 基础设施。**0 行 C++**。
+
+### M3.3.1 — 决议日志 + bijection 映射表
+
+12 项决议（设计文档 PART E.2 + 现状核查会话）：
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | 顶层结构 | **A.1** `nodes:[]` 数组顶层 | Single = length 1，统一处理 |
+| (B) | settings 粒度 | **B.1** 全量 export | schema 自描述 |
+| (C) | 节点不存在 | **C.1** abort + 详细错误 | rig 拓扑由用户预备 |
+| (D) | Import 模式 | **D.2** Add + Replace（confirm-gated）| Update 推后续 |
+| (E) | 单/两阶段 | **E.2** 两阶段 dry-run + execute | path A 天然消费 |
+| (F) | validation 严格度 | **F.3** 严格 + 全量错误 | TD 一次改完 |
+| (G) | poseLocalTransform | **G.2** 直写绕过 capture | M2.3 freeze contract 唯一合法绕道 |
+| (H) | alias 字段 import | **H.2** 不直写让 M3.7 兜底 | 一处事实来源 |
+| (I) | `alias_base` 字段 | **I.2** 反推不存 | 一处事实来源 |
+| (J) | meta 块 | **J.2** 可选只读 metadata | 不参与 import 决策 |
+| (K) | controller 拆分 | **K.3** core_json 主体 + controller wire | 重逻辑下沉 |
+| (L) | 800 行超限 | **L.1 默认尝试单 commit** | 实测 ~620 production lines，远低于阈值 |
+
+**`_ATTR_NAME_TO_JSON_KEY` bijection 契约**（**永久**）：
+
+```python
+_ATTR_NAME_TO_JSON_KEY: dict[str, str]   # Maya camelCase -> JSON snake_case
+_JSON_KEY_TO_ATTR_NAME = {v: k for k, v in _ATTR_NAME_TO_JSON_KEY.items()}
+EXPECTED_SETTINGS_KEYS = frozenset(_ATTR_NAME_TO_JSON_KEY.values())
+```
+
+T1a 完整性 + T1b **PERMANENT** 双射性：任何 Maya attr 改名导致 JSON key 重复 → 测试 fail。改 schema 必须 bump SCHEMA_VERSION。
+
+### M3.3.2 — JSON Schema 草案（**永久公共契约**）
+
+详见 `docs/设计文档/RBFtools_v5_设计方案.md` PART E.2 与本 addendum §M3.3.2 联合定义。锁定字段集（T_M3_3_SCHEMA_FIELDS 永久守护）：
+
+```
+EXPECTED_NODE_DICT_KEYS = frozenset({
+    "name", "type_mode", "settings",
+    "driver", "driven", "output_quaternion_groups", "poses",
+})
+
+EXPECTED_SETTINGS_KEYS = frozenset(<37 scalar keys>)
+```
+
+#### 字段类型 + Maya enum 整数化
+
+所有 enum 字段在 wire-level **用整数**（kernel / radius_type / rbf_mode / distance_type / twist_axis / interpolation / direction / solver_method / input_encoding 等）。可选 `<key>_label` 后缀字段是只读 metadata —— `dict_to_node` 跳过 `_label`-后缀键不写入节点（红线 #4）。
+
+#### sparse multi 索引契约
+
+driver/driven attrs 数组每项**必须**包含显式 `index`（int）字段。`_validate_attr_array` 检查 `index` 唯一性 + 与 array 顺序无关——sparse 多实例（如 `output[0,2,5]`）通过此机制保留 sparseness。
+
+#### Float round-trip 字节稳定性
+
+`atomic_write_json` 使用 `json.dump(..., ensure_ascii=False, indent=2, sort_keys=False)` —— 不改变 Python 默认 float repr。任何"舍入到 6 位小数"等美化操作**禁止**（T_FLOAT_ROUND_TRIP 守护：`dump(load(dump(d))) == dump(d)` 字节级）。
+
+### M3.3.3 — Two-phase Import 流程（path A 第三次真实消费）
+
+```
+[Phase 1 — read_json_with_schema_check]
+     ↓ raises SchemaVersionError on mismatch
+[Phase 2 — dry_run] (read-only)
+     ↓ collects all errors per node
+     ↓ returns list[PerNodeReport]
+[ConfirmDialog (path A) — 仅当 mode='replace' 且至少一个节点 will_overwrite=True]
+     action_id="import_replace"
+     preview_text = MainController._format_dry_run_report(reports)
+     ↓
+[Phase 3 — import_path] (write)
+     ↓ per ok report:
+     ↓   dict_to_node(rpt.data, mode, will_overwrite)
+     ↓     - mode='replace' + collide → core.delete_node(name) → create_node()
+     ↓     - mode='add' + collide → create + rename to name+'_imported'
+     ↓     - 全量 setAttr / wire / write_output_baselines /
+     ↓       write_pose_local_transforms (G.2 直写)
+     ↓     - core.auto_alias_outputs(...)  # H.2 M3.7 兜底
+     ↓ 失败节点不阻塞其他节点 → 收集到 result["failed"]
+[refresh_nodes()]
+```
+
+非破坏性 Add 模式：**不**走 confirm（仅 progress 反馈）。
+
+### M3.3.4 — `meta` 块只读契约（T16 永久守护）
+
+```
+META FIELD CONTRACT (addendum §M3.3.J):
+  The 'meta' block is metadata only. dict_to_node and dry_run MUST
+  NOT read meta.* for any behavioural decision. Removing or
+  modifying meta has no effect on the imported node. If you find
+  yourself reading meta.exporter_version etc to branch logic, STOP
+  — that's a SCHEMA_VERSION bump, not a meta hack.
+```
+
+T16 测试通过 `inspect.getsource` 读取 `dict_to_node` + `dry_run` + `_validate_node_dict`，**剥离 docstring 后**断言执行体内不出现 `'meta'` / `"meta"` / `data.get("meta"`。Docstring 中提到 "meta" 是合法的（契约说明），但执行代码引用即违约。
+
+### M3.3.5 — M2.3 freeze contract 绕道契约（G.2 直写）
+
+```
+M2.3 BYPASS (addendum §M3.3.G):
+  Import writes poseLocalTransform directly via
+  core.write_pose_local_transforms and does NOT call
+  capture_per_pose_local_transforms. This is the ONLY legal
+  bypass of the M2.3 auto-capture path.
+
+Rationale:
+  - capture_per_pose_local_transforms reads driven_node's current
+    scene state, which is unknown at Import time
+  - JSON's local_transform values are export-time snapshots —
+    authoritative for the exporter's scene at export-time
+  - User-triggered Apply post-import will auto-capture and
+    overwrite (existing M2.3 contract)
+```
+
+T_LOCAL_XFORM_BYPASS（T9 in test file）+ source-text 守护：`dict_to_node` 执行体内**不出现** `capture_per_pose_local_transforms`（docstring 中提到合法）。
+
+### M3.3.6 — `action_id` 注册表更新（addendum §M3.0.3）
+
+| action_id | Sub-task | Confirm 触发场景 |
+|---|---|---|
+| `import_replace` | M3.3 | Replace 模式 + 至少一节点 will_overwrite=True 时 |
+| ~~`import_add`~~ | M3.3 | **不**走 confirm（非破坏性，无注册）|
+
+### M3.3.7 — 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `core_json.py` | +~480 行（hoisted core/core_alias imports + SchemaValidationError + _ATTR_NAME_TO_JSON_KEY bijection + node_to_dict + dict_to_node + dry_run + _validate_node_dict + _validate_attr_array + import_path + export_nodes_to_path + PerNodeReport + EXPECTED_*_KEYS frozensets）|
+| `core.py` | +60 行（read/write_driver_rotate_orders + read/write_quat_group_starts 4 helpers）|
+| `controller.py` | +~120 行（import_rbf_setup + export_current_to_path + export_all_to_path + _format_dry_run_report）|
+| `ui/main_window.py` | +~95 行（add_file_action spillover + 3 File entries + 3 callbacks）|
+| `ui/widgets/import_dialog.py` | **新建** ~110 行 |
+| `ui/i18n.py` | +20 keys × 2 langs = 40 行 |
+| `tests/test_m3_3_jsonio.py` | **新建** ~700 行（21 测试类，39 子测试）|
+| `docs/.../addendum_20260424.md` | §M3.3 + §M3.0-spillover §2 + §M3.0 reverse-then-reapply 附录 ~210 行 |
+| `docs/.../milestone_3_summary.md` | §1 进度矩阵 + §3.1 注册表 + Roadmap |
+
+**总：~1810 行**（含测试 + addendum）；生产代码 ~620 行 < 800 上限。
+
+### M3.3.8 — 测试矩阵
+
+| T# | 名称 | 子测 |
+|---|---|---|
+| **T1** | `_ATTR_NAME_TO_JSON_KEY` 完整性 + bijection（**T1a + T1b PERMANENT**）| 2 |
+| **T_M3_3_SCHEMA_FIELDS** | node_to_dict 字段集冻结（**PERMANENT**）| 2 |
+| T2 | node_to_dict round-trip | 4 |
+| T3 | dict_to_node call 序列 | 4 |
+| T4 | dry_run 单节点 validation（含 `_label` 后缀容忍） | 7 |
+| T5 | dry_run 多节点混合 + top-level 错误聚合 | 2 |
+| **T6** | SCHEMA_VERSION 不变（**PERMANENT**）| 1 |
+| T9 | poseLocalTransform 直写（**T_LOCAL_XFORM_BYPASS**）| 2 |
+| T10 | alias_base 反推（不存）| 2 |
+| T11 | dict_to_node 不直写 alias | 1 |
+| T12 | atomic_write_json reuse | 1 |
+| T13 | controller path A wiring + action_id | 2 |
+| T14 | File menu spillover 3 entries | 2 |
+| T15 | i18n 20 keys EN/CN parity | 1 |
+| **T16** | meta 块只读（**PERMANENT**）| 2 |
+| **T_FLOAT_ROUND_TRIP** | dump(load(dump(d))) byte-stable | 2 |
+| spillover §2 helpers | T_AddFileActionExists + T_FileMenuExtensionContract | 2 |
+
+合计 **21 测试类，39 子测试**。**总测试数：291 + 39 = 330 / 330**。
+
+### M3.3.9 — 零回归
+
+- `core_json.py` M3.0 surface 完全保留 —— SCHEMA_VERSION / atomic_write_json / read_json_with_schema_check / SchemaVersionError 字节级未变（顶部 hoisted import 仅添加，不修改原有定义）
+- 新增 4 个 core.py multi helpers 是纯增量
+- File 菜单 entries 空闲时不触发任何 IO
+- 全量回归：291 + 39 = **330 / 330** 通过
+
+### M3.3.10 — Cross-Scene Limitation（forward-compat 备注）
+
+```
+M3.3 Cross-Scene Limitation:
+  - JSON references driver/driven by exact scene node name
+  - Import fails when target scene uses different naming
+    (e.g. "L_arm_jnt" -> "myProj_L_arm_jnt")
+  - Future: M5 namespace-remap UI / regex-based import wizard
+```
+
+### M3.3.11 — Non-goals
+
+- ❌ Update 模式（仅 poses 刷新，节点保留）—— 推 M3 后续 patch
+- ❌ 跨场景命名映射（namespace remap / regex 替换）—— 推 M5
+- ❌ 引擎侧 runtime（UE5 / Unity 解析 JSON 重建求解器）—— 推 M5
+- ❌ Schema migration（v5.m3 → v5.m4 多版本 reader）—— 永远触发新 SCHEMA_VERSION
+- ❌ Connection 拓扑外推（"用户没接上 driver/driven 时按 alias 名字猜"）
+- ❌ Pose 之外的多节点关联
+- ❌ Binary 压缩（.json.gz / msgpack）
+- ❌ Versioned `meta.exporter_version` 用于 reader 决策
+- ❌ JSON Schema validator 第三方库依赖（手写 `_validate_node_dict` 维持零依赖）
+
+### M3.3.12 — 红线确认
+
+- ✅ 沿用 M3 / M3.0 / M3.2 / M3.7 全部红线
+- ✅ **SCHEMA_VERSION 永久不变** = `"rbftools.v5.m3"`（T6 PERMANENT）
+- ✅ Import 不创建非 RBFtools 节点
+- ✅ Import 不静默跳过失败 —— 两阶段 dry-run + 详细 SchemaError 列表
+- ✅ `core_json.SCHEMA_VERSION` 不动；schema 字典写 `"schema_version": SCHEMA_VERSION`
+- ✅ `atomic_write_json` reuse —— T12 守护
+- ✅ Path A confirm（仅 Replace 模式 / `action_id="import_replace"`）
+- ✅ M2.3 freeze contract 不破坏 —— Import 显式绕道（§M3.3.5 文档 + T_LOCAL_XFORM_BYPASS 守护）
+- ✅ M3.7 alias 一处事实来源 —— Import 不直写
+- ✅ 不引入第三方 JSON validator 依赖
+- ✅ **`_ATTR_NAME_TO_JSON_KEY` 双射**（T1b PERMANENT）
+- ✅ **`meta` 块只读不参与决策**（T16 source-scan PERMANENT）
+- ✅ **node_to_dict 字段集冻结**（T_M3_3_SCHEMA_FIELDS PERMANENT）
+- ✅ **enum 字段用整数 + 可选 `_label` 后缀**（_label-suffix 跳过逻辑 + T4 容忍测试）
+- ✅ **sparse multi 索引显式 `index`**（_validate_attr_array 唯一性检查）
+- ✅ **JSON float 不 rounding**（T_FLOAT_ROUND_TRIP byte-stable）
 
 ---
 

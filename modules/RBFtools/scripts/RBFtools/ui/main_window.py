@@ -433,6 +433,12 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._pose_editor.add_pose_row_action(
             "row_mirror_this", self._on_mirror_pose, danger=False)
 
+        # ---- M3.3: File menu entries via M3.0-spillover §2 ----
+        self.add_file_action("menu_import_rbf", self._on_import_rbf)
+        self.add_file_action(
+            "menu_export_selected", self._on_export_selected)
+        self.add_file_action("menu_export_all", self._on_export_all)
+
         # ---- M3.7: alias regeneration entries via M3.0-spillover ----
         # Non-destructive (preserves user aliases) — no confirm dialog.
         self.add_tools_action(
@@ -495,6 +501,70 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Refresh the UI so the newly created target shows up in the
         # node selector.
         self._on_refresh()
+
+    # =================================================================
+    #  M3.3 — File menu callbacks (path A consumers)
+    # =================================================================
+
+    def _on_import_rbf(self):
+        """File -> Import RBF Setup..."""
+        from RBFtools.ui.widgets.import_dialog import ImportDialog
+        from maya import cmds as _cmds
+        try:
+            paths = _cmds.fileDialog2(fileMode=1, fileFilter="JSON (*.json)",
+                                      caption=tr("title_import_replace"))
+        except Exception:
+            paths = None
+        if not paths:
+            return
+        path = paths[0]
+        # ImportDialog handles dry-run preview + Add/Replace radio
+        # locally before delegating to controller.import_rbf_setup.
+        dlg = ImportDialog(path, self._ctrl, parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        mode = dlg.get_mode()
+        self._ctrl.import_rbf_setup(path, mode=mode)
+
+    def _on_export_selected(self):
+        """File -> Export Selected RBF..."""
+        from maya import cmds as _cmds
+        try:
+            paths = _cmds.fileDialog2(fileMode=0, fileFilter="JSON (*.json)",
+                                      caption=tr("menu_export_selected"))
+        except Exception:
+            paths = None
+        if not paths:
+            return
+        self._ctrl.export_current_to_path(paths[0])
+
+    def _on_export_all(self):
+        """File -> Export All RBF..."""
+        from maya import cmds as _cmds
+        try:
+            paths = _cmds.fileDialog2(fileMode=0, fileFilter="JSON (*.json)",
+                                      caption=tr("menu_export_all"))
+        except Exception:
+            paths = None
+        if not paths:
+            return
+        self._ctrl.export_all_to_path(paths[0])
+
+    def add_file_action(self, label_key, callback):
+        """M3.0-spillover §2 (added in M3.3 commit per addendum
+        §M3.0-spillover §2): register an action on the File menu.
+
+        Mirror of :meth:`add_tools_action` for the File menu. M3.x
+        sub-tasks call this; direct edits to ``_build_menu_bar`` are
+        forbidden after M3.3.
+        """
+        act = QtWidgets.QAction(tr(label_key), self)
+        act.triggered.connect(callback)
+        self._menu_file.addAction(act)
+        if not hasattr(self, "_file_actions"):
+            self._file_actions = []
+        self._file_actions.append((act, label_key))
+        return act
 
     def _on_regenerate_aliases(self):
         """Tools -> Regenerate Aliases (M3.7, non-destructive)."""

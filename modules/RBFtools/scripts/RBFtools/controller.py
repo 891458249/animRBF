@@ -309,6 +309,123 @@ class MainController(QtCore.QObject):
             return None
 
     # =================================================================
+    #  M3.3 — JSON Import / Export (path A consumers)
+    # =================================================================
+
+    def export_current_to_path(self, path, meta=None):
+        """Export the current node to a single-node JSON at *path*.
+        Non-destructive — no confirm dialog, only progress feedback."""
+        if not self._current_node:
+            cmds.warning("export_current_to_path: no current node")
+            return False
+        from RBFtools import core_json
+        from RBFtools.ui.i18n import tr
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_export_starting"))
+        try:
+            core_json.export_nodes_to_path(
+                [self._current_node], path, meta=meta)
+        except Exception as exc:
+            cmds.warning("export failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_export_failed"))
+            return False
+        if prog is not None:
+            prog.end(tr("status_export_done"))
+        return True
+
+    def export_all_to_path(self, path, meta=None):
+        """Export every RBFtools node in the scene to a multi-node JSON."""
+        from RBFtools import core, core_json
+        from RBFtools.ui.i18n import tr
+        nodes = core.list_all_nodes()
+        if not nodes:
+            cmds.warning("export_all_to_path: no RBFtools nodes in scene")
+            return False
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_export_starting"))
+        try:
+            core_json.export_nodes_to_path(nodes, path, meta=meta)
+        except Exception as exc:
+            cmds.warning("export_all failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_export_failed"))
+            return False
+        if prog is not None:
+            prog.end(tr("status_export_done"))
+        return True
+
+    def import_rbf_setup(self, path, mode="add"):
+        """Two-phase import (path A): dry-run -> ask_confirm (only when
+        mode='replace' will overwrite an existing node) -> execute.
+
+        Returns the dict from :func:`core_json.import_path` or None on
+        cancellation / total failure.
+        """
+        from RBFtools import core_json
+        from RBFtools.ui.i18n import tr
+        try:
+            data = core_json.read_json_with_schema_check(path)
+        except core_json.SchemaVersionError as exc:
+            cmds.warning(
+                "import_rbf_setup: {}".format(exc))
+            return None
+        try:
+            reports = core_json.dry_run(data, mode=mode)
+        except core_json.SchemaValidationError as exc:
+            cmds.warning(
+                "import_rbf_setup: dry-run failed:\n  {}".format(
+                    "\n  ".join(exc.errors)))
+            return None
+
+        # Path A confirm only when at least one Replace overwrite is
+        # imminent; pure-Add imports proceed without a prompt
+        # (non-destructive — addendum §M3.3 D.2).
+        will_overwrite_any = any(r.will_overwrite for r in reports)
+        if mode == "replace" and will_overwrite_any:
+            preview = self._format_dry_run_report(reports)
+            proceed = self.ask_confirm(
+                title=tr("title_import_replace"),
+                summary=tr("summary_import_replace"),
+                preview_text=preview,
+                action_id="import_replace",
+            )
+            if not proceed:
+                return None
+
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_import_starting"))
+        try:
+            result = core_json.import_path(path, mode=mode)
+        except Exception as exc:
+            cmds.warning("import_rbf_setup failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_import_failed"))
+            return None
+        if prog is not None:
+            prog.end(tr("status_import_done"))
+        self.refresh_nodes()
+        return result
+
+    @staticmethod
+    def _format_dry_run_report(reports):
+        """Render a dry-run report list as ASCII for ConfirmDialog."""
+        lines = ["Import dry-run report ({} node(s)):".format(len(reports)),
+                 ""]
+        for r in reports:
+            mark = "[OK]" if r.ok else "[XX]"
+            ow = " (OVERWRITES existing)" if r.will_overwrite else ""
+            lines.append("{} {}{}".format(mark, r.name, ow))
+            for w in r.warnings:
+                lines.append("    ! {}".format(w))
+            for e in r.errors:
+                lines.append("    X {}".format(e))
+        return "\n".join(lines)
+
+    # =================================================================
     #  M3.7 — auto-alias dispatchers (path A consumers)
     # =================================================================
 

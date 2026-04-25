@@ -1,7 +1,7 @@
 # RBFtools v5 — Milestone 3 — Workflow Tools
 
-> **Status**: M3.0 + M3.2 + M3.7 Complete ✅ | M3.1, M3.3-M3.6 Pending
-> **Test累计**: 291 / 291
+> **Status**: M3.0 + M3.2 + M3.7 + M3.3 Complete ✅ | M3.1, M3.4-M3.6 Pending
+> **Test累计**: 330 / 330
 > **Roadmap reference**: 设计方案 PART F Milestone 3
 > **Top-level decisions**: addendum §M3 顶层核查（本会话内决议）
 > **Detailed addendum**: `RBFtools_v5_addendum_20260424.md` §M3.0 (+ future §M3.x)
@@ -16,8 +16,8 @@
 |---|---|---|---|---|---|
 | **M3.0** | Shared infrastructure (ConfirmDialog / Progress / JSON IO / select_rig) | ✅ | `74ed12c` | 18 | §M3.0 |
 | **M3.2** | Mirror Tool (L↔R quat/translate flip + name remap) | ✅ | `9cd02f2` | 31 | §M3.0-spillover + §M3.2 |
-| **M3.7** | aliasAttr auto-naming（M3.3 阻塞项 → 已解锁） | ✅ | (this commit) | 31 | §M3.7 |
-| **M3.3** | JSON Import/Export（消费 M3.7 + M2.3）| ⏳ Next | — | — | — |
+| **M3.7** | aliasAttr auto-naming（M3.3 阻塞项 → 已解锁） | ✅ | `c7e07f2` | 31 | §M3.7 |
+| **M3.3** | JSON Import/Export（消费 M3.7 + M2.3）| ✅ | (this commit) | 39 | §M3.3 + §M3.0-spillover §2 |
 | **M3.1** | Pose Pruner | ⏳ | — | — | — |
 | **M3.6** | Auto neutral samples（CMT 风格）| ⏳ | — | — | — |
 | **M3.5** | Pose Profiler + 拆分建议 | ⏳ | — | — | — |
@@ -66,7 +66,7 @@ M3.4 (Live Edit — 复杂度最高 + 优先级最低)
 | `mirror_create` | M3.2 ✅ | Mirror 创建新目标节点前 |
 | `mirror_overwrite` | M3.2 ✅ | Mirror 目标已存在时覆盖前 |
 | `force_regenerate_aliases` | M3.7 ✅ | Force Regenerate Aliases（覆盖既有 user alias）前 |
-| `import_solver_overwrite` | M3.3（待登记）| Import 覆盖现有节点前 |
+| `import_replace` | M3.3 ✅ | Import Replace 模式至少一节点 will_overwrite=True 前 |
 | `live_edit_enable` | M3.4（待登记，可选）| Live Edit Mode 首次启用提示 |
 
 **命名规则**：`snake_case`，全局唯一。Maya optionVar 名是 `RBFtools_skip_confirm_<action_id>`（addendum §M3.0.3 锁定）。
@@ -226,7 +226,8 @@ M3 工作流工具 ← 进行中
   ├── M3.0 共享基础设施 ✅ (229 测试)
   ├── M3.2 Mirror ✅ (260 测试)
   ├── M3.7 aliasAttr ✅ (291 测试)
-  ├── M3.3 JSON IO ← 下一站
+  ├── M3.3 JSON IO ✅ (330 测试)
+  ├── M3.1 Pose Pruner ← 下一站
   ├── M3.1 Pose Pruner
   ├── M3.6 自动中性样本
   ├── M3.5 Pose Profiler

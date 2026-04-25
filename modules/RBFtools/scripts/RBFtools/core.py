@@ -1769,6 +1769,68 @@ def read_pose_local_transforms(node):
     return out
 
 
+def read_driver_rotate_orders(node):
+    """Return ``driverInputRotateOrder[]`` as a dense list (M2.1a).
+
+    Sparse indices are densified by reading the highest existing
+    index + 1 and filling missing slots with 0 (xyz default).
+    Returns empty list when the multi has no entries.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        ids = cmds.getAttr(
+            shape + ".driverInputRotateOrder", multiIndices=True) or []
+    except Exception:
+        return []
+    if not ids:
+        return []
+    out = [0] * (max(ids) + 1)
+    for i in ids:
+        try:
+            out[i] = int(cmds.getAttr(
+                "{}.driverInputRotateOrder[{}]".format(shape, i)))
+        except Exception:
+            pass
+    return out
+
+
+def write_driver_rotate_orders(node, values):
+    """Write a dense list of rotate-order ints to the multi.
+
+    Reuses :func:`set_node_multi_attr` (transactional clear-then-write
+    per addendum §M2.4a)."""
+    set_node_multi_attr(node, "driverInputRotateOrder", list(values or []))
+
+
+def read_quat_group_starts(node):
+    """Return ``outputQuaternionGroupStart[]`` as an ordered int list."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        ids = cmds.getAttr(
+            shape + ".outputQuaternionGroupStart",
+            multiIndices=True) or []
+    except Exception:
+        return []
+    out = []
+    for i in sorted(ids):
+        try:
+            out.append(int(cmds.getAttr(
+                "{}.outputQuaternionGroupStart[{}]".format(shape, i))))
+        except Exception:
+            pass
+    return out
+
+
+def write_quat_group_starts(node, starts):
+    """Write a list of quat-group leader indices to the multi."""
+    set_node_multi_attr(node, "outputQuaternionGroupStart",
+                        list(starts or []))
+
+
 def auto_alias_outputs(node, driver_attrs, driven_attrs, force=False):
     """Generate human-readable aliases on the shape's input[]/output[]
     multi plugs (Milestone 3.7).
