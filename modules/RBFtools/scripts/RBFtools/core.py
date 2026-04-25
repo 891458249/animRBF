@@ -398,6 +398,233 @@ def reset_all_skip_confirms():
 # =====================================================================
 
 
+# =====================================================================
+#  Mirror Tool orchestrator — Milestone 3.2
+# =====================================================================
+# Wires the pure mirror math (core_mirror) into actual node creation
+# under a single undo_chunk. Called by controller.mirror_current_node;
+# never imported by widgets directly (MVC red line).
+
+
+def mirror_node(source_node, target_name, mirror_axis,
+                naming_rule_index, custom_naming=None,
+                naming_direction="auto",
+                progress=None,
+                overwrite=False):
+    """Create a mirrored copy of *source_node* under *target_name*.
+
+    Behaviour (addendum §M3.2.4, §M3.2.9):
+
+    * Wraps the entire operation in one ``undo_chunk`` so a mid-flight
+      failure rolls back via Maya undo without leaving an orphan node.
+    * Resolves driver / driven node names via *naming_rule_index*.
+      Missing R-side targets emit warnings; the orchestrator continues
+      with the L-side names so the user can fix wiring after the fact.
+    * Mirrors every pose's driver inputs + driven values + M2.3
+      ``poseLocalTransform`` per the inputEncoding / Maya raw-attr rules.
+
+    Parameters
+    ----------
+    source_node : str
+        Source RBFtools transform name.
+    target_name : str
+        Desired target node name (caller has already resolved this
+        via ``apply_naming_rule``; passed in to avoid re-running the
+        regex inside the orchestrator).
+    mirror_axis : int
+        0=X (YZ plane), 1=Y, 2=Z.
+    naming_rule_index : int
+        Used to mirror driver/driven node names.
+    custom_naming : tuple[str, str] or None
+        Custom regex pair when naming_rule_index == CUSTOM_RULE_INDEX.
+    naming_direction : str
+        "auto" / "forward" / "reverse" — passed through to
+        ``apply_naming_rule`` for driver/driven name remap.
+    progress : StatusProgressController or None
+        Optional progress feedback (may be None in headless / test).
+    overwrite : bool
+        When True and target already exists, delete it first. The
+        controller is responsible for asking the user via path A
+        confirm dialog; the orchestrator only honours the flag.
+
+    Returns
+    -------
+    dict
+        ``{"target": str, "status": str, "warnings": list[str]}``.
+        ``status`` ∈ {"created", "overwrote", "skipped", "failed"}.
+        Failures raise; never returned silently.
+    """
+    from RBFtools import core_mirror
+
+    warnings = []
+    enc = safe_get(get_shape(source_node) + ".inputEncoding", 0) \
+        if _exists(get_shape(source_node)) else 0
+    twist_axis = safe_get(get_shape(source_node) + ".twistAxis", 0) \
+        if _exists(get_shape(source_node)) else 0
+
+    # Read source node's current state up-front so we don't mutate it.
+    source_settings = get_all_settings(source_node) or {}
+    source_poses = read_all_poses(source_node)
+    source_local_xforms = read_pose_local_transforms(source_node)
+
+    # Resolve driver / driven via name remap.
+    src_driver, src_driver_attrs = read_driver_info(source_node)
+    src_driven, src_driven_attrs = read_driven_info(source_node)
+
+    new_driver_name, dr_status = (
+        core_mirror.apply_naming_rule(
+            src_driver, naming_rule_index, custom_naming,
+            naming_direction)
+        if src_driver else (src_driver, "no_match"))
+    new_driven_name, dn_status = (
+        core_mirror.apply_naming_rule(
+            src_driven, naming_rule_index, custom_naming,
+            naming_direction)
+        if src_driven else (src_driven, "no_match"))
+
+    if src_driver and dr_status not in ("ok", "both_match"):
+        warnings.append(
+            "Driver name remap failed ({}): using source name {!r}".format(
+                dr_status, src_driver))
+        new_driver_name = src_driver
+    if src_driven and dn_status not in ("ok", "both_match"):
+        warnings.append(
+            "Driven name remap failed ({}): using source name {!r}".format(
+                dn_status, src_driven))
+        new_driven_name = src_driven
+
+    if dr_status == "both_match":
+        warnings.append(
+            "Driver name {!r} matches BOTH directions — using forward".format(
+                src_driver))
+
+    # Mirror each pose.
+    mirrored_poses = []
+    for pose in source_poses:
+        new_inputs, in_status = core_mirror.mirror_driver_inputs(
+            list(pose.inputs), enc, mirror_axis,
+            driver_attrs=src_driver_attrs)
+        if in_status.get("unsupported_encoding"):
+            warnings.append(
+                "BendRoll inputEncoding: driver inputs NOT mirrored "
+                "(addendum §M3.2 (E)). User must verify pose data.")
+        for nm in in_status.get("unrecognized_attrs", []):
+            warnings.append("Unrecognized driver attr {!r} — passed "
+                            "through unchanged".format(nm))
+        new_values, unrec = core_mirror.mirror_driven_values(
+            list(pose.values), src_driven_attrs, mirror_axis)
+        for nm in unrec:
+            warnings.append("Unrecognized driven attr {!r} — passed "
+                            "through unchanged".format(nm))
+        new_pose = PoseData(pose.index, new_inputs, new_values)
+        mirrored_poses.append(new_pose)
+
+    # Mirror per-pose local Transforms (M2.3 contract).
+    mirrored_local_xforms = [
+        core_mirror.mirror_pose_local_transform(xf, mirror_axis)
+        for xf in source_local_xforms
+    ]
+
+    # Begin orchestration under undo_chunk. Failure mid-way rolls back.
+    if progress is not None:
+        progress.begin("Mirror: starting...")
+    overwrote = False
+    with undo_chunk("RBFtools: mirror node"):
+        try:
+            # Step 1: handle target conflict.
+            if _exists(target_name):
+                if not overwrite:
+                    raise RuntimeError(
+                        "Target node {!r} already exists and overwrite "
+                        "flag is False".format(target_name))
+                delete_node(target_name)
+                overwrote = True
+
+            # Step 2: create target.
+            if progress is not None:
+                progress.step(1, 4, "Mirror: creating target node")
+            target = create_node()
+            target = cmds.rename(target, target_name)
+
+            # Step 3: copy source attrs (kernel / radius / etc.) onto
+            # target, EXCLUDING driver/driven wiring (re-done in step 4).
+            if progress is not None:
+                progress.step(2, 4, "Mirror: copying node settings")
+            _copy_node_settings(source_settings, target)
+
+            # Step 4: write mirrored poses + connect target's
+            # driver/driven via apply_poses + connect_node.
+            if progress is not None:
+                progress.step(3, 4, "Mirror: writing poses")
+            new_dr_attrs = list(src_driver_attrs) if src_driver_attrs else []
+            new_dn_attrs = list(src_driven_attrs) if src_driven_attrs else []
+
+            apply_poses(target, new_driver_name, new_driven_name,
+                        new_dr_attrs, new_dn_attrs, mirrored_poses)
+
+            # Step 5: write mirrored local-Transform snapshots
+            # (apply_poses already calls capture_per_pose_local_transforms
+            # via replay; that overwrites whatever we passed in. We
+            # explicitly RE-write the mirrored versions here so the
+            # M2.3 double-storage stays consistent with the mirrored
+            # poseValue rather than with whatever the live driven_node
+            # state was at apply-time).
+            from RBFtools import core as _self_core   # noqa: F401
+            try:
+                write_pose_local_transforms(target, mirrored_local_xforms)
+            except Exception as exc:
+                warnings.append(
+                    "poseLocalTransform mirror write failed: {}".format(exc))
+
+            # Step 6: connect target driver/driven if they exist.
+            if (new_driver_name and _exists(new_driver_name) and
+                    new_driven_name and _exists(new_driven_name)):
+                connect_node(target, new_driver_name, new_driven_name,
+                             new_dr_attrs, new_dn_attrs)
+            else:
+                warnings.append(
+                    "Target driver/driven not found in scene; "
+                    "node created without connections.")
+
+            if progress is not None:
+                progress.step(4, 4, "Mirror: done")
+
+            return {
+                "target": target,
+                "status": "overwrote" if overwrote else "created",
+                "warnings": warnings,
+            }
+        except Exception as exc:
+            if progress is not None:
+                progress.end("Mirror: failed — {}".format(exc))
+            raise
+
+
+def _copy_node_settings(source_settings, target):
+    """Copy non-pose attrs from a settings dict onto *target*.
+
+    Skips attrs that the apply_poses pipeline manages (poses, baseline,
+    poseLocalTransform compound, driver/driven multis). Used by
+    :func:`mirror_node` to clone kernel / radius / encoding / clamp
+    config from the source node.
+    """
+    skip = {
+        "type", "rbfMode", "evaluate",     # mode + trigger
+        # Pose-pipeline attrs are handled by apply_poses / mirror code:
+        # poses[], baseValue[], outputIsScale[], poseLocalTransform[],
+        # outputQuaternionGroupStart[].
+    }
+    for k, v in (source_settings or {}).items():
+        if k in skip:
+            continue
+        try:
+            set_node_attr(target, k, v)
+        except Exception:
+            # Non-fatal — settings the target's schema doesn't know
+            # about (e.g. a future v6 attr) just get dropped.
+            pass
+
+
 def select_rig_for_node(node, role):
     """Select the driver or driven scene object connected to *node*.
 

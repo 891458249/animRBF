@@ -77,6 +77,12 @@ class _PoseEditorPanel(CollapsibleFrame):
     def __init__(self, parent=None):
         super(_PoseEditorPanel, self).__init__(
             title=tr("rbf_pose_editor"), parent=parent)
+        # M3.0-spillover: M3.x sub-tasks register pose-row actions
+        # via add_pose_row_action; populated tuples are
+        # (label_key, callback, danger_bool). _show_row_menu reads
+        # this list every right-click so additions take effect
+        # immediately without a window rebuild.
+        self._extra_row_actions = []
         self._build()
 
     def _build(self):
@@ -205,7 +211,18 @@ class _PoseEditorPanel(CollapsibleFrame):
         self._btn_disconnect.setText(tr("disconnect"))
         self._btn_reload.setText(tr("reload"))
 
-    # -- row context menu (Recall / Update / Delete) --
+    # -- row context menu (Recall / Update / Delete + M3.x extensions) --
+
+    def add_pose_row_action(self, label_key, callback, danger=False):
+        """M3.0-spillover (added in M3.2 commit per addendum §M3.0.5):
+        register an extra action on the pose-table right-click menu.
+
+        M3.x sub-tasks call this from their controller wiring; the
+        callback receives ``(row_idx)``. Future Pruner / Mirror /
+        any other per-pose action goes through this — direct edits
+        to ``_show_row_menu`` are forbidden after M3.2.
+        """
+        self._extra_row_actions.append((label_key, callback, danger))
 
     def _show_row_menu(self, pos):
         idx = self._table.indexAt(pos)
@@ -219,6 +236,16 @@ class _PoseEditorPanel(CollapsibleFrame):
         act_delete = menu.addAction(tr("delete"))
         act_delete.setProperty("cssClass", "danger")
 
+        # M3.0-spillover: append M3.x-registered actions in order.
+        extra_actions = []
+        if getattr(self, "_extra_row_actions", None):
+            menu.addSeparator()
+            for label_key, _cb, danger in self._extra_row_actions:
+                act = menu.addAction(tr(label_key))
+                if danger:
+                    act.setProperty("cssClass", "danger")
+                extra_actions.append((act, _cb))
+
         action = menu.exec_(self._table.viewport().mapToGlobal(pos))
         if action == act_recall:
             self._on_row_action("recall", row)
@@ -226,6 +253,19 @@ class _PoseEditorPanel(CollapsibleFrame):
             self._on_row_action("update", row)
         elif action == act_delete:
             self._on_row_action("delete", row)
+        else:
+            for act, cb in extra_actions:
+                if action == act:
+                    try:
+                        cb(row)
+                    except Exception as exc:
+                        # Don't let a broken extra action break the
+                        # pose table's interaction.
+                        from maya import cmds as _cmds
+                        _cmds.warning(
+                            "pose-row action {!r} failed: {}".format(
+                                label_key, exc))
+                    break
 
     def _on_row_action(self, action, row):
         """Emit a signal that the window can catch."""
@@ -386,6 +426,13 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # ---- M3.0: top-level menu bar ----
         self._build_menu_bar()
 
+        # ---- M3.2: wire Mirror Tool entry points via M3.0-spillover ----
+        # First real-world consumer of add_tools_action / add_pose_row_action
+        # (addendum §M3.0.5).
+        self.add_tools_action("menu_mirror_node", self._on_mirror_node)
+        self._pose_editor.add_pose_row_action(
+            "row_mirror_this", self._on_mirror_pose, danger=False)
+
     # =================================================================
     #  M3.0 — Menu bar
     # =================================================================
@@ -419,6 +466,59 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         core.reset_all_skip_confirms()
         if hasattr(self, "_progress_ctrl") and self._progress_ctrl:
             self._progress_ctrl.end(tr("reset_confirms_done"))
+
+    def _on_mirror_node(self):
+        """Tools -> Mirror Node... (M3.2 main entry)."""
+        from RBFtools.ui.widgets.mirror_dialog import MirrorDialog
+        node = self._ctrl.current_node()
+        if not node:
+            self._progress_ctrl.end(tr("status_no_node_selected")
+                                    if False else "")
+            return
+        dlg = MirrorDialog(node, parent=self)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        config = dlg.get_config()
+        # controller.mirror_current_node handles the path A confirm
+        # dialog + progress feedback + actual core.mirror_node call.
+        self._ctrl.mirror_current_node(config)
+        # Refresh the UI so the newly created target shows up in the
+        # node selector.
+        self._on_refresh()
+
+    def _on_mirror_pose(self, row_idx):
+        """Right-click pose-table -> Mirror this pose (M3.2 single-pose
+        path; no confirm dialog per addendum §M3.2 (H)①)."""
+        # Single-pose mirror in M3.2 is documented but the actual
+        # implementation reuses controller.mirror_current_node with
+        # a single-pose subset config — to avoid a parallel data path
+        # that could drift from the orchestrator's contract. Future
+        # extension can add a controller-level mirror_pose_at(row).
+        # For now, fall back to a warning + suggest using the full
+        # Mirror Node dialog.
+        from maya import cmds as _cmds
+        _cmds.warning(
+            "Single-pose mirror (row {}) is reserved for the next "
+            "M3.2 patch — please use Tools -> Mirror Node... for "
+            "now.".format(row_idx))
+
+    def add_tools_action(self, label_key, callback):
+        """M3.0-spillover (added in M3.2 commit per addendum §M3.0.5):
+        register an action on the Tools menu.
+
+        Returns the QAction so callers can keep a reference (e.g. for
+        enable/disable based on selection state). M3.x sub-tasks
+        call this; direct edits to ``_build_menu_bar`` are forbidden
+        after M3.2.
+        """
+        act = QtWidgets.QAction(tr(label_key), self)
+        act.triggered.connect(callback)
+        self._menu_tools.addAction(act)
+        # Track for retranslate.
+        if not hasattr(self, "_tools_actions"):
+            self._tools_actions = []
+        self._tools_actions.append((act, label_key))
+        return act
 
     # =================================================================
     #  Signal wiring

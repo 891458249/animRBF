@@ -145,6 +145,9 @@ def _build_qtwidgets():
         "QGridLayout", "QMenu", "QAbstractItemView",
         "QHeaderView", "QSizePolicy", "QToolButton",
         "QDialog", "QScrollArea", "QApplication",
+        # M3.0 / M3.2 additions:
+        "QMainWindow", "QFormLayout", "QPlainTextEdit",
+        "QRadioButton",
     ):
         setattr(qtw, cls_name, type(cls_name, (_Stub,), {}))
 

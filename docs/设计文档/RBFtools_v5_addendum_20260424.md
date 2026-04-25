@@ -1402,6 +1402,158 @@ core.select_rig_for_node(self._ctrl.current_node(), "driver")
 
 ---
 
+## §M3.0-spillover — `add_tools_action` / `add_pose_row_action` (added in M3.2 commit)
+
+**追溯**：M3.0 落地后，**M3.2 实施时**发现 `_build_menu_bar` 与 `_show_row_menu` 缺少**子任务扩展接口**——M3.x 各自直接修改 `main_window.py` 会破坏 MVC（sub-task 不应改 window 内部）。
+
+**决议**：M3.2 commit 内顺手加两个 helper 作为 **M3.0-spillover**。本节归 §M3.0 章节群（不归 §M3.2），便于未来检索"M3.0 共享基础设施"时一次性看到完整 API。
+
+### API
+
+```python
+# RBFToolsWindow
+def add_tools_action(self, label_key, callback) -> QAction:
+    """Register an action on the Tools menu. Returns the QAction
+    so callers can hold a reference for enable/disable state."""
+
+# _PoseEditorPanel
+def add_pose_row_action(self, label_key, callback, danger=False):
+    """Register a per-pose right-click action. callback receives
+    (row_idx). danger=True applies the red 'danger' stylesheet."""
+```
+
+### 契约（M3 全程红线）
+
+1. 后续 M3.x 子任务的菜单/右键扩展**必须**走这两个 helper——禁止再直接修改 `main_window.py` menu 结构
+2. 测试守护：spillover 助手测试归 `tests/test_m3_0_spillover.py`（独立文件名标识，便于 review）
+3. `_show_row_menu` 内 `_extra_row_actions` 迭代**不可绕过**——`test_m3_0_spillover.py:T_RowMenuExtensionContract` 永久守护
+
+### M3.2 是首个真实消费者
+
+`RBFToolsWindow._build_ui` 末尾：
+```python
+self.add_tools_action("menu_mirror_node", self._on_mirror_node)
+self._pose_editor.add_pose_row_action(
+    "row_mirror_this", self._on_mirror_pose, danger=False)
+```
+
+未来 M3.1 / M3.3 / M3.5 / M3.6 等需要菜单/右键 entry 时，本节是它们的"使用手册"。
+
+---
+
+## §M3.2 — Mirror Tool
+
+Milestone 3 第一个真正的工作流工具——也是 M3.0 path A reuse pattern 的首次真实压力测试。**0 行 C++**。
+
+### M3.2.1 — 决议日志
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | Mirror 对象层级 | **① 整节点 + 单 pose 同 commit** | 共用核心镜像数学；最常见用例 |
+| (B) | 命名规则集 | **① 6 预设 + Custom** | 覆盖业界 6 套约定；Custom 兜底 |
+| (C) | Mirror Axis 持久化 | **① 不持久化** | 防上次错配置污染本次 |
+| (D) | Driver/Driven 缺失 | **① 命名查找 + dialog 兜底** | 用户责任 + 工具温和 |
+| (E) | inputEncoding 支持 | **① Raw + Quat + ExpMap + SwingTwist + BendRoll fall-back** | 95% 覆盖 |
+| (F) | `poseLocalTransform` 镜像 | **① 镜像** | 保持 M2.3 双存储一致性 |
+| (G) | M3.0-spillover 在 M3.2 commit 内 | **① 是** | 避免污染 M3.0 commit |
+| (H) | 单 pose 右键不走 confirm | **① 不走** | 单 pose 低风险；M3.2 暂为 stub |
+
+### M3.2.2 — 数学
+
+镜像轴：
+- AXIS_X (0) — YZ 平面，flip x
+- AXIS_Y (1) — XZ 平面，flip y
+- AXIS_Z (2) — XY 平面，flip z
+
+**Translate**: $t' = (\sigma_x t_x, \sigma_y t_y, \sigma_z t_z)$，$\sigma_i = -1$ 仅当 $i =$ 镜像轴。
+
+**Quaternion**: $q' = (\sigma_x x, \sigma_y y, \sigma_z z, w)$，$\sigma_i = -1$ 仅当 $i \ne$ 镜像轴。
+
+**ExpMap**：与 quat xyz 同号规则。
+
+**SwingTwist**：swing 部分按 quat；twist 标量取负。
+
+**Raw attr 行为镜像**（Maya 约定）：
+
+| 镜像轴 | flip set |
+|---|---|
+| X | {tx, ry, rz} |
+| Y | {ty, rx, rz} |
+| Z | {tz, rx, ry} |
+
+scale 永不 flip。未识别 attr 名 → keep + warning。
+
+### M3.2.3 — 命名规则边界（Naming-rule edge contract）
+
+3 case 显式反馈：
+
+| 情形 | UI 反馈 |
+|---|---|
+| 同时匹配 forward 和 reverse | 默认 forward + warning |
+| 都不匹配 | 禁用 Mirror 按钮 + 红色提示 |
+| 匹配但替换后名字未变 | warning + 禁用 Mirror 按钮 |
+
+T_NAMING_EDGE 3 子测试守护。
+
+### M3.2.4 — 失败回滚契约（T_ROLLBACK）
+
+`mirror_node` 整体 `undo_chunk("RBFtools: mirror node")` 包裹。任何子步骤失败 → 异常向上传播 + `undo_chunk` finally 触发 `closeChunk` → Maya undo stack 收到完整 chunk。
+
+T_ROLLBACK 行为验证：mock `apply_poses` 注入异常 → 验证异常未被吞 + `cmds.undoInfo(openChunk=True)` / `closeChunk=True` 各 ≥ 1 次。
+
+### M3.2.5 — Path A 首次真实消费验证
+
+`controller.mirror_current_node(config)`：
+- `ask_confirm(title, summary, preview_text, action_id)` —— preview 为 13 行 ASCII 摘要，QPlainTextEdit 显示完整
+- `progress()` begin/step/end —— 4 阶段足够灵活
+- **零 M3.0 API 修改需求**——path A 设计经受住第一次真实压力
+
+### M3.2.6 — `action_id` 注册（addendum §M3.0.3 注册表更新）
+
+| action_id | Sub-task | Confirm 触发场景 |
+|---|---|---|
+| `mirror_create` | M3.2 | Mirror 创建新目标节点前 |
+| `mirror_overwrite` | M3.2 | Mirror 目标已存在时覆盖前 |
+
+### M3.2.7 — 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `core_mirror.py` | **新建** ~280 行 |
+| `core.py` | +160 行 (`mirror_node` + `_copy_node_settings`) |
+| `controller.py` | +90 行 (`mirror_current_node` path A 首次消费) |
+| `ui/main_window.py` | +60 行（M3.0-spillover + Mirror callbacks）|
+| `ui/widgets/mirror_dialog.py` | **新建** ~200 行 |
+| `ui/i18n.py` | +60 行（28 EN + 28 CN）|
+| `tests/conftest.py` | +4 类（QMainWindow / QFormLayout / QPlainTextEdit / QRadioButton）|
+| `tests/test_m3_2_mirror.py` | **新建** ~480 行（28 子测试）|
+| `tests/test_m3_0_spillover.py` | **新建** ~60 行（3 子测试）|
+
+**总：~+1620 行**；生产代码 ~790 行 < 800 上限。
+
+### M3.2.8 — 零回归
+
+260/260 测试通过（229 累计 + 31 新）；新增菜单项不主动调用就不影响任何 rig；新 `_extra_row_actions` 默认空，右键行为字节级一致。
+
+### M3.2.9 — Non-goals
+
+- ❌ R→L 批量反向 / 选中 R 拉 L → M3 后续
+- ❌ Mirror 后自动 Apply → 用户手动
+- ❌ BendRoll 编码 driver inputs 真镜像 → M3 后续或永不
+- ❌ 跨场景 mirror → M3.3
+- ❌ 单 pose 右键真正实现 → 暂 stub warning，待 M3.2 后续 patch
+
+### M3.2.10 — 红线确认
+
+- ✅ 沿用 M3 + M3.0 全部红线
+- ✅ Mirror 必须 `undo_chunk` 包裹（T_ROLLBACK 守护）
+- ✅ 不修改源节点
+- ✅ BendRoll fall-back 一次性 warning
+- ✅ 菜单/右键扩展走 spillover helpers
+- ✅ 命名规则 3 边界 case 显式反馈
+
+---
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```

@@ -202,6 +202,112 @@ class MainController(QtCore.QObject):
         in test / CI contexts."""
         return getattr(self, "_status_progress", None)
 
+    # =================================================================
+    #  M3.2 — Mirror Tool dispatcher (path A consumer)
+    # =================================================================
+
+    def mirror_current_node(self, config):
+        """Mirror the current node per *config*. First real-world
+        consumer of M3.0 path A (ask_confirm + progress).
+
+        Parameters
+        ----------
+        config : dict
+            ``{"target_name": str, "mirror_axis": int,
+              "naming_rule_index": int, "custom": (pat, rep) or None,
+              "naming_direction": "auto"/"forward"/"reverse"}``
+
+        Returns
+        -------
+        dict or None
+            ``mirror_node`` result on success, None on user-cancel /
+            failure. Failures emit warnings; never raise to UI.
+        """
+        if not self._current_node:
+            return None
+        from RBFtools import core, core_mirror
+
+        source = self._current_node
+        target_name = config.get("target_name", "")
+        if not target_name:
+            cmds.warning("mirror_current_node: empty target_name")
+            return None
+
+        target_exists = core._exists(target_name)
+        # Build preview text per addendum §M3.2.Q8.
+        axis = int(config.get("mirror_axis", core_mirror.AXIS_X))
+        axis_label = core_mirror.AXIS_LABELS[axis]
+        rule_idx = int(config.get("naming_rule_index", 0))
+        if rule_idx < len(core_mirror.NAMING_PRESETS):
+            rule_label = core_mirror.NAMING_PRESETS[rule_idx][4]
+        else:
+            rule_label = "naming_rule_custom"
+
+        src_driver, _dr_attrs = core.read_driver_info(source)
+        src_driven, _dn_attrs = core.read_driven_info(source)
+        new_driver, _ = core_mirror.apply_naming_rule(
+            src_driver or "", rule_idx,
+            config.get("custom"), config.get("naming_direction", "auto"))
+        new_driven, _ = core_mirror.apply_naming_rule(
+            src_driven or "", rule_idx,
+            config.get("custom"), config.get("naming_direction", "auto"))
+
+        n_poses = len(core.read_all_poses(source))
+
+        preview_lines = [
+            "Mirror Configuration:",
+            "  Source Node:    {}".format(source),
+            "  Target Node:    {}  ({})".format(
+                target_name,
+                "will OVERWRITE" if target_exists else "will be CREATED"),
+            "  Mirror Axis:    {}".format(axis_label),
+            "  Naming Rule:    {}".format(rule_label),
+            "",
+            "Driver:   {!s:<24}  ->  {!s:<24} {}".format(
+                src_driver or "(none)",
+                new_driver or "(none)",
+                "(found)" if (new_driver and core._exists(new_driver))
+                else "(MISSING)"),
+            "Driven:   {!s:<24}  ->  {!s:<24} {}".format(
+                src_driven or "(none)",
+                new_driven or "(none)",
+                "(found)" if (new_driven and core._exists(new_driven))
+                else "(MISSING)"),
+            "",
+            "Poses ({} total) will be mirrored across {}.".format(
+                n_poses, axis_label),
+        ]
+        preview = "\n".join(preview_lines)
+
+        action_id = ("mirror_overwrite" if target_exists
+                     else "mirror_create")
+        proceed = self.ask_confirm(
+            title="Mirror Node",
+            summary="Mirror {} -> {}?".format(source, target_name),
+            preview_text=preview,
+            action_id=action_id,
+        )
+        if not proceed:
+            return None
+
+        prog = self.progress()
+        try:
+            return core.mirror_node(
+                source_node=source,
+                target_name=target_name,
+                mirror_axis=axis,
+                naming_rule_index=rule_idx,
+                custom_naming=config.get("custom"),
+                naming_direction=config.get("naming_direction", "auto"),
+                progress=prog,
+                overwrite=target_exists,
+            )
+        except Exception as exc:
+            cmds.warning("mirror_current_node failed: {}".format(exc))
+            if prog is not None:
+                prog.end("Mirror failed")
+            return None
+
     def ask_confirm(self, title, summary, preview_text, action_id):
         """Synchronous user-confirmation prompt (addendum §M3.0).
 
