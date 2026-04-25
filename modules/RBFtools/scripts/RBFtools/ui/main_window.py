@@ -461,6 +461,13 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             "menu_profile_to_se", self._on_profile_to_script_editor)
         self._ctrl.editorLoaded.connect(self._profile_widget.on_node_changed)
 
+        # ---- M3.4: Live Edit Mode toggle (spillover §3 second consumer)
+        from RBFtools.ui.widgets.live_edit_widget import LiveEditWidget
+        self._live_edit_widget = LiveEditWidget(
+            self._ctrl, self._pose_editor.table_view, parent=self)
+        self.add_tools_panel_widget(
+            "live_edit_toggle", self._live_edit_widget)
+
         # ---- M3.1: Pose Pruner entry + single-pose row delete ----
         self.add_tools_action("menu_prune_poses", self._on_prune_poses)
         self._pose_editor.add_pose_row_action(

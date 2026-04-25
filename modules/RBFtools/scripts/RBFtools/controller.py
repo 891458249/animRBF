@@ -387,6 +387,27 @@ class MainController(QtCore.QObject):
             return None
 
     # =================================================================
+    #  M3.4 — Live Edit Mode (driver-only; thin wrapper over update_pose)
+    # =================================================================
+
+    def live_edit_apply_inputs(self, row):
+        """Live Edit's leading / trailing emit calls into this
+        thin wrapper. Reuses :meth:`update_pose` end-to-end —
+        ``read_current_values(driver)`` then ``model.update_pose_values``.
+
+        Read-then-write is intentional: any momentary race with
+        a user-clicked Update Pose simply lets the last write
+        win; addendum §M3.4 (Q6) discusses why no lock is needed
+        (Maya scriptJob + Qt signals are main-thread serial)."""
+        if not self._current_node or row is None or row < 0:
+            return
+        drv_node, drv_attrs = core.read_driver_info(self._current_node)
+        drvn_node, drvn_attrs = core.read_driven_info(self._current_node)
+        if not drv_node or not drv_attrs:
+            return
+        self.update_pose(row, drv_node, drvn_node, drv_attrs, drvn_attrs)
+
+    # =================================================================
     #  M3.5 — Pose Profiler (read-only diagnostic; no path A confirm
     #         because profile_node performs no scene mutation)
     # =================================================================

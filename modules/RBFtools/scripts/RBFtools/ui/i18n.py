@@ -163,6 +163,13 @@ _EN = {
     "status_import_starting":          "Importing...",
     "status_import_done":              "Import complete.",
     "status_import_failed":            "Import failed.",
+    # -- M3.4: Live Edit Mode --
+    "live_edit_toggle_label":          "Live Edit",
+    "live_edit_status_idle":           "idle",
+    "live_edit_status_listening":      "listening on {n} attrs",
+    "live_edit_warn_no_node":          "no current node — pick an RBF node first",
+    "live_edit_warn_no_attrs":         "no driver attrs to listen on",
+    "live_edit_warn_failed":           "Live Edit toggle failed",
     # -- M3.5: Pose Profiler + ToolsSection (spillover §3) --
     "section_tools":                   "Tools",
     "menu_profile_to_se":              "Profile to Script Editor",
@@ -375,6 +382,13 @@ _ZH = {
     "status_import_starting":          u"\u6b63\u5728\u5bfc\u5165...",
     "status_import_done":              u"\u5bfc\u5165\u5b8c\u6210\u3002",
     "status_import_failed":            u"\u5bfc\u5165\u5931\u8d25\u3002",
+    # -- M3.4 --
+    "live_edit_toggle_label":          u"\u5b9e\u65f6\u7f16\u8f91",
+    "live_edit_status_idle":           u"\u5f85\u547d",
+    "live_edit_status_listening":      u"\u76d1\u542c {n} \u4e2a\u5c5e\u6027",
+    "live_edit_warn_no_node":          u"\u672a\u9009\u4e2d\u8282\u70b9 \u2014 \u8bf7\u5148\u9009\u4e2d\u4e00\u4e2a RBF \u8282\u70b9",
+    "live_edit_warn_no_attrs":         u"\u65e0 driver \u5c5e\u6027\u53ef\u76d1\u542c",
+    "live_edit_warn_failed":           u"\u5b9e\u65f6\u7f16\u8f91\u5f00\u542f\u5931\u8d25",
     # -- M3.5 --
     "section_tools":                   u"\u5de5\u5177",
     "menu_profile_to_se":              u"\u8f93\u51fa Profile \u5230\u811a\u672c\u7f16\u8f91\u5668",

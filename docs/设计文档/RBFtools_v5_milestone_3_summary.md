@@ -1,259 +1,262 @@
-# RBFtools v5 — Milestone 3 — Workflow Tools
+# RBFtools v5 — Milestone 3 — Workflow Tools (Closure Summary)
 
-> **Status**: M3.0 + M3.2 + M3.7 + M3.3 + M3.1 + M3.6 + M3.5 Complete ✅ | M3.4 Pending
-> **Test累计**: 399 / 399
-> **Roadmap reference**: 设计方案 PART F Milestone 3
-> **Top-level decisions**: addendum §M3 顶层核查（本会话内决议）
-> **Detailed addendum**: `RBFtools_v5_addendum_20260424.md` §M3.0 (+ future §M3.x)
+> **Status**: **Milestone 3 主体完工** ✅ — 7 sub-tasks + 3 spillover sections shipped
+> **Test累计**: **424 / 424**
+> **Roadmap reference**: 设计文档 PART F Milestone 3 (B7-B15 全部 ✅)
+> **Detailed addendum**: `RBFtools_v5_addendum_20260424.md` §M3.0 / §M3.0-spillover §1/§2/§3 / §M3.1 / §M3.2 / §M3.3 / §M3.4 / §M3.5 / §M3.6 / §M3.7
 
-本文档是 Milestone 3 的**总入口**：列出 7 个子任务的 commit / 测试累计 / 状态 + 顶层执行顺序理由 + 跨子任务契约（action_id 注册表 / SCHEMA_VERSION / 访问路径）+ M3.x 子任务复用模板。
+本文档是 Milestone 3 收官 summary。8 子任务（含 M3.0 共享基础设施）+ 3 个 M3.0-spillover 章节全部 push 完成；**v5 设计文档 PART F Milestone 3 全部交付**。
 
 ---
 
 ## 1. 子任务进度矩阵
 
-| Sub-task | Purpose | Status | Commit | Tests | Addendum |
-|---|---|---|---|---|---|
-| **M3.0** | Shared infrastructure (ConfirmDialog / Progress / JSON IO / select_rig) | ✅ | `74ed12c` | 18 | §M3.0 |
-| **M3.2** | Mirror Tool (L↔R quat/translate flip + name remap) | ✅ | `9cd02f2` | 31 | §M3.0-spillover + §M3.2 |
-| **M3.7** | aliasAttr auto-naming（M3.3 阻塞项 → 已解锁） | ✅ | `c7e07f2` | 31 | §M3.7 |
-| **M3.3** | JSON Import/Export（消费 M3.7 + M2.3）| ✅ | `67b0b3f` | 39 | §M3.3 + §M3.0-spillover §2 |
-| **M3.1** | Pose Pruner | ✅ | `862950e` | 26 | §M3.1 |
-| **M3.6** | Auto neutral sample (CMT-style) | ✅ | `f8925a3` | 18 | §M3.6 |
-| **M3.5** | Pose Profiler + ToolsSection (spillover §3) | ✅ | (this commit) | 25 | §M3.5 |
-| **M3.6** | Auto neutral samples（CMT 风格）| ⏳ | — | — | — |
-| **M3.5** | Pose Profiler + 拆分建议 | ⏳ | — | — | — |
-| **M3.4** | Live Edit Mode（algo only；mayapy 集成 → M1.5）| ⏳ | — | — | — |
+| Sub-task | Purpose | Commit | Tests | Addendum |
+|---|---|---|---|---|
+| **M3.0** | Shared infrastructure (ConfirmDialog / Progress / JSON IO / select_rig) | `74ed12c` | 18 | §M3.0 |
+| **M3.0 doc** | Milestone 3 entry summary + sub-task progress matrix | `112f43f` | (same) | — |
+| **M3.2** | Mirror Tool + spillover §1 (`add_tools_action` / `add_pose_row_action`) | `9cd02f2` | 31 | §M3.0-spillover §1 + §M3.2 |
+| **M3.7** | aliasAttr auto-naming (M3.3 unblocker) | `c7e07f2` | 31 | §M3.7 |
+| **M3.3** | JSON Import/Export + spillover §2 (`add_file_action`) | `67b0b3f` | 39 | §M3.0-spillover §2 + §M3.3 |
+| **M3.1** | Pose Pruner | `862950e` | 26 | §M3.1 |
+| **M3.6** | Auto neutral sample on fresh node | `f8925a3` | 18 | §M3.6 |
+| **M3.5** | Pose Profiler + spillover §3 (`add_tools_panel_widget` / `remove_tools_panel_widget`) | `bf48bed` | 25 | §M3.0-spillover §3 + §M3.5 |
+| **M3.4** | Live Edit Mode (algo) — final M3 sub-task | (this commit) | 25 | §M3.4 |
+
+**累计测试**：76 (M1) → 211 (M2) → 229 (M3.0) → 260 (M3.2) → 291 (M3.7) → 330 (M3.3) → 356 (M3.1) → 374 (M3.6) → 399 (M3.5) → **424 (M3.4)**
 
 ---
 
-## 2. 执行顺序理由（顶层核查决议）
+## 2. v5 设计文档 PART F Milestone 3 覆盖矩阵
 
-```
-M3.0 (共享基础设施 — 预备)
-  ↓
-M3.2 (Mirror — 最高频用户工具)
-  ↓
-M3.7 → M3.3 (关键路径：aliasAttr 锁 JSON schema → JSON IO)
-  ↓
-M3.1 (Pose Pruner)
-  ↓
-M3.6 (自动中性样本)
-  ↓
-M3.5 (Pose Profiler — debug 工具)
-  ↓
-M3.4 (Live Edit — 复杂度最高 + 优先级最低)
-```
+| 设计文档 PART F.M3.x | 铁律 | 子任务 | 状态 |
+|---|---|---|---|
+| **M3.1 Pose Pruner** | B8 + B12 | M3.1 | ✅ |
+| **M3.2 Mirror Tool** | B13 | M3.2 + spillover §1 | ✅ |
+| **M3.3 JSON Import/Export** | B15 | M3.3 + spillover §2 | ✅ |
+| **M3.4 Live Edit Mode** | B11 | M3.4（algo；集成推 M1.5）| ✅ |
+| **M3.5 Pose Profiler + 拆分建议** | B7 | M3.5 + spillover §3 | ✅ |
+| **M3.6 自动中性样本** | E.9 | M3.6 | ✅ |
+| **M3.7 aliasAttr 自动命名** | E.2 | M3.7 | ✅ |
 
-**理由汇总**：
-
-- **M3.0 first**：基础设施预备，所有后续子任务复用
-- **M3.2 second**：左右对称 rig 是 TD 每日必备工具；缺失时手工复制粘贴每条 pose 极度繁琐
-- **M3.7 → M3.3 关键路径**：JSON schema 用 alias 名 vs 数字索引会改变文件格式；M3.3 之前必须 M3.7 完工
-- **M3.1 / M3.6 / M3.5** 中频工具按用户感知排序
-- **M3.4 末位**：scriptJob 监听复杂 + 大部分用户已习惯非 live 工作流；性价比最差
+铁律 B7 / B8 / B11 / B12 / B13 / B15 + E.2 / E.9 全部交付。
 
 ---
 
-## 3. 跨子任务契约（M3.0 锁定）
+## 3. M3.0-spillover 完整 API 索引
 
-### 3.1 — `action_id` 注册表
+§1 / §2 / §3 三章节构成 M3 全程的 UI 扩展接口面，未来 milestone 的所有窗口扩展必须走这套 helper（直接修改 `_build_menu_bar` / `_build_ui` 是红线）。
 
-每个 M3.x 子任务在实现 confirm 流程时**必须**在此表登记：
-
-| action_id | Sub-task | Confirm 触发场景 |
-|---|---|---|
-| `(reset_confirms)` | M3.0 baseline | 无（reset 菜单本身就是 confirm 复位入口）|
-| `prune_poses` | M3.1（待登记）| Pose Pruner 删除批量 poses 前 |
-| `mirror_create` | M3.2 ✅ | Mirror 创建新目标节点前 |
-| `mirror_overwrite` | M3.2 ✅ | Mirror 目标已存在时覆盖前 |
-| `force_regenerate_aliases` | M3.7 ✅ | Force Regenerate Aliases（覆盖既有 user alias）前 |
-| `import_replace` | M3.3 ✅ | Import Replace 模式至少一节点 will_overwrite=True 前 |
-| `prune_poses` | M3.1 ✅ | Pose Pruner dry-run 后 execute 前 |
-| `add_neutral_with_existing` | M3.6 ✅ | 手动 Add Neutral Sample + pose[0] 已有用户 pose 时 |
-| `live_edit_enable` | M3.4（待登记，可选）| Live Edit Mode 首次启用提示 |
-
-**命名规则**：`snake_case`，全局唯一。Maya optionVar 名是 `RBFtools_skip_confirm_<action_id>`（addendum §M3.0.3 锁定）。
-
-### 3.2 — `SCHEMA_VERSION` 永久不变量
-
-- **当前值**：`"rbftools.v5.m3"`
-- **修改禁止**：任何 schema 演化必须**引入新版本字符串** + 多版本 reader（addendum §M3.0.2）
-- **三层守护**：
-  - Layer 1 — 源码注释（`core_json.py` 模块 docstring + `SCHEMA_VERSION` 行尾注释）
-  - Layer 2 — addendum §M3.0.2 Schema Version Immutability Contract
-  - Layer 3 — 永久测试 `tests/test_m3_0_infrastructure.py::T0_SchemaVersionImmutability::test_schema_version_unchanged_M3_0`（标注 `# PERMANENT GUARD — DO NOT REMOVE`）
-
-### 3.3 — 访问路径契约（M3.x → M3.0 基础设施）
-
-**路径 A（推荐 + 默认）**：经 `MainController`
+### §1 — Tools menu + pose-row right-click（M3.2 commit）
 
 ```python
-# Sub-task widget code:
-ctrl = self.controller  # the MainController instance
-
-# Confirm prompt
-proceed = ctrl.ask_confirm(
-    title=tr("title_xxx"),
-    summary=tr("summary_xxx"),
-    preview_text=preview_str,
-    action_id="xxx",     # snake_case, register in §3.1 above
-)
-if not proceed:
-    return
-
-# Progress feedback
-prog = ctrl.progress()
-if prog:
-    prog.begin(tr("status_xxx_starting"))
-    # ... work loop ...
-    prog.step(i, total, tr("status_xxx_step"))
-    prog.end(tr("status_xxx_done"))
+RBFToolsWindow.add_tools_action(label_key, callback) -> QAction
+_PoseEditorPanel.add_pose_row_action(label_key, callback, danger=False)
 ```
 
-**路径 B（不推荐）**：直接 import widget，仅当工具是"独立 utility 而非 sub-task widget"时使用，且必须在子任务 addendum 论证。
+消费者：M3.2 mirror / M3.3 alias regen / M3.5 profile-to-script-editor / M3.6 neutral / M3.7 force regen / M3.1 prune (Tools menu)；M3.1 row-remove / M3.2 row-mirror（pose-row）。
 
-### 3.4 — 单子任务规模上限
-
-`≤ 800 行生产代码`（不计测试 / addendum）。超过则拆 a/b。M3.0 实测 ~520 行，M3.x 预算 ~700-800。
-
----
-
-## 4. M3.x → M3.0 标准复用模板
+### §2 — File menu（M3.3 commit）
 
 ```python
-# Step 1: confirm prompt (when about to do something destructive)
-preview = "\n".join(
-    "Pose [{}]: {}".format(p.idx, reason)
-    for p, reason in items_to_remove
-)
-if not self._ctrl.ask_confirm(
-    title=tr("title_prune_poses"),
-    summary=tr("summary_prune_poses").format(count=len(items_to_remove)),
-    preview_text=preview,
-    action_id="prune_poses",   # → RBFtools_skip_confirm_prune_poses
-):
-    return
-
-# Step 2: progress feedback
-prog = self._ctrl.progress()
-if prog:
-    prog.begin(tr("status_prune_starting"))
-for i, (p, _r) in enumerate(items_to_remove):
-    if prog:
-        prog.step(i + 1, len(items_to_remove),
-                  tr("status_prune_step").format(idx=p.idx))
-    self._ctrl.delete_pose_at(p.idx)
-if prog:
-    prog.end(tr("status_prune_done"))
-
-# Step 3: JSON I/O (M3.3 export example)
-from RBFtools import core_json
-core_json.atomic_write_json(path, {
-    "schema_version": core_json.SCHEMA_VERSION,
-    "node": node_name,
-    # ... payload ...
-})
-data = core_json.read_json_with_schema_check(path)   # raises SchemaVersionError on mismatch
-
-# Step 4: rig role selection (utility — "show me the driver")
-from RBFtools import core
-core.select_rig_for_node(self._ctrl.current_node(), "driver")
+RBFToolsWindow.add_file_action(label_key, callback) -> QAction
 ```
 
-每 M3.x 子任务在自己的 addendum 里记录"使用了哪些 M3.0 helper"以便 review 追溯。
+消费者：M3.3 import / export-selected / export-all（3 entries）。M3 全程唯一 File 菜单消费者；M5 跨场景 import 工具是后续候选。
+
+### §3 — Per-node Tools panel（M3.5 commit）
+
+```python
+RBFToolsWindow.add_tools_panel_widget(widget_id, widget) -> QWidget
+RBFToolsWindow.remove_tools_panel_widget(widget_id) -> bool
+```
+
+ToolsSection collapsible **懒创建于首次 add**，**一旦创建持久存在**（T_TOOLS_SECTION_PERSISTS PERMANENT）。重复 widget_id 触发 RuntimeError（不静默覆盖）。
+
+消费者：M3.5 ProfileWidget（"profile_report"）/ M3.4 LiveEditWidget（"live_edit_toggle"）。M3.4 验证记录确认 forward-compat 契约成立 —— 第二消费者零 API 修改。
 
 ---
 
-## 5. UI 入口矩阵（顶层决议）
+## 4. action_id 注册表（完整版）
 
-| 工具 | 主入口 | 副入口 |
+M3.0 path A `controller.ask_confirm(action_id=...)` 全部消费者。optionVar 命名 `RBFtools_skip_confirm_<action_id>`，"Reset confirm dialogs" 菜单一键复位。
+
+| action_id | Sub-task | 触发场景 |
 |---|---|---|
-| M3.1 Pruner | `Tools → Prune Poses...` | 右键 pose 表 → `Remove this pose` |
-| M3.2 Mirror | `Tools → Mirror Node...` | 右键 pose 表 → `Mirror this pose` |
-| M3.3 IO | `File → Import...` / `File → Export...` | — |
-| M3.4 Live Edit | Tools 面板（新 collapsible）→ Toggle | — |
-| M3.5 Profiler | `Tools → Analyze Node` | — |
-| M3.6 自动中性样本 | Tools 面板 → "Add Neutral Samples" 按钮 | — |
-| M3.7 aliasAttr | （隐式后台，M3.3 内部调用） | — |
+| `mirror_create` | M3.2 | Mirror 创建新目标节点前 |
+| `mirror_overwrite` | M3.2 | Mirror 目标已存在覆盖前 |
+| `force_regenerate_aliases` | M3.7 | Force Regenerate Aliases（覆盖 user alias）前 |
+| `import_replace` | M3.3 | Import Replace 模式至少一节点 will_overwrite=True 前 |
+| `prune_poses` | M3.1 | Pose Pruner dry-run 后 execute 前 |
+| `add_neutral_with_existing` | M3.6 | 手动 Add Neutral Sample + pose[0] 已有用户 pose |
 
-**新增 UI 顶层结构（M3.0 已落）**：
+**6 个 confirm 入口** 覆盖所有 M3 破坏性操作。读取-only 工具（M3.5 Profiler、M3.7 regenerate non-force、M3.6 auto-create-time）**不**走 confirm。
 
-```
-RBFToolsWindow (QMainWindow)
-├── menuBar()                        ← M3.0 ✅
-│   ├── File: (M3.3 add Import / Export)
-│   ├── Edit: (预留)
-│   ├── Tools: Reset confirm dialogs ✅ (M3.0 baseline)
-│   │          + (M3.1 add Prune Poses)
-│   │          + (M3.2 add Mirror Node)
-│   │          + (M3.5 add Analyze Node)
-│   └── Help: (预留)
-├── NodeSelector (M2.4 之前)
-├── Sections (M2.4 之前 + M3 新增)
-│   ├── General / VectorAngle / RBFSection / PoseEditor (M2.4)
-│   └── ToolsSection (M3.4 / M3.6 add)
-└── StatusBar (M2.4 之前 + M3.0 progress controller wrapper) ✅
-```
+**5 次 path A 真实消费者**（按时间顺序）：M3.2 (1st) → M3.7 (2nd, force) → M3.3 (3rd) → M3.1 (4th) → M3.6 (5th)。M3.5 是 read-only 例外（不消费 path A）。M3.4 同样不消费（toggle 是 cheap 操作）。
 
 ---
 
-## 6. 测试范式
+## 5. Permanent Guards 完整清单（"宪法层" 14 条）
 
-**沿用 M1/M2 纯 mock + 算法层测试范式**（顶层决议 D①）：
+项目"宪法层"——任何 refactor 都受其约束。Source-text scan 守护方式：先剥 docstring + 注释再扫禁用词。
 
-- 每个 M3.x 工具的算法层（70%-85% 纯函数化）继续走 mock 测试
-- 场景操作部分（`cmds.setAttr` / 节点创建 / scriptJob）推迟到 **M1.5 mayapy headless 集成测试**
-- 不引入第三方 testing harness（如 `mayatest`）
+| # | Guard | 子任务 | 守护内容 |
+|---|---|---|---|
+| 1 | `T0` (test_schema_version_unchanged_M3_0) | M3.0 | `core_json.SCHEMA_VERSION = "rbftools.v5.m3"` |
+| 2 | `T_MANAGED_ALIAS_DETECT` | M3.7 | `is_rbftools_managed_alias` 边界（in_/out_/quat sibling）|
+| 3 | `T1b` (bijection) | M3.3 | `_ATTR_NAME_TO_JSON_KEY` 双射 |
+| 4 | `T_M3_3_SCHEMA_FIELDS` | M3.3 | `EXPECTED_NODE_DICT_KEYS` / `EXPECTED_SETTINGS_KEYS` 冻结 |
+| 5 | `T16` (meta read-only) | M3.3 | `dict_to_node` / `dry_run` 体内不读 `meta` |
+| 6 | `T_FLOAT_ROUND_TRIP` | M3.3 | `dump(load(dump(d)))` byte-stable |
+| 7 | `T_QUAT_GROUP_SHIFT` (7 sub) | M3.1 | `shift_quat_starts` 边界 |
+| 8 | `T_ANALYSE_READ_ONLY` | M3.1 | `core_prune.analyse_node` 体内 0 mutation |
+| 9 | `T_NEUTRAL_QUAT_W` (3 sub) | M3.6 | quat-leader W=1 强制 |
+| 10 | `T_PROFILE_READ_ONLY` | M3.5 | `core_profile.profile_node` 体内 0 mutation |
+| 11 | `T_CAVEAT_VISIBLE` (3 sub) | M3.5 | F1 / F2 / `_K_CHOL` caveat 显著 |
+| 12 | `T_TOOLS_SECTION_PERSISTS` | M3.5 | `remove_tools_panel_widget` 不销毁 section |
+| 13 | `T_LIVE_NO_DRIVEN_LISTEN` | M3.4 | `core_live` 体内 0 命中 driven 关键字 |
+| 14 | `T_THROTTLE_TIME_INJECTION` | M3.4 | `core_live` 体内 0 命中 time.time() / monotonic / datetime |
 
-**例外**：M3.4 Live Edit Mode 仅 30% 纯函数化，子任务核查时单独决定 algo 部分的 spillover 边界。
+未来 milestone 新增 guard 必须遵循同模式：纯函数可测、source-text scan、明文 PERMANENT 标注。
 
 ---
 
-## 7. Bug-hunt 清单（M2 遗留 + M3 新增）
+## 6. 项目文化沉淀（M3 期间确立的 4 个方法论）
 
-| # | 来源 | 描述 |
+### 6.1 复用 > 新建
+
+M3.1 / M3.6 / M3.5 / M3.4 **四连续 0 行 core.py 改动**：
+
+| Sub-task | 复用的 core API |
+|---|---|
+| M3.1 Pruner | `apply_poses` 主路径 + `write_quat_group_starts` |
+| M3.6 Neutral | `_write_pose_to_node` / `clear_node_data` / `read_quat_group_starts` |
+| M3.5 Profiler | `core_prune.analyse_node` + 既有 read helpers |
+| M3.4 Live Edit | `controller.update_pose` thin wrapper |
+
+每个子任务的 core.py 改动量都通过现状核查的 F-checks 提前验证可复用性。新基础设施仅在**真正缺失**时引入（如 M3.7 alias 系统、M3.3 JSON IO、M3.0 共享基础设施）。
+
+### 6.2 Verify-before-design
+
+**5 次连续使用**：
+
+| 子任务 | F-checks 数量 | 关键发现 |
 |---|---|---|
-| BH-1 | M2.2 | T12 near-degenerate λ ratio：构造 λ₁/λ₂ < 1.1 的 4×4 SPD，验证 `qwaDegenerateWarningIssued` 路径 + identity fallback |
+| M3.7 commit (retrospective) | — | reverse-then-reapply 取代 git add -p |
+| M3.1 | F1-F4 | helper 行为预核查 |
+| M3.6 | F0 | 直读 CMT 源码发现"3-pose"是误读 |
+| M3.5 | F1-F4 | `lastSolveMethod` 不可读 + 无 benchmark |
+| M3.4 | F1-F4 | scriptJob 项目首次 + active row accessor 缺失 |
 
-M3 进行中如发现新 bug-hunt 项，append 到此表。
+通用规则：任何子任务涉及"参考第三方实现"或"依赖现有 API 行为"时，**先核查事实**再做设计。每个 F-check 直接驱动决议项的修订或确认（最高价值形态：M3.5 / M3.6）。
+
+### 6.3 Reverse-then-Reapply（commit 拆分模板）
+
+工作树多子任务混杂时（M3.7 commit retrospective，executor commit `c7e07f2`）：
+
+```
+1. Save M3.x-only NEW files into a holdout directory
+2. Edit-revert M3.x changes from shared files → M3.{x-1}-only state
+3. Verify M3.{x-1} test count passes
+4. Stage M3.{x-1} files + commit + push
+5. Restore holdout files
+6. Edit-reapply M3.x changes (operation log = forward patch)
+7. Verify M3.x test count passes
+8. Stage + commit + push M3.x
+```
+
+deterministic（无 git add -p 交互），idempotent，留下干净 per-sub-task commit 边界。详见 addendum §M3.0 appendix。
+
+### 6.4 0 C++ 红线绝对优先
+
+M3 全程**0 行 C++ 改动**。M3.5 验证：`lastSolveMethod` 是诊断字段价值高，但暴露需要 C++ MObject 改动 → 红线绝对优先 → Profile 仅显示 `solver_method` 配置值 + caveat。**开了这个口子整个 M3 系列零 C++ 契约就崩**。
+
+未来 milestone（M4 附加 solver / M4.5 Eigen / M5 性能）允许 C++ 改动，但 M3 的红线锁定证明了 Python-only 路径能交付完整工作流工具。
 
 ---
 
-## 8. Roadmap 总览（更新到 M3.0）
+## 7. 测试矩阵（424 条全分类）
+
+| Milestone | 测试文件 | 子测试数 | 关键守护 |
+|---|---|---|---|
+| M1.1 | `test_m1_1_distance.py` | 14 | twist wrap、quat 距离规约 |
+| M1.2 | `test_m1_2_baseline.py` | 18 | scale 通道保护、dirty tracker |
+| M1.3 | `test_m1_3_clamp.py` | 21 | bounds + inflation + Matrix twist 跳过 |
+| M1.4 | `test_m1_4_solver.py` | 23 | Cholesky、绝对 λ、SPD 退化 |
+| M2.1a | `test_m2_1a_encoding.py` | 26 | Raw/Quat/ExpMap、Bug 2、安全网 |
+| M2.1b | `test_m2_1b_encoding.py` | 28 | BendRoll、SwingTwist、Swing-Twist 分解 |
+| M2.2 | `test_m2_2_qwa.py` | 23 | 交换律、Power Iteration、PSD guard |
+| M2.3 | `test_m2_3_local_transform.py` | 15 | t/q/s 分解、shear 处理 |
+| M2.4a | `test_m2_4a_*.py` | 19 | transactional multi-attr、widget API、i18n key |
+| M2.4b | `test_m2_4b_widgets.py` | 23 | 基类 API、signal 契约、set_values 零 emit |
+| M3.0 | `test_m3_0_infrastructure.py` | 18 | T0 schema_version + path A |
+| M3.0-spillover | `test_m3_0_spillover.py` | 3 | spillover §1 守护 |
+| M3.2 | `test_m3_2_mirror.py` | 28 | mirror 数学 + naming + T_ROLLBACK |
+| M3.7 | `test_m3_7_alias.py` | 31 | T_MANAGED_ALIAS_DETECT + alias 命名 |
+| M3.3 | `test_m3_3_jsonio.py` | 39 | T1b + T_M3_3_SCHEMA_FIELDS + T16 + T_FLOAT_ROUND_TRIP |
+| M3.1 | `test_m3_1_prune.py` | 26 | T_QUAT_GROUP_SHIFT + T_ANALYSE_READ_ONLY |
+| M3.6 | `test_m3_6_neutral.py` | 18 | T_NEUTRAL_QUAT_W |
+| M3.5 | `test_m3_5_profile.py` | 25 | T_PROFILE_READ_ONLY + T_CAVEAT_VISIBLE + T_TOOLS_SECTION_PERSISTS |
+| M3.4 | `test_m3_4_live_edit.py` | 25 | T_LIVE_NO_DRIVEN_LISTEN + T_THROTTLE_TIME_INJECTION |
+| 永久守护 | `test_i18n_no_hardcoded_strings.py` | 1 | 0 容忍硬编码 |
+
+**总计：424 / 424**（M3 单 milestone 内贡献 213 条 = 18+3+28+31+39+26+18+25+25）。
+
+---
+
+## 8. 后续 Milestone 路径（roadmap 推进决策）
+
+Milestone 3 主体收官，roadmap 进入下一阶段决策。候选下一站：
+
+| Milestone | 优先级 | 描述 |
+|---|---|---|
+| **M1.5** | 中 | mayapy headless C++ 集成测试（环境就位时一次性覆盖 M1.1–M2.3 的 C++ 路径 + M3.4 scriptJob 真实触发回归）|
+| **M4** | 中 | 附加 solver（Jiggle / Aim Constraint / `solverType` 分支） |
+| **M4.5** | 中 | Eigen + 完整四层 fallback chain（独立 milestone）|
+| **M2.5** | 低 | pose 分字段缓存（性能优化，与 M4/M5 并行）|
+| **M5** | 低 | 性能与引擎对接（BRMatrix 对称存储 + SIMD / `solverStats` / 每目标 sigma / UE5 runtime / 245 补助骨 benchmark）|
+
+**M1.5 的 M3.4 spillover** 已在 addendum §M3.4.7 锁定 scope —— `core_live.py` pure-function API 是 M1.5 的 forward-compat 接口，不会变更。
+
+---
+
+## 9. Roadmap 总览
 
 ```
 M1 数值正确性 ✅ (76 测试)
-M2 输入/输出编码闭环 ✅ (211 测试，主体收官)
-  └── M2.5 pose 分字段缓存 (forward-compat 锁定，可任意插入)
-M3 工作流工具 ← 进行中
-  ├── M3.0 共享基础设施 ✅ (229 测试)
-  ├── M3.2 Mirror ✅ (260 测试)
-  ├── M3.7 aliasAttr ✅ (291 测试)
-  ├── M3.3 JSON IO ✅ (330 测试)
-  ├── M3.1 Pose Pruner ✅ (356 测试)
-  ├── M3.6 Auto neutral sample ✅ (374 测试)
-  ├── M3.5 Pose Profiler ✅ (399 测试)
-  ├── M3.4 Live Edit Mode ← 下一站
-  ├── M3.1 Pose Pruner
-  ├── M3.6 自动中性样本
-  ├── M3.5 Pose Profiler
-  └── M3.4 Live Edit Mode
-M4 附加 Solver
-M4.5 Eigen + 四层 fallback
-M5 性能与引擎对接
-M1.5 mayapy headless C++ 集成测试 (环境就位时)
+M2 输入/输出编码闭环 ✅ (211 测试)
+M3 工作流工具 ✅ (424 测试)  ← 本节
+  ├── M3.0 共享基础设施 ✅
+  ├── M3.0-spillover §1 ✅ (M3.2 commit, Tools menu + pose-row)
+  ├── M3.0-spillover §2 ✅ (M3.3 commit, File menu)
+  ├── M3.0-spillover §3 ✅ (M3.5 commit, ToolsSection panel)
+  ├── M3.2 Mirror ✅
+  ├── M3.7 aliasAttr ✅ (M3.3 unblocker)
+  ├── M3.3 JSON IO ✅
+  ├── M3.1 Pose Pruner ✅
+  ├── M3.6 Auto neutral sample ✅
+  ├── M3.5 Pose Profiler ✅
+  └── M3.4 Live Edit Mode ✅ (algo; M1.5 spillover for integration)
+
+M1.5 mayapy headless C++ 集成测试 (pending)
+  + M3.4 scriptJob 真实触发回归
+
+M4 附加 Solver (pending)
+M4.5 Eigen + 四层 fallback (pending)
+M2.5 pose 分字段缓存 (pending, low priority)
+M5 性能与引擎对接 (pending)
 ```
 
 ---
 
-## 9. Key References
+## 10. Key References
 
 - **设计方案**：[`RBFtools_v5_设计方案.md`](RBFtools_v5_设计方案.md) PART F Milestone 3
-- **决议日志**：[`RBFtools_v5_addendum_20260424.md`](RBFtools_v5_addendum_20260424.md) §M3.0（+ future §M3.x）
-- **Milestone 2 入口**：[`RBFtools_v5_milestone_2_summary.md`](RBFtools_v5_milestone_2_summary.md)
-- **顶层核查报告**：本会话内（commit `74ed12c` 之前的 conversation）
+- **决议日志**：[`RBFtools_v5_addendum_20260424.md`](RBFtools_v5_addendum_20260424.md) §M3.0 / §M3.0-spillover §1/§2/§3 / §M3.1 / §M3.2 / §M3.3 / §M3.4 / §M3.5 / §M3.6 / §M3.7
+- **Milestone 1 / 2 入口**：[`RBFtools_v5_milestone_2_summary.md`](RBFtools_v5_milestone_2_summary.md)
 
 ---
 
-**本文档结束**。M3.x 执行者打开此文件即可对齐当前进度 + 已锁定契约 + 复用模式，无需回溯 commit 历史。每个 M3.x 子任务完工后**更新本文档第 1 节进度矩阵 + 第 3.1 节 action_id 注册表**。
+**本文档结束**。Milestone 3 的 7 个子任务（含 M3.0 基础设施）+ 3 个 spillover 章节 + 14 条 PERMANENT GUARD + 4 个项目文化沉淀方法论构成了 v5 工作流工具的完整交付。
+
+后续 milestone 的执行者请把本文档作为 M3 全部成果的入口；最重要的是吸收**复用 > 新建**、**verify-before-design**、**reverse-then-reapply**、**0 C++ 红线绝对优先**这 4 个在 M3 期间确立的方法论 —— 它们将驱动 M1.5 / M4 / M4.5 / M5 的稳健交付。

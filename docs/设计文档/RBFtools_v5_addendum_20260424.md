@@ -2547,6 +2547,22 @@ def remove_tools_panel_widget(self, widget_id):
 3. **重复 widget_id → RuntimeError 拒绝**（H.2 防 M3.4 状态泄漏）
 4. M3.5 是首个真实消费者：`add_tools_panel_widget("profile_report", ProfileWidget(...))`
 
+### M3.5.6.M3.4-validation — Spillover §3 forward-compat contract validated
+
+**追加（M3.4 commit 末尾）**：M3.4 实施时实测 §3 API（`add_tools_panel_widget` / `remove_tools_panel_widget`）作为第二真实消费者：
+
+```python
+# M3.4 LiveEditWidget registration:
+self.add_tools_panel_widget("live_edit_toggle", LiveEditWidget(...))
+```
+
+- ✅ Lazy creation 行为正确（M3.5 已建 ToolsSection；M3.4 仅 add child）
+- ✅ widget_id `"live_edit_toggle"` 不与 `"profile_report"` 冲突（H.2 RuntimeError 防护未触发，正确）
+- ✅ M3.4 不调 `remove_tools_panel_widget`（Live Edit 永久存在）—— remove API 在 M3.4 不消费但保留为 forward-compat
+- ✅ **M3.5 forward-compat 契约成立**：M3.4 实施零 §3 API 修改
+
+签名锁定（M5 monitoring 等后续子任务消费时）—— **`add_tools_panel_widget` / `remove_tools_panel_widget` 签名永远不变**，新功能用新方法名扩展（如 `set_tools_panel_widget_visible`）。
+
 ### M3.5.6 — M3.4 Forward-Compat Contract
 
 `add_tools_panel_widget` / `remove_tools_panel_widget` 签名锁定。M3.4 Live Edit 落地不再变更：
@@ -2633,6 +2649,242 @@ self.add_tools_panel_widget("live_edit_toggle", self._live_edit_cb)
 - ✅ **0 行 core.py 改动**（M3.1 / M3.6 / M3.5 三连续克制）
 - ✅ **0 行 C++ 改动**（F1 不暴露 lastSolveMethod）
 - ✅ M3.4 forward-compat：`add_tools_panel_widget` / `remove_tools_panel_widget` 签名锁定
+
+---
+
+## §M3.4 — Live Edit Mode
+
+Milestone 3 收官子任务。Algo / 集成层比例 ~30/70 是 M3.x 系列纯函数比例最低的子任务——纯 algo 部分（throttle 状态机 + 生命周期决策）本子任务做，scriptJob 真实触发推 **M1.5 mayapy 集成测试**。**0 行 C++ + 0 行 core.py 改动**——M3.1 / M3.6 / M3.5 / **M3.4 四连**。
+
+### M3.4.F1-F4 — Verify-before-design 第 5 次使用
+
+| # | 验证项 | 结论 | 决议影响 |
+|---|---|---|---|
+| **F1** | `cmds.scriptJob` 项目里现有用法 | ❌ 无 —— M3.4 首次引入 | 算法层 mock 测试 + 真实集成推 M1.5 |
+| **F2** | `controller.update_pose` 是否复用 | ✅ —— [controller.py:969](modules/RBFtools/scripts/RBFtools/controller.py:969) 已存在 | (D.2) Live Edit `live_edit_apply_inputs` 是 thin wrapper，0 新接口 |
+| **F3** | scriptJob `parent=` 用的窗口对象名 | ✅ —— `constants.WINDOW_OBJECT = "RBFToolsMainWindow"` | scriptJob 自动随窗口关闭 cleanup |
+| **F4** | "current pose row" 是否已有 accessor | ❌ —— controller / model 都没有 | (D.2) widget 内通过 `selectionModel().currentChanged` 独立跟踪 |
+
+**F4 是真正驱动决议的发现**——其他 3 个是确认现成路径可用。比例 25% F 真正驱动 vs 75% F 确认复用 —— 反映 M3.4 是 M3 系列最依赖现有基础设施的子任务，恰好契合"复用 > 新建"四连。
+
+### M3.4.1 — 决议日志（9 项 + 2 加固 + (D) forward-compat caveat）
+
+| # | 分叉 | 选项 | 选定理由 |
+|---|---|---|---|
+| (A) | 监听对象 | **A.1** 仅 driver | 红线锁死，避免与 RBF compute 死循环 |
+| (B) | Throttle 策略 | **B.3** hybrid leading+trailing | 响应性 + 终态准确 |
+| (C) | scriptJob 粒度 | **C.2** per-driver-attr | 精确监听 |
+| (D) | active row 跟踪 | **D.2** widget 内独立 | MVC 风格一致；F4 触发分叉 |
+| (E) | 空 driver_attrs 行为 | **E.1** 拒绝 + warning | fail fast |
+| (F) | UI 入口 | **F.1** 仅 ToolsSection | toggle 是 per-node 状态 |
+| (G) | Toggle off flush | **G.1** 强制 flush pending | 不丢用户最后一次拖动 |
+| (H) | Throttle 时长 | **H.1** 100ms 写死 | M5 再考虑暴露 |
+| (I) | summary 文档处理 | **I.2** 重写为 M3 收官 summary | M3 主体收官值得整理 |
+| 加固 1 | T_LIVE_NO_DRIVEN_LISTEN | source-scan core_live.py | 防止误改加 driven 监听导致死循环 |
+| 加固 2 | T_THROTTLE_TIME_INJECTION | source-scan core_live.py | throttle 纯函数 time 注入可测 |
+| (D) caveat | controller 接口提升预留 | M5 monitoring 演化路径 | widget→controller 迁移直接可行 |
+
+### M3.4.2 — Throttle 状态机（hybrid leading+trailing）
+
+```python
+# core_live.py — pure functions; no maya.cmds; time injected by caller
+
+ThrottleState:
+    last_emit_ts          # 0.0 = "no emit yet"
+    pending_event_ts      # None or float — set when in-window event arrives
+    throttle_sec          # 0.1 by default
+
+should_emit_now(state, now_ts) -> (emit_now, schedule_trailing)
+    ├── if last_emit_ts == 0 OR (now - last) >= throttle_sec
+    │       → leading emit; advance state.last_emit_ts
+    │       return (True, False)
+    └── else
+            → record state.pending_event_ts = now
+            return (False, True)        # caller starts trailing timer
+
+trailing_due(state, now_ts) -> bool
+    pending_event_ts is not None AND (now - last_emit_ts) >= throttle_sec
+
+mark_emitted(state, now_ts)
+    state.last_emit_ts = now_ts
+    state.pending_event_ts = None
+
+flush_pending(state, now_ts) -> bool
+    return pending_event_ts is not None    # caller fires + reset
+```
+
+### M3.4.3 — scriptJob 生命周期清单
+
+| 时点 | 动作 | 安全网 |
+|---|---|---|
+| toggle on（driver_attrs 非空） | per-attr `cmds.scriptJob(attributeChange=..., parent=WINDOW_OBJECT)` | parent= 自动 cleanup |
+| toggle on（driver_attrs 空） | warning + 不注册 + 复位 checkbox（E.1）| `_fail_to_idle` blockSignals 防回弹 |
+| toggle off | flush_pending → 逐个 kill + clear list | try/except 包裹 kill |
+| node change（toggle on 期间） | `planned_transition_on_node_change` 决策 → flush + kill + re-register | `editorLoaded` signal 触发 |
+| pose row 切换 | active_row 更新；jobs 不动 | `selectionModel().currentChanged` |
+| window close | Maya 自动 cleanup（parent=）| try/except 吃 dead-id |
+| Maya scene new | scriptJob 自动失效 | next callback fail 被吞 |
+
+### M3.4.4 — Driver-Only 红线（T_LIVE_NO_DRIVEN_LISTEN PERMANENT）
+
+```
+Live Edit MUST NEVER listen on driven_node attributes.
+Listening on driven would create a feedback loop:
+  RBF compute writes driven attr
+   → attributeChange triggers throttle
+   → throttle re-writes inputs
+   → compute again
+   → ∞ loop / infinite redraw
+
+Permanent guard T_LIVE_NO_DRIVEN_LISTEN source-scans
+core_live.py executable body (docstrings + comments stripped)
+for any leakage of driven-side identifiers:
+  read_driven_info / driven_node / driven_attrs
+```
+
+T_LIVE_NO_DRIVEN_LISTEN 是**第 13 条 PERMANENT GUARD**。
+
+### M3.4.5 — Time-Injection 纯函数契约（T_THROTTLE_TIME_INJECTION PERMANENT）
+
+```
+Throttle pure functions accept now_ts as a parameter; they
+MUST NOT call time.time() / time.monotonic() / datetime.now()
+directly. Caller (LiveEditWidget) is the only real-time source.
+
+Permanent guard T_THROTTLE_TIME_INJECTION source-scans
+core_live.py executable body for those forbidden calls.
+
+Rationale:
+  - Tests can advance "time" deterministically via injected
+    floats (no time.sleep, no freezegun, no mock.patch on time)
+  - Subtle ordering bugs from time drift cannot accumulate
+  - LiveEditWidget reads time.monotonic() at the Qt-event
+    boundary — that's the canonical real-time source.
+```
+
+T_THROTTLE_TIME_INJECTION 是**第 14 条 PERMANENT GUARD**。
+
+### M3.4.6 — (D) Forward-Compat for active-row promotion
+
+```
+M3.4 active-row tracking lives inside LiveEditWidget (D.2):
+the widget subscribes to the pose table's QSelectionModel
+currentChanged signal directly.
+
+If a future sub-task (e.g. M5 performance monitoring) needs
+controller-level access to "currently active pose row", the
+extraction is straightforward:
+  1. Promote the QSelectionModel listener from LiveEditWidget
+     to MainController as currentPoseRow property +
+     currentPoseRowChanged signal.
+  2. LiveEditWidget switches its subscription target from the
+     view's selection model to controller.currentPoseRowChanged.
+  3. No core.py changes; no public API removal.
+
+M3.4's design does NOT preclude this; it merely defers it.
+Keeping active-row tracking inside the widget today preserves
+the M3 "复用 > 新建" minimalism (no controller surface area
+expanded for a single consumer).
+```
+
+### M3.4.7 — M1.5 Spillover Scope（**锁定**）
+
+```
+M3.4 ships:
+  - core_live.py pure throttle state machine
+  - LiveEditController orchestrating cmds.scriptJob lifecycle
+    via mocked-testable code paths (T1-T9 cover state machine,
+    can_toggle_on/off, planned_transition_on_node_change)
+  - Tools panel toggle widget (spillover §3 second consumer)
+  - 100% mock test coverage of pure functions + state transitions
+
+M1.5 mayapy integration tests will close the loop on:
+  - cmds.scriptJob attributeChange callback actually firing on
+    Maya plug change
+  - parent=WINDOW_OBJECT auto-cleanup on window close
+  - throttle behaviour under real viewport drag (artist hand on
+    manipulator at 60 FPS)
+  - end-to-end: viewport drag → throttle → update_pose → model
+    refresh → table view repaint
+
+Forward-compat contract:
+  core_live.py pure-function API (ThrottleState /
+  should_emit_now / trailing_due / mark_emitted / flush_pending /
+  can_toggle_on / can_toggle_off /
+  planned_transition_on_node_change) is locked. M1.5 wraps
+  mayapy integration around the existing shape; never
+  re-implements logic that already lives in core_live.
+```
+
+### M3.4.8 — 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `core_live.py` | **新建** ~190 行（ThrottleState + 5 pure throttle helpers + LiveEditState + 3 lifecycle decisions + F1-F4 docstring + 双契约文档）|
+| `core.py` | **0 改动**（M3.1 / M3.6 / M3.5 / M3.4 四连零核心改动）|
+| `controller.py` | +`live_edit_apply_inputs` thin wrapper ~20 行 |
+| `ui/main_window.py` | +`add_tools_panel_widget("live_edit_toggle", ...)` + LiveEditWidget wiring ~7 行 |
+| `ui/widgets/live_edit_widget.py` | **新建** ~205 行（QCheckBox + status label + active row tracking + scriptJob orchestration + QTimer trailing tick）|
+| `ui/i18n.py` | +6 keys × 2 langs = 12 行 |
+| `tests/test_m3_4_live_edit.py` | **新建** ~395 行（14 测试类，**25 子测试**）|
+| `docs/.../addendum_20260424.md` | §M3.4 + M1.5 spillover + (D) forward-compat + §M3.5.6.M3.4-validation 追加 ~180 行 |
+| `docs/.../milestone_3_summary.md` | **重写为 M3 收官 summary** ~190 行（M2 模式扩充） |
+
+**总：~1200 行**（含测试 + addendum + summary 重写）；**生产代码 ~290 行 < 800**。
+
+### M3.4.9 — 测试矩阵（25 子测试）
+
+| T# | 名称 | 子测 |
+|---|---|---|
+| T1 | ThrottleState 默认 + reset | 2 |
+| T2 | should_emit_now 首事件 leading | 1 |
+| T3 | should_emit_now 窗内事件 defer | 1 |
+| T4 | should_emit_now 窗外事件 leading | 1 |
+| T5 | trailing_due / mark_emitted | 4 |
+| T6 | flush_pending | 2 |
+| T7 | can_toggle_on（IDLE+attrs / E.1 / LISTENING）| 3 |
+| T8 | can_toggle_off | 2 |
+| T9 | planned_transition_on_node_change 三分支 | 3 |
+| T10 | controller.live_edit_apply_inputs guards | 2 |
+| T11 | ToolsSection wiring（spillover §3 第二消费者）| 1 |
+| T12 | i18n 6 keys EN/CN parity | 1 |
+| **T_LIVE_NO_DRIVEN_LISTEN** | **PERMANENT** — core_live 不含 driven 关键字 | 1 |
+| **T_THROTTLE_TIME_INJECTION** | **PERMANENT** — core_live 不含 time 直接调用 | 1 |
+
+合计 **14 测试类，25 子测试**。**总测试数：399 + 25 = 424 / 424**。
+
+### M3.4.10 — 零回归
+
+- `core.py` **0 改动** —— **第 4 次连续零核心改动**（M3.1 / M3.6 / M3.5 / M3.4 四连）
+- spillover §3 第二真实消费者无 API 修改需求 —— M3.5 forward-compat 契约成立
+- ProfileWidget / LiveEditWidget 共存于 ToolsSection（懒创建 + 持久存在 T_TOOLS_SECTION_PERSISTS 守护）
+- `controller.editorLoaded` signal 既有，新增 LiveEditWidget 订阅不破坏 ProfileWidget 订阅
+- 全量回归：399 + 25 = **424 / 424** 通过
+
+### M3.4.11 — Non-goals
+
+- ❌ 监听 driven_node（红线 — 死循环风险）
+- ❌ 自动新增 pose row（仅 update 当前 active row）
+- ❌ Live Edit 触发 RBF 重训（仅 update model；用户手动 Apply 触发训练）
+- ❌ 多节点同时 Live Edit（仅当前 RBFtools 节点）
+- ❌ Throttle 时长用户暴露（默认 100ms 写死，M5 再考虑暴露）
+- ❌ 真实 mayapy 集成测试（推 M1.5）
+- ❌ scriptJob 真实触发回归（推 M1.5）
+- ❌ 单 attr 监听粒度选择（per-attr 写死，all wired drivers）
+- ❌ active row 提升到 controller（M5 监控触发时再做）
+
+### M3.4.12 — 红线确认
+
+- ✅ 沿用 M3 / M3.0 / M3.2 / M3.7 / M3.3 / M3.1 / M3.6 / M3.5 全部红线
+- ✅ Live Edit **仅 driver → inputs**（**T_LIVE_NO_DRIVEN_LISTEN** PERMANENT）
+- ✅ scriptJob **必须** `parent=WINDOW_OBJECT` + 显式 kill 双重清理
+- ✅ Throttle **必须**纯函数可测（**T_THROTTLE_TIME_INJECTION** PERMANENT）
+- ✅ Toggle off 必须 flush pending（不丢用户最后一次拖动）
+- ✅ **0 行 core.py 改动**（**M3.1 / M3.6 / M3.5 / M3.4 四连**）
+- ✅ **0 行 C++ 改动**（M3 全程零 C++）
+- ✅ scriptJob 真实集成测试推 M1.5（addendum §M3.4.7 明文锁定）
+- ✅ Spillover §3 第二消费者无 API 变更需求（§M3.5.6.M3.4-validation 验证记录）
+- ✅ (D) forward-compat 备注 active row 提升路径（§M3.4.6）
 
 ---
 
