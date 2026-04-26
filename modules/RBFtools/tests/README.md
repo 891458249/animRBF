@@ -29,13 +29,26 @@ python -m pytest modules/RBFtools/tests/ -v
 
 mayapy 下少量测试因依赖 mock 行为（`cmds.reset_mock()` / `mock.patch` on `cmds.*`）而 class-level `skipIf(_REAL_MAYA, ...)`。这是设计选择，**不是缺陷**——纯 Python 测试覆盖算法层；mayapy 测试覆盖集成层。
 
-### ⚠ mayapy `.mll` 限制（M1.5.1 Blocker Matrix 第 1 行）
+### ⚠ mayapy `.mll` 限制（M1.5.1 Blocker Matrix 第 1 行 — M1.5.1b 已 RESOLVED）
 
-mayapy 测试**当前不加载** `RBFtools.mll`：现有的 Maya 2022 build (`source/build/Release/RBFtools.mll`, dated 2026-04-07) 在 Maya 2025 mayapy 下 `cmds.loadPlugin` 时**致命崩溃**。任何依赖真实 RBFtools 节点的测试（`apply_poses` 流水线 / cache 字段读写 / mirror 真实回归 / JSON IO 真节点 round-trip）当前 **skip**，待 M1.5.1b（独立 C++ 子任务）重建 Maya 2025 兼容 `.mll` 后再启动。
+mayapy 测试**当前仍不加载** `RBFtools.mll`：M1.5.1b 已生成 Maya 2025 兼容 `.mll` (`modules/RBFtools/plug-ins/win64/2025/RBFtools.mll`)，但 `require_rbftools_plugin` fixture 仍保 always-skipTest 行为（**M1.5.3 锁** —— 启用是 M1.5.3 范畴）。任何依赖真实 RBFtools 节点的测试（`apply_poses` 流水线 / cache 字段读写 / mirror 真实回归 / JSON IO 真节点 round-trip）当前 **skip**，待 M1.5.3 启用 `require_rbftools_plugin` 后再启动。
 
-详见 addendum §M1.5.1.X Blocker Matrix。
+详见 addendum §M1.5.1.X Blocker Matrix（Row 1 RESOLVED）+ §M1.5.1b。
 
-`tests/_mayapy_fixtures.py:require_rbftools_plugin` 是 M1.5.1b 落点的 forward-compat stub —— 调用它当前总是 raise SkipTest 并指向 Blocker Matrix。
+`tests/_mayapy_fixtures.py:require_rbftools_plugin` 当前仍是 forward-compat stub —— 调用它仍 raise SkipTest（M1.5.3 范畴）。
+
+### ⚠ Maya 2022 用户 caveat（M1.5.1b 加固 7）
+
+`modules/RBFtools/plug-ins/win64/2022/RBFtools.mll` (126976 bytes, 2026-04-07) 时间戳早于 M2.5 commit (`c866604`)，**缺失** `poseSwingTwistCache` 等 5 个 cache 字段。Maya 2022 用户须本地用 2022 devkit 重 build 一次以获得 M2.5 schema：
+
+```bash
+cd source && cmake -G "Visual Studio 17 2022" -A x64 -B build_2022 \
+  -DMAYA_DEVKIT_PATH="C:/Program Files/Autodesk/Maya2022"
+cmake --build build_2022 --config Release
+# 然后 cp build_2022/Release/RBFtools.mll modules/RBFtools/plug-ins/win64/2022/
+```
+
+Maya 2025 用户直接载 `modules/RBFtools/plug-ins/win64/2025/RBFtools.mll`（M1.5.1b 交付物）即可。详见 addendum §M1.5.1b 顶部 caveat block。
 
 ### ⚠ Maya 版本兼容 caveat
 

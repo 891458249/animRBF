@@ -3446,7 +3446,7 @@ table by row to determine which blocker their work depends on.
 
 | Blocker | Discovered in | Blocks | Resolution sub-task | ETA hint |
 |---|---|---|---|---|
-| 2022 .mll incompatible with Maya 2025 | F1 (this sub-task) | M2.5b compute() consumer / M2.5 decompose Python↔C++ regression / `_K_*` benchmark replacement (M1.5.2) / B-class skip conversion (~15 classes) / M1.1-M2.4 byte-level C++ regression (M1.5.3) | **M1.5.1b** (independent C++ sub-task; CMakeLists 2025 adaptation + recompile + load verification) | Immediately after M1.5.1 push; user batches separately |
+| 2022 .mll incompatible with Maya 2025 | F1 (M1.5.1) | M2.5b compute() consumer / M2.5 decompose Python↔C++ regression / `_K_*` benchmark replacement (M1.5.2) / B-class skip conversion (~15 classes) / M1.1-M2.4 byte-level C++ regression (M1.5.3) | **M1.5.1b** (independent C++ sub-task; CMakeLists cosmetic adaptation + recompile + load verification) | **RESOLVED** in M1.5.1b — see §M1.5.1b below |
 | `maya.standalone` not re-entrant | F2 (this sub-task) | Any per-test or module-scoped `initialize/uninitialize` cycle | (RESOLVED in this sub-task: `_mayapy_fixtures.ensure_maya_standalone` session-scoped lazy-init pattern) | n/a — done |
 | scriptJob `attributeChange` does not fire under headless mayapy | F4 (this sub-task) | M3.4 spillover items 1/2/3 (real attributeChange / `parent=` cleanup / viewport drag throttle) | **M5 GUI Maya long-tail manual verification** | Long-deferred; not on M4 / M4.5 / M5-perf critical path. R3 forbids mock workaround in interim. |
 
@@ -3454,6 +3454,173 @@ Downstream sub-task contract: when a planning step decides "we
 need X", consult this table; if X is blocked, either tackle the
 resolution sub-task first or explicitly defer X with a Blocker
 Matrix row reference in its addendum entry.
+
+---
+
+## §M1.5.1b — .mll Rebuild for Maya 2025 (Blocker Matrix Row 1 RESOLVED)
+
+> **⚠️ Maya 2022 用户重要 caveat**（加固 7）：
+>
+> 当前 `modules/RBFtools/plug-ins/win64/2022/RBFtools.mll`（126976
+> bytes, 2026-04-07）时间戳早于 M2.5 commit (`c866604`)，**缺失**
+> `poseSwingTwistCache` 等 5 个 cache 字段。Maya 2022 用户须本地
+> 用 2022 devkit 重 build 一次以获得 M2.5 schema：
+>
+> ```
+> cd source && cmake -G "Visual Studio 17 2022" -A x64 -B build_2022 \
+>   -DMAYA_DEVKIT_PATH="C:/Program Files/Autodesk/Maya2022"
+> cmake --build build_2022 --config Release
+> # 然后 cp build_2022/Release/RBFtools.mll modules/RBFtools/plug-ins/win64/2022/
+> ```
+>
+> Maya 2025 用户直接载 `modules/RBFtools/plug-ins/win64/2025/RBFtools.mll`
+> （本子任务交付物）即可。`tests/README.md` 同载此 caveat（用户首入口）。
+
+### §M1.5.1b.0 — 子任务范畴
+
+Resolution of §M1.5.1.X Blocker Matrix Row 1（"2022 .mll
+incompatible with Maya 2025"）。M3 全程 enforced "0 C++ changes"
+红线在此首次 controlled-break，但 actual breach 极小：
+
+- **0 行 C++ source 改动**（`source/RBFtools.h` / `source/RBFtools.cpp`
+  / `source/BRMatrix.cpp` / `source/pluginMain.cpp` 全部不动）
+- **6 行 cosmetic CMakeLists.txt 注释**（line 4 / 6 / 8 / 12 / 13 / 39
+  —— 仅 "Maya 2022" → "Maya 2022/2025" 字面清理 + MSVC 工具链注释
+  对齐 build/CMakeCache 实证（v143 而非 v142））
+- **1 个新 build artifact**（`modules/RBFtools/plug-ins/win64/2025/RBFtools.mll`）
+
+### §M1.5.1b.1 — F1-F5 + F6/F7 现状核查（verify-before-design 第 9 次使用）
+
+| F | 实测 | 关键发现 |
+|---|---|---|
+| **F1** | `C:/Program Files/Autodesk/Maya2025/` 含完整 include/lib；`devkit/` 子目录仅 `README_DEVKIT_MOVED.txt`（separate download）；Maya 2022 仍并存 | install root 可直接作 `MAYA_DEVKIT_PATH`；2022 + 2025 双安装 |
+| **F2** | `cmake -G "Visual Studio 17 2022" -A x64 -DMAYA_DEVKIT_PATH=Maya2025` 配置 7.7s **零 error / 零 warning**；MSVC 19.44.35223（v143）；同一 toolchain 也是现 build/ 用 | CMakeLists configure 层 100% 2025-兼容 |
+| **F3** | M2.5 schema 5 字段 + compound parent **已在 C++**：`RBFtools.h:336-341` 声明 / `RBFtools.cpp:88-93` 全局实例 / cpp:571-595 创建 / cpp:751-755 addChild / cpp:823-828 addAttribute | **F.2 NO-OP** — M1.5.1c 子任务**取消** |
+| **F4** | `modules/RBFtools/plug-ins/win64/2022/RBFtools.mll` (126976 b, Apr 7) 唯一现存；无 `.mod` 文件；2025/ 子目录不存在 | 新建 win64/2025/，保留 2022/ stale .mll（D.3） |
+| **F5** | 现有 `#if MAYA_API_VERSION < 202400` 守护（h:45,438,502 + cpp:4483）覆盖 MDrawContext.h 移除；Maya 2025 = `MAYA_API_VERSION 20250300` → 守护正确路由 | C++ source 0 改动即 API-level 适配 |
+| **F6** | 单 `MAYA_DEVKIT_PATH` 变量 + `#if MAYA_API_VERSION` 预处理依赖编译时 include path | 双 SDK 不可同 build；用户须各跑一次（文档化） |
+| **F7** | F3 已确认全字段在 C++ | M1.5.1c 取消（无须存在） |
+
+### §M1.5.1b.2 — 13 决议（默认全批）
+
+| # | 决议 | 选择 |
+|---|---|---|
+| A | MAYA_DEVKIT_PATH 默认值 | **A.3** 不动 + 注释清理 |
+| B | Maya 版本支持范围 | **B.2** 双版本并存 |
+| C | 编译产出目录约定 | **C.1** `win64/2025/` Autodesk 标准 |
+| D | stale 2022 .mll 处置 | **D.3** 保留原位（B.2 对称）|
+| E | `.mod` 文件 | **E.3** 不引入（沿用 `MAYA_PLUG_IN_PATH`）|
+| F | C++ schema 暴露 | **F.2 NO-OP** — 已暴露 |
+| G | API breaking change 适配 | **G.1** 沿用现 `#if` 守护 |
+| H | 编译警告策略 | **H.2** 沿用 MSVC 默认 |
+| I | `require_rbftools_plugin` 启用 | **NO** — M1.5.3 锁 |
+| J | loadPlugin 验证范围 | **J.3** loadPlugin + createNode + 5 字段 introspection |
+| K | C++/CMake 改动列表 | （见 §M1.5.1b.3） |
+| L | 回退策略 | **L.1** 单 commit revert |
+| M | commit message 草稿 | （见 commit body）|
+| N | 永久守护新增 | **N.1+N.2+N.3** 三新 guard |
+
+加固 5/6/7/8 全部纳入：
+
+- **加固 5**：J3 introspection dump 文本块写入 §M1.5.1b.J3-baseline（M1.5.3 byte-level diff source-of-truth）
+- **加固 6**：.mll SHA256 写入 §M1.5.1b.SHA256-baseline + commit body
+- **加固 7**：Maya 2022 caveat 写入本节顶部 + tests/README.md
+- **加固 8**：T_M1_5_1B_PLUGIN_LOADABLE 不写 size 范围断言（仅 exists / size > 0 / `MZ` header）
+
+### §M1.5.1b.3 — 改动清单（K）
+
+| 类别 | 文件 / 路径 | 行数 | 内容 |
+|---|---|---|---|
+| build config | `source/CMakeLists.txt` | 6 行 cosmetic | line 4/6/8/12/13/39，"Maya 2022" → "Maya 2022/2025"；MSVC 注释 v142→v143 |
+| C++ source | — | **0** | F5 已实证零改动即兼容 |
+| build artifact (新) | `modules/RBFtools/plug-ins/win64/2025/RBFtools.mll` | 1 binary, 166912 bytes | Release build，VS 2022 v143，cxx_std_14 |
+| 测试 (新) | `modules/RBFtools/tests/test_m1_5_1b_build.py` | ~140 行 | PERMANENT GUARD #19/#20/#21（7 test methods） |
+| 文档 | `docs/设计文档/RBFtools_v5_addendum_20260424.md` | +§M1.5.1b 本节 | 决议 / J3 baseline / SHA256 baseline / Blocker Row 1 RESOLVED |
+| 文档 | `modules/RBFtools/tests/README.md` | +Maya 2022 caveat | 加固 7 |
+
+### §M1.5.1b.4 — 永久守护新增 (#19/#20/#21)
+
+实现于 [test_m1_5_1b_build.py](../../modules/RBFtools/tests/test_m1_5_1b_build.py)：
+
+- **#19 T_M1_5_1B_BUILD_CONFIG**：`source/CMakeLists.txt` 含全部
+  关键 token（每 token 单独 subTest 定位精确）：
+  `MAYA_DEVKIT_PATH` / `OpenMaya` / `OpenMayaUI` / `OpenMayaAnim` /
+  `OpenMayaRender` / `Foundation` / `NT_PLUGIN` / `REQUIRE_IOSTREAM` /
+  `SUFFIX ".mll"` / `PREFIX ""` / `RBFtools` / `pluginMain.cpp` /
+  `RBFtools.cpp` / `BRMatrix.cpp`（14 token）
+- **#20 T_M1_5_1B_PLUGIN_LOADABLE**：`win64/2025/RBFtools.mll`
+  存在 + `getsize() > 0` + 头 2 字节 `b"MZ"`（PE32+ marker）。
+  **不写 size 范围**（避免 toolchain drift 假阳性 fail）。
+  mayapy `loadPlugin` 实测断言留 M1.5.3。
+- **#21 T_M1_5_1B_2025_DIR_EXISTS**：`win64/2025/` 与 `win64/2022/`
+  双目录 symmetric 存在。
+
+### §M1.5.1b.J3-baseline — mayapy introspection dump（加固 5）
+
+一次性 mayapy probe 实测输出（probe script 不进 commit）：
+
+```
+=== loadPlugin ===
+loaded: True
+version: 4.0.1
+
+=== createNode ===
+node: RBFtoolsShape1
+
+=== M2.5 schema introspection ===
+poseSwingTwistCache: exists=True
+  longName=poseSwingTwistCache shortName=pstc
+poseSwingQuat: exists=True
+  longName=poseSwingQuat shortName=psq
+poseTwistAngle: exists=True
+  longName=poseTwistAngle shortName=pta
+poseSwingWeight: exists=True
+  longName=poseSwingWeight shortName=psw
+poseTwistWeight: exists=True
+  longName=poseTwistWeight shortName=ptw
+poseSigma: exists=True
+  longName=poseSigma shortName=psg
+
+=== listAttr count ===
+total attrs: 274
+
+=== unloadPlugin ===
+unloaded ok
+```
+
+M1.5.3 byte-level 回归测试以本节为 source-of-truth diff baseline。
+
+### §M1.5.1b.SHA256-baseline — .mll reference build hash（加固 6）
+
+```
+2725287715b9793ba5a485becd0fe70e57a554574bd5e1e8c0ed702e3d104c02 *modules/RBFtools/plug-ins/win64/2025/RBFtools.mll
+```
+
+环境：VS 2022 17.14 / MSVC 19.44.35223 (v143) / Windows SDK 10.0.26100.0
+/ Release config / Maya 2025 devkit (`C:/Program Files/Autodesk/Maya2025`)
+/ 2026-04-26 build。后续重 build 漂移检测 anchor；**不**做永久守护
+（toolchain 小版本变化时 SHA 漂移正常）。
+
+### §M1.5.1b.5 — Empirical baseline (2026-04-26)
+
+| 环境 | Pre-M1.5.1b | Post-M1.5.1b | Δ |
+|---|---|---|---|
+| Pure-Python | 444 / 444 OK | **451 / 451 OK** | +7（test_m1_5_1b_build.py 7 methods） |
+| mayapy 2025 | 444 ran 407 pass 37 skip | **451 ran 414 pass 37 skip** | +7 / +7 / **0**（37 skip 不变 — `require_rbftools_plugin` 仍 NO-OP，M1.5.3 锁） |
+
+cmake build (Maya 2025): 0 error；warning 全部**预存在**（C4819 中文 codepage / C4005 `M_PI` 重定义 — 与 M1.5.1b 改动无关）。
+
+PERMANENT GUARD: **18 → 21**。
+
+### §M1.5.1b.6 — Unblocks downstream
+
+参照 §M1.5.1.X Blocker Matrix Row 1，本子任务 RESOLVED 后解锁：
+
+- M1.5.2 `_K_*` benchmark replacement
+- M1.5.3 B-class ~15 conversion + byte-level C++ regression +
+  `require_rbftools_plugin` 启用
+- M2.5b compute consumer（.mll 依赖通过 §M1.5.1b 满足）
+- M2.5 decompose Python↔C++ 双向
 
 ---
 

@@ -1,16 +1,16 @@
 cmake_minimum_required(VERSION 3.12)
 project(RBFtools)
 
-# — Maya 2022 devkit path (adjust to your local installation) —
+# — Maya 2022/2025 devkit path (adjust to your local installation) —
 # Common paths:
-#   Windows: C:/Program Files/Autodesk/Maya2022/devkit
+#   Windows: C:/Program Files/Autodesk/Maya2025
 #   or an extracted devkit directory
-set(MAYA_DEVKIT_PATH "" CACHE PATH "Path to Maya 2022 devkit")
+set(MAYA_DEVKIT_PATH "" CACHE PATH "Path to Maya devkit (2022 or 2025)")
 
 if(NOT MAYA_DEVKIT_PATH OR NOT EXISTS "${MAYA_DEVKIT_PATH}")
     message(FATAL_ERROR
-        "Set MAYA_DEVKIT_PATH to your Maya 2022 devkit, e.g.:\n"
-        "  cmake -DMAYA_DEVKIT_PATH=\"C:/Program Files/Autodesk/Maya2022\" ..")
+        "Set MAYA_DEVKIT_PATH to your Maya 2022/2025 devkit, e.g.:\n"
+        "  cmake -DMAYA_DEVKIT_PATH=\"C:/Program Files/Autodesk/Maya2025\" ..")
 endif()
 
 set(MAYA_INCLUDE "${MAYA_DEVKIT_PATH}/include")
@@ -36,7 +36,7 @@ target_compile_definitions(RBFtools PRIVATE
     _BOOL
 )
 
-# Maya 2022 uses MSVC v142 (VS2019), C++14
+# Maya 2022/2025 use MSVC v143 (VS2022), C++14 (empirical: build/CMakeCache)
 target_compile_features(RBFtools PRIVATE cxx_std_14)
 
 target_link_libraries(RBFtools PRIVATE
