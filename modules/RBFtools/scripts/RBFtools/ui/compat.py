@@ -57,6 +57,12 @@ if not hasattr(QtWidgets, "QAction"):
 if not hasattr(QtWidgets, "QShortcut"):
     QtWidgets.QShortcut = QtGui.QShortcut                   # type: ignore[attr-defined]
 
+# QActionGroup moved to QtGui in Qt6 (M_HOTFIX_PYSIDE6 - was missed
+# from the original M2.4 shim; user hit AttributeError at production
+# install of M_B24b on Maya 2025).
+if not hasattr(QtWidgets, "QActionGroup"):
+    QtWidgets.QActionGroup = QtGui.QActionGroup             # type: ignore[attr-defined]
+
 # ------------------------------------------------------------------
 # Maya main window helper
 # ------------------------------------------------------------------

@@ -4612,6 +4612,107 @@ schema 演进链. 上游 schema 字段任何后续改动 (v5.x post-final) 必�
 
 ---
 
+## §M_HOTFIX_PYSIDE6 — QActionGroup PySide6 migration shim
+
+> **STRUCTURAL LESSON** (2026-04-27):
+>
+> Post-M_B24b2 push, user installed RBFtools to Maya 2025 and hit
+> `AttributeError: module 'PySide6.QtWidgets' has no attribute
+> 'QActionGroup'` at `ui/widgets/node_selector.py:73`. Existing
+> `compat.py` shim (line 53-58, M2.4 era) covered `QAction` +
+> `QShortcut` migrations but missed `QActionGroup`. UI mock-pattern
+> tests (M2.4a/b 范式) completely missed it — `MagicMock` returns
+> truthy for any attribute access, so `QtWidgets.QActionGroup`
+> appeared valid under conftest mock.
+>
+> Fix: 1 line in `compat.py` (`if not hasattr` patch block)
+> + 1 line in `conftest.py` mock + permanent guard #32 to prevent
+> regression.
+>
+> **Lesson for future milestones**: mock-pattern UI tests cannot
+> catch Qt module attribute migration bugs. Real PySide6 import
+> path validation should land when the mayapy GUI fixture lands
+> (M5 long-tail). 当前 compromise = source-scan permanent guard
+> on compat.py shim integrity (#32) + the existing `compat.py`
+> shim covers six legacy `QtWidgets.QActionGroup` callsites in
+> `node_selector.py` automatically (zero widget source changes).
+
+### §M_HOTFIX_PYSIDE6.fix
+
+| File | Change |
+|---|---|
+| `ui/compat.py` | +5 lines: `if not hasattr(QtWidgets, "QActionGroup"): QtWidgets.QActionGroup = QtGui.QActionGroup` block, mirroring the existing QAction/QShortcut shim pattern (Hardening 1) |
+| `tests/conftest.py` | +1 line: `qtgui.QActionGroup = type("QActionGroup", (_Stub,), {})` mock symbol so pure-python conftest path matches the real PySide6 surface |
+| `tests/test_pyside6_compat.py` (NEW) | T_PYSIDE6_COMPAT (#32) — 3 sub-checks on compat.py shim integrity |
+
+### §M_HOTFIX_PYSIDE6.scope-exclusions
+
+- 0 lines `node_selector.py` direct modification (six existing
+  `QtWidgets.QActionGroup` / `QtWidgets.QAction` usages are covered
+  by the compat shim once the QActionGroup line is added)
+- 0 lines `main_window.py` direct modification (four existing
+  `QtWidgets.QAction` callsites already covered by the legacy shim)
+- 0 C++ / 0 .mll / 0 CMakeLists / 0 schema / 0 business logic
+
+### §M_HOTFIX_PYSIDE6.guard-scope-decision
+
+实施期 Step 2 检测到守护 #32 sub-check (a) 与红线 4 冲突：
+
+  - 红线 4: `node_selector.py / main_window.py / 任何 widget 业务逻辑文件`
+    **0 直接修改**（shim 修后自动 work）
+  - 原始 sub-check (a): widgets/ 0 `QtWidgets.QAction*` / `.QActionGroup`
+    / `.QShortcut` 字面
+
+冲突 = 既有 `node_selector.py` 6 处 Qt5-style usage 在红线 4 下
+不可改，但 sub-check (a) 直接 fire（widget folder scan 报 6 offender）。
+
+**裁决（计划者 2026-04-27）: 选项 C** — 守护收缩至 sub-check (b)
+单条线（`compat.py` shim 完整性，3 sub-checks: b.1/b.2/b.3）。
+理由：
+
+1. 遵守红线 4
+2. shim 完整性 = production bug root-cause 防御
+3. widget 用 `QtWidgets.X` + compat shim 是项目既建范式
+   （`compat.py` line 53-58 既有 QAction/QShortcut shim 已运行多
+    个 milestone）
+4. 真"新代码不用 Qt5-style"防御推 M5 GUI 长尾 mayapy 实测
+
+**PROJECT METHODOLOGY**: 守护 source-scan 扫描范围与既有红线/范式
+冲突时，**收缩守护范围**而非破坏红线 — 守护是工程文化记录，
+不应回溯打破既建模式。如需扩大覆盖，设独立 forward-compat 守护
+（如未来 #33 with file-creation-time whitelist）。
+
+### §M_HOTFIX_PYSIDE6.permanent-guard
+
+```
+T_PYSIDE6_COMPAT (#32) — 3 sub-checks (all source-scan compat.py):
+
+  (b.1) compat.py contains "QActionGroup"
+        Anchor: production install on Maya 2025 fails without it.
+
+  (b.2) compat.py contains "QtGui.QActionGroup"
+        Anchor: shim RHS must point to Qt6 location, not QtWidgets.
+
+  (b.3) compat.py preserves QtGui.QAction + QtGui.QShortcut +
+        QtGui.QActionGroup (3-symbol shim integrity)
+        Anchor: future cleanup cannot silently delete any of the
+        three migrated symbols.
+```
+
+Permanent guards: 30 → 31.
+
+### §M_HOTFIX_PYSIDE6.empirical-baseline (2026-04-27)
+
+| Env | Pre-hotfix | Post-hotfix |
+|---|---|---|
+| Pure-Python | 508 OK (skip 3) | 511 OK (skip 3) |
+| mayapy 2025 | 508 ran 466 pass 42 skip | 511 ran 469 pass 42 skip |
+
+mayapy skip count UNCHANGED at 42 (post-M_B24b2 baseline; M1.5.3
+PAUSED still honored).
+
+---
+
 ## §M_B24b2 — Downstream multi-source adapters + v5.0 FINAL CONSTITUTIONAL EVENT 2/6
 
 > **STATUS: LANDED** — v5.0 final 路径 B2 + B4 UI primary deliverable

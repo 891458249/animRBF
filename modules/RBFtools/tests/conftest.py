@@ -259,6 +259,7 @@ def _install_pyside_mocks():
     # so the compat shim's hasattr fix-up paths don't blow up.
     qtgui.QAction = type("QAction", (_Stub,), {})
     qtgui.QShortcut = type("QShortcut", (_Stub,), {})
+    qtgui.QActionGroup = type("QActionGroup", (_Stub,), {})  # M_HOTFIX_PYSIDE6
 
     pyside6 = mock.MagicMock(name="PySide6")
     pyside6.QtCore = qtcore
