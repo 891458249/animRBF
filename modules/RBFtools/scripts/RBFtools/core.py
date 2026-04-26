@@ -1894,6 +1894,88 @@ def auto_alias_outputs(node, driver_attrs, driven_attrs, force=False):
         )
 
 
+def write_pose_swing_twist_cache(node, poses):
+    """Initialise the M2.5 per-pose SwingTwist decomposition cache
+    to its **unpopulated default** state for every pose.
+
+    M2.5 ships the cache **schema** plus this Apply-time
+    initialiser. The actual decomposition values are populated by
+    a follow-up commit (M2.5b / M5) once a mayapy benchmark
+    environment is available to verify both the C++ compute()
+    consumer and the Python decomposition path against real Maya
+    behaviour.
+
+    Defaults written per pose:
+
+      * ``poseSwingQuat``   = ``(0, 0, 0, 1)`` (identity quat)
+      * ``poseTwistAngle``  = 0.0
+      * ``poseSwingWeight`` = 1.0
+      * ``poseTwistWeight`` = 1.0
+      * ``poseSigma``       = -1.0 — sentinel meaning "cache NOT
+        populated" AND "use global radius" (v5 PART E.10
+        forward-compat). Future compute() consumer treats
+        ``poseSigma == -1.0`` as cache miss → falls back to live
+        :func:`decomposeSwingTwist`.
+
+    Cache vs Schema Boundary (addendum §M2.5.4):
+      Cache values are derived runtime state — **NOT** part of
+      the JSON schema. ``core_json.py`` never reads or writes
+      these fields; T_M2_5_CACHE_NOT_IN_SCHEMA permanent guard
+      scans core_json / core_mirror / core_alias to enforce the
+      boundary across all three "schema-adjacent" layers.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+
+    for seq_idx in range(len(poses)):
+        base = "{}.poses[{}].poseSwingTwistCache".format(shape, seq_idx)
+        try:
+            cmds.setAttr(base + ".poseSwingQuat",
+                         0.0, 0.0, 0.0, 1.0, type="double4")
+            cmds.setAttr(base + ".poseTwistAngle", 0.0)
+            cmds.setAttr(base + ".poseSwingWeight", 1.0)
+            cmds.setAttr(base + ".poseTwistWeight", 1.0)
+            cmds.setAttr(base + ".poseSigma", -1.0)  # sentinel
+        except Exception as exc:
+            cmds.warning(
+                "write_pose_swing_twist_cache: pose[{}] setAttr "
+                "failed: {} (cache stays unpopulated; compute() will "
+                "fall back to live decompose)".format(seq_idx, exc))
+
+
+def read_pose_swing_twist_cache(node):
+    """Read back per-pose SwingTwist cache. Returns a list of dicts:
+    ``[{"swing_quat": (sx,sy,sz,sw), "twist_angle": float,
+        "swing_weight": float, "twist_weight": float, "sigma": float}, ...]``.
+
+    Empty list when the node has no poses or is not a v5+ node.
+    Used by future M3.5 Profiler / M5 perf analysis; M2.5 itself
+    does not consume this read path."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        ids = cmds.getAttr(shape + ".poses", multiIndices=True) or []
+    except Exception:
+        return []
+    out = []
+    for p in sorted(ids):
+        base = "{}.poses[{}].poseSwingTwistCache".format(shape, p)
+        try:
+            sq = cmds.getAttr(base + ".poseSwingQuat")[0]
+        except Exception:
+            sq = (0.0, 0.0, 0.0, 1.0)
+        out.append({
+            "swing_quat":   tuple(sq),
+            "twist_angle":  float(safe_get(base + ".poseTwistAngle", 0.0)),
+            "swing_weight": float(safe_get(base + ".poseSwingWeight", 1.0)),
+            "twist_weight": float(safe_get(base + ".poseTwistWeight", 1.0)),
+            "sigma":        float(safe_get(base + ".poseSigma", -1.0)),
+        })
+    return out
+
+
 def apply_poses(node, driver_node, driven_node,
                 driver_attrs, driven_attrs, poses):
     """Write pose data onto the solver node (no connections).
@@ -1941,7 +2023,22 @@ def apply_poses(node, driver_node, driven_node,
         for seq_idx, pose in enumerate(poses):
             _write_pose_to_node(shape, seq_idx, pose)
 
-        # 3 — capture + write per-output baselines. pose[0] is the
+        # 3 — M2.5: per-pose SwingTwist decomposition cache. Populated
+        # for SwingTwist-encoded nodes (encoding == 4); other encodings
+        # write defaults (poseSigma = -1.0 sentinel = "cache not
+        # populated"). Cache is derived state — NOT in the JSON schema
+        # (addendum §M2.5 Cache vs Schema Boundary Contract).
+        # Failures emit warnings; cache miss falls back to live decompose
+        # in compute() (forward-compat to the M2.5b/M5 consumer).
+        try:
+            write_pose_swing_twist_cache(node, poses)
+        except Exception as exc:
+            cmds.warning(
+                "apply_poses: SwingTwist cache step failed: {} "
+                "(continuing — cache miss falls back to live decompose)"
+                .format(exc))
+
+        # 4 — capture + write per-output baselines. pose[0] is the
         # preferred source when it is a rest row (all driver inputs 0);
         # otherwise the current scene value is used. Scale channels
         # always anchor at 1.0. See v5 addendum 2026-04-24 §M1.2.
@@ -1949,7 +2046,7 @@ def apply_poses(node, driver_node, driven_node,
             driven_node, driven_attrs, poses=poses)
         write_output_baselines(node, baselines)
 
-        # 4 — M2.3: replay each pose through driven_node and snapshot
+        # 5 — M2.3: replay each pose through driven_node and snapshot
         # its local Transform for engine-side consumption (PART D.5 /
         # 铁律 B10). Single-sever / single-restore lifecycle keeps the
         # scene clean. Non-driven channels are frozen at Apply-time
@@ -1959,7 +2056,7 @@ def apply_poses(node, driver_node, driven_node,
             driven_node, driven_attrs, poses)
         write_pose_local_transforms(node, local_xforms)
 
-        # 5 — M3.7: auto-generate human-readable aliases on input[] /
+        # 6 — M3.7: auto-generate human-readable aliases on input[] /
         # output[] multi plugs. Preserves user-set aliases (E.1).
         # Failures emit warnings but never break the Apply chain — see
         # core_alias module docstring for the write-boundary contract.
@@ -1971,7 +2068,7 @@ def apply_poses(node, driver_node, driven_node,
                 "apply_poses: auto-alias step failed: {} "
                 "(continuing — aliases are advisory)".format(exc))
 
-        # 6 — trigger evaluation cycle
+        # 7 — trigger evaluation cycle
         cmds.setAttr(shape + ".evaluate", 0)
         cmds.setAttr(shape + ".evaluate", 1)
 

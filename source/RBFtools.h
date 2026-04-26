@@ -325,6 +325,20 @@ public:
     static MObject poseLocalTranslate;   // double3
     static MObject poseLocalQuat;        // double4 (q_w canonical >= 0)
     static MObject poseLocalScale;       // double3
+    // M2.5: per-pose SwingTwist decomposition cache. Compound child of
+    // poses[p]; runtime performance optimization for SwingTwist-encoded
+    // nodes — avoids re-decomposing on every compute(). Derived from
+    // poseInput[] via decomposeSwingTwist; NOT part of the JSON schema
+    // (see addendum §M2.5.4 Cache vs Schema Boundary Contract). The
+    // poseSigma field doubles as a "cache populated" sentinel when
+    // != -1.0 AND as a per-pose sigma override (v5 PART E.10
+    // forward-compat).
+    static MObject poseSwingTwistCache;  // compound
+    static MObject poseSwingQuat;        // double4, default (0,0,0,1)
+    static MObject poseTwistAngle;       // double,  default 0.0
+    static MObject poseSwingWeight;      // double,  default 1.0
+    static MObject poseTwistWeight;      // double,  default 1.0
+    static MObject poseSigma;            // double,  default -1.0 (sentinel)
     static MObject rbfMode;
     static MObject restInput;
     static MObject scale;

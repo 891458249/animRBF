@@ -83,6 +83,14 @@ MObject RBFtools::poseLocalTransform;
 MObject RBFtools::poseLocalTranslate;
 MObject RBFtools::poseLocalQuat;
 MObject RBFtools::poseLocalScale;
+// M2.5: per-pose SwingTwist decomposition cache (runtime perf only).
+// See addendum §M2.5 — NOT part of the JSON schema.
+MObject RBFtools::poseSwingTwistCache;
+MObject RBFtools::poseSwingQuat;
+MObject RBFtools::poseTwistAngle;
+MObject RBFtools::poseSwingWeight;
+MObject RBFtools::poseTwistWeight;
+MObject RBFtools::poseSigma;
 MObject RBFtools::restInput;
 // controls
 MObject RBFtools::allowNegative;
@@ -555,6 +563,41 @@ MStatus RBFtools::initialize()
     nAttr.setKeyable(false);
     nAttr.setDefault(1.0, 1.0, 1.0);        // identity scale
 
+    // M2.5: per-pose SwingTwist cache children. Runtime perf optimization
+    // for SwingTwist-encoded nodes; not part of the JSON schema.
+    // poseSigma=-1.0 doubles as a "cache populated" sentinel AND as a
+    // per-pose sigma override slot (v5 PART E.10 forward-compat). See
+    // addendum §M2.5 Cache vs Schema Boundary Contract.
+    poseSwingQuat = nAttr.create("poseSwingQuat", "psq",
+        MFnNumericData::k4Double);
+    nAttr.setStorable(true);
+    nAttr.setKeyable(false);
+    nAttr.setDefault(0.0, 0.0, 0.0, 1.0);   // identity quat
+
+    poseTwistAngle = nAttr.create("poseTwistAngle", "pta",
+        MFnNumericData::kDouble);
+    nAttr.setStorable(true);
+    nAttr.setKeyable(false);
+    nAttr.setDefault(0.0);
+
+    poseSwingWeight = nAttr.create("poseSwingWeight", "psw",
+        MFnNumericData::kDouble);
+    nAttr.setStorable(true);
+    nAttr.setKeyable(false);
+    nAttr.setDefault(1.0);
+
+    poseTwistWeight = nAttr.create("poseTwistWeight", "ptw",
+        MFnNumericData::kDouble);
+    nAttr.setStorable(true);
+    nAttr.setKeyable(false);
+    nAttr.setDefault(1.0);
+
+    poseSigma = nAttr.create("poseSigma", "psg",
+        MFnNumericData::kDouble);
+    nAttr.setStorable(true);
+    nAttr.setKeyable(false);
+    nAttr.setDefault(-1.0);                 // sentinel = unpopulated / use global
+
     restInput = nAttr.create("restInput", "rin", MFnNumericData::kDouble);
     nAttr.setWritable(true);
     nAttr.setKeyable(true);
@@ -698,13 +741,27 @@ MStatus RBFtools::initialize()
     cAttr.addChild(poseLocalQuat);
     cAttr.addChild(poseLocalScale);
 
+    // M2.5: build the poseSwingTwistCache compound BEFORE nesting it
+    // into poses[p]. Same ordering rule as poseLocalTransform: the
+    // addChild calls below must complete before `poses` cAttr nests
+    // this compound. See addendum §M2.5.
+    poseSwingTwistCache = cAttr.create("poseSwingTwistCache", "pstc");
+    cAttr.setStorable(true);
+    cAttr.setKeyable(false);
+    cAttr.addChild(poseSwingQuat);
+    cAttr.addChild(poseTwistAngle);
+    cAttr.addChild(poseSwingWeight);
+    cAttr.addChild(poseTwistWeight);
+    cAttr.addChild(poseSigma);
+
     poses = cAttr.create("poses", "ps");
     cAttr.setKeyable(true);
     cAttr.setArray(true);
     cAttr.setUsesArrayDataBuilder(true);
     cAttr.addChild(poseInput);
     cAttr.addChild(poseValue);
-    cAttr.addChild(poseLocalTransform);   // M2.3
+    cAttr.addChild(poseLocalTransform);    // M2.3
+    cAttr.addChild(poseSwingTwistCache);   // M2.5
 
     //
     // MRampAttribute
@@ -757,6 +814,18 @@ MStatus RBFtools::initialize()
     addAttribute(poseLocalQuat);
     addAttribute(poseLocalScale);
     addAttribute(poseLocalTransform);
+    // M2.5: SwingTwist cache compound + children. No attributeAffects
+    // because the cache is a runtime perf optimization read inside
+    // compute() but written by the Apply pipeline (see core.py
+    // write_pose_swing_twist_cache). poseSigma=-1.0 is the sentinel
+    // for "cache not populated" — compute() falls back to live
+    // decomposeSwingTwist on miss. See addendum §M2.5.
+    addAttribute(poseSwingQuat);
+    addAttribute(poseTwistAngle);
+    addAttribute(poseSwingWeight);
+    addAttribute(poseTwistWeight);
+    addAttribute(poseSigma);
+    addAttribute(poseSwingTwistCache);
     addAttribute(output);
     addAttribute(baseValue);
     addAttribute(outputIsScale);

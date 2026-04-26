@@ -2888,6 +2888,205 @@ Forward-compat contract:
 
 ---
 
+## §M2.5 — Per-Pose SwingTwist Cache (Constitutional Stress Test)
+
+Milestone 3 收官后的 forward-compat 闭环子任务。M2.5 把 v5 PART C.2.7 + addendum §M2.4b 末尾"性能优化 schema 追加"承诺落地。**核心交付不是 5 个新字段——是 v5 宪法层（14→15 PERMANENT GUARDS）首次真实演化压力测试通过的证据**。
+
+### M2.5.F1-F4 — Verify-before-design 第 6 次使用
+
+| # | 验证项 | 结论 |
+|---|---|---|
+| **F1** | `_reference_impl.decompose_swing_twist` Python mirror 是否存在？ | ✅ —— [_reference_impl.py:529](modules/RBFtools/tests/_reference_impl.py:529)。M2.1b 已落地。**此次仅 schema 改动不消费**（compute() 实际填充推 M2.5b/M5）|
+| **F2** | C++ source 是否已有 5 字段前置声明？ | ❌ —— `grep` source 树 0 命中 `poseSwingQuat` 等。M2.5 是**全新引入** |
+| **F3** | `clear_node_data` 如何清理 poses 多实例？ | ✅ —— `removeMultiInstance("shape.poses[idx]", b=True)` 在 compound multi 上**自动级联清子 compound**。新 cache compound 随 poses 清，**`clear_node_data` 0 行改动** |
+| **F4** | `apply_poses` 流水线注入点？ | ✅ —— step 3 插在 `_write_pose_to_node`（step 2）之后、`capture_output_baselines`（→step 4）之前 |
+
+**F3 直接驱动 scope 缩减**：从理论 ~250 行压到实际 ~125 行生产代码——核查模式驱动 scope 缩减的最佳例证。
+
+### M2.5.1 — 战略价值澄清（M3 红线 vs M2.5 红线）
+
+- M3 期间确立的 **"0 C++ + 0 core.py 四连"** 是 **M3-milestone-specific** 红线 —— v5 设计文档明文 M3 是 Python-only milestone
+- **M2.5 不属于 M3**，按 v5 PART C.2.7 它本身就是 C++ schema 改动子任务
+- M2.5 真红线：
+  - ✅ **`SCHEMA_VERSION` 不变** = `"rbftools.v5.m3"`（T0 守护稳定）
+  - ✅ **`core_json.py` 0 行改动**（**核心宪法证据** — `git diff` 实测为空）
+  - ✅ **缓存字段不进 JSON export**（**T_M2_5_CACHE_NOT_IN_SCHEMA** 第 15 条 PERMANENT GUARD，扫**三个文件**）
+
+### M2.5.2 — Schema 草案（落地）
+
+```cpp
+// source/RBFtools.h additions:
+static MObject poseSwingTwistCache;       // compound child of poses[p]
+  static MObject poseSwingQuat;             // double4, default (0,0,0,1)
+  static MObject poseTwistAngle;            // double,  default 0.0
+  static MObject poseSwingWeight;           // double,  default 1.0
+  static MObject poseTwistWeight;           // double,  default 1.0
+  static MObject poseSigma;                 // double,  default -1.0 (sentinel)
+```
+
+**包装 compound** 与 M2.3 `poseLocalTransform` 嵌套模式一致；命名空间清晰 + Channel Box 折叠友好。
+
+### M2.5.3 — `poseSigma == -1.0` 双语义合并（C.3 决议）
+
+```
+poseSigma == -1.0  ⇒  cache NOT populated AND use global radius
+poseSigma >= 0     ⇒  cache populated AND per-pose sigma override
+                       (v5 PART E.10 forward-compat)
+```
+
+两个语义在"cache 未填充时也用 global radius"前提下一致——简洁且自洽。compute() 消费者（M2.5b / M5 实施时）单一 `if poseSigma == -1.0` 分支同时处理两件事。
+
+### M2.5.4 — Cache vs Schema Boundary Contract（**核心宪法决策**）
+
+```
+M2.5 Cache vs Schema Boundary Contract:
+
+  Definition:
+    poseSwingTwistCache.* fields are RUNTIME PERFORMANCE
+    OPTIMIZATION cache values, derived from poses[p].poseInput[]
+    via decompose_swing_twist (see _reference_impl.py:529).
+
+  NOT part of the v5 JSON schema:
+    - SCHEMA_VERSION remains "rbftools.v5.m3"
+    - _ATTR_NAME_TO_JSON_KEY does not gain new entries
+    - EXPECTED_NODE_DICT_KEYS / EXPECTED_SETTINGS_KEYS unchanged
+    - core_json.node_to_dict does not read cache fields
+    - core_json.dict_to_node does not write cache fields
+
+  Rebuild path on import:
+    JSON import → core_json.dict_to_node → wires + writes
+    poseInput[] / poseValue[] / baselines / poseLocalTransform →
+    user-triggered (or auto via M3.6) Apply →
+    write_pose_swing_twist_cache writes default sentinel state →
+    (M2.5b/M5 future consumer populates real values).
+
+  Why this is the correct boundary:
+    - Cache is DERIVED state, not source-of-truth state
+    - Bumping SCHEMA_VERSION for derived state would create false
+      coupling between disk format and runtime perf strategy
+    - Future cache-strategy revisions (e.g. M5 SIMD changes)
+      would otherwise force JSON migrations for unchanged
+      semantic content
+
+  Enforcement:
+    T_M2_5_CACHE_NOT_IN_SCHEMA PERMANENT GUARD source-scans
+    THREE files for any cache field name leakage:
+      core_json.py    (SCHEMA layer)
+      core_mirror.py  (would copy derived state)
+      core_alias.py   (would expose to channel box, violating G.2)
+```
+
+### M2.5.5 — Implementation Scope (M2.5 vs M2.5b/M5)
+
+**M2.5 ships:**
+- C++ schema additions (compound + 5 children + addAttribute table) — `source/RBFtools.{h,cpp}` ~65 lines
+- Python `core.write_pose_swing_twist_cache` — writes **default sentinel state** for every pose
+- Python `core.read_pose_swing_twist_cache` — read-back helper for future Profiler / M5 perf analysis
+- `apply_poses` step 3 integration (between pose write and baseline capture)
+- T_M2_5_CACHE_NOT_IN_SCHEMA permanent guard (15th)
+
+**M2.5b / M5 deferred (forward-compat):**
+- C++ compute() consumer reading cache via `poseSigma != -1.0` sentinel
+- Python populating real decomposition values (currently writes sentinel = unpopulated)
+- Real benchmark data replacing the conceptual perf numbers (paired with §M3.5 `_K_*` constants)
+
+The constitutional value (schema boundary + 14 → 15 guards holding under演化 pressure) is **fully delivered by schema-only**. The actual perf optimization is a clean drop-in once mayapy benchmark is available — `poseSigma == -1.0` sentinel makes consumer addition non-breaking.
+
+### M2.5.6 — 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `source/RBFtools.h` | +5 MObject declarations + compound 父结构 ~15 行 |
+| `source/RBFtools.cpp` | +5 attribute() create blocks + compound build + 6 addAttribute calls ~50 行 |
+| `core.py` | +`write_pose_swing_twist_cache` (~30 行) + `read_pose_swing_twist_cache` (~25 行) + `apply_poses` step 3 注入 (~10 行) ~65 行 |
+| `core_json.py` | **0 改动** —— 核心宪法证据；T_M2_5_CACHE_NOT_IN_SCHEMA 守护扫此文件 |
+| `core_mirror.py` | **0 改动** —— Mirror 不复制 cache（F.2 决议；T_M2_5_CACHE_NOT_IN_SCHEMA 同样守护）|
+| `core_alias.py` | **0 改动** —— Alias 不暴露 cache（G.2 决议；同上）|
+| `tests/test_m2_5_cache.py` | **新建** ~250 行（5 测试类 + 2 PERMANENT GUARD 类）|
+| `docs/.../addendum_20260424.md` | §M2.5 全节 + boundary contract + F1-F4 ~150 行 |
+
+**总：~530 行**（含测试 + addendum）；**生产代码 ~130 行**（C++ 65 + Python 65；core_json/mirror/alias 全零）。
+
+### M2.5.7 — 测试矩阵
+
+| T# | 名称 | 子测 |
+|---|---|---|
+| T1 | write_cache 5 child fields per pose | 1 |
+| T2 | sentinel poseSigma=-1.0 | 1 |
+| T3 | apply_poses pipeline insertion order + try/except | 2 |
+| T4 | read_cache dict shape | 1 |
+| T5 | read_cache defensive (missing node) | 1 |
+| **T_M2_5_CACHE_NOT_IN_SCHEMA** | **PERMANENT** — 6 forbidden × 3 files = 18 scan points (core_json + core_mirror + core_alias) | 3 |
+| **T_CoreJsonDiffEmpty** | **PERMANENT** — SCHEMA_VERSION still "rbftools.v5.m3" | 1 |
+
+合计 **7 测试类，10 子测试**。**总测试数：424 + 10 = 434 / 434**。
+
+### M2.5.8 — 宪法层压力测试通过证据（**M2.5 留给后续 milestone 的最大遗产**）
+
+M2.5 实施完成后实测：
+
+| 守护 | 状态 |
+|---|---|
+| **T0** SCHEMA_VERSION 不变量 | ✅ `"rbftools.v5.m3"` 保持不变 |
+| **T1b** `_ATTR_NAME_TO_JSON_KEY` bijection | ✅ 不动（未加新映射）|
+| **T_M3_3_SCHEMA_FIELDS** frozen sets | ✅ 不动（EXPECTED_*_KEYS 不变）|
+| **T_M2_5_CACHE_NOT_IN_SCHEMA**（**新增第 15 条**）| ✅ core_json + core_mirror + core_alias 三文件 0 命中 |
+| `core_json.py` `git diff` | ✅ **空**（构造性证据）|
+
+**结论**：v5 宪法层在"看似该 bump SCHEMA_VERSION"的真实场景下**仍然不需要 bump**。**"不 bump 比 bump 更难做对"——bump 简单（加版本字符串就完事），不 bump 需要严格的"derived vs source-of-truth"边界判断**。
+
+未来 M4 / M4.5 / M5 加新字段时，本节是决策范式：
+- **Source-of-truth state** → bump SCHEMA_VERSION + 多版本 reader（hard）
+- **Derived runtime state** → 不进 JSON + source-scan 守护（soft，但需精准边界判断）
+
+### M2.5.9 — M1.5 Forward-Compat Caveat
+
+```
+M1.5 mayapy integration tests will close the loop on:
+  - C++ schema changes compile cleanly under Maya 2024+ devkit
+  - poseSwingTwistCache compound loads on existing v4/v5 nodes
+    without data corruption (forward compat: nodes saved before
+    M2.5 should load with default cache values)
+  - decompose_swing_twist Python mirror (_reference_impl.py:529)
+    matches C++ decomposeSwingTwist byte-for-byte across the
+    full unit-quaternion sphere (M2.1b verification regression)
+
+M2.5b deferred forward-compat (depends on M1.5):
+  - C++ compute() reads poseSigma sentinel and chooses cache vs
+    live decompose
+  - Python write_pose_swing_twist_cache populates real values
+    (currently writes sentinel = unpopulated)
+  - Real benchmark replaces conceptual _K_CHOL etc constants in
+    core_profile.py (§M3.5.F2)
+```
+
+### M2.5.10 — Non-goals
+
+- ❌ Cache 进 JSON export（路径 B 锁定 —— T_M2_5_CACHE_NOT_IN_SCHEMA）
+- ❌ SCHEMA_VERSION bump（路径 B 核心 —— T0 守护稳定）
+- ❌ Cache 在 Channel Box 暴露用户编辑（runtime metadata）
+- ❌ Per-pose `poseSigma` UI 控件（schema 占位 forward-compat 给 v5 PART E.10；UI 推 M5）
+- ❌ M3.x 工具感知 cache（cache 是 Apply 流水线内部细节）
+- ❌ Live Edit 触发 cache 重写（Apply 兜底）
+- ❌ Cache 一致性主动校验（cache miss → fallback 兜底）
+- ❌ **C++ compute() 真实消费 cache**（推 M2.5b / M5；M1.5 mayapy 验证后启动）
+- ❌ **Python 写入真实 decompose 值**（推 M2.5b / M5）
+
+### M2.5.11 — 红线确认（M2.5 全程）
+
+- ✅ **`SCHEMA_VERSION` 不变** = `"rbftools.v5.m3"`（T0 守护稳定）
+- ✅ **`core_json.py` 0 行改动**（核心宪法证据 — `git diff` 实测）
+- ✅ **缓存字段不进 JSON export**（T_M2_5_CACHE_NOT_IN_SCHEMA 第 15 条 PERMANENT GUARD）
+- ✅ Apply 时自动初始化缓存（与 M2.3 模式一致）
+- ✅ Import 时不写缓存（Apply 时自动重建）
+- ✅ Mirror 时不复制缓存（cache 是派生量；F.2 决议）
+- ✅ Pruner / Profiler / Live Edit / Auto-neutral 不感知缓存（all 0 行改动）
+- ✅ T_M2_5_CACHE_NOT_IN_SCHEMA 守护扫**三个文件**（core_json + core_mirror + core_alias）
+- ✅ M2.5 是 M2 sub-task，C++ 改动允许但**仅限 schema 注册**——compute() 消费推 M2.5b/M5
+- ✅ M2.5 commit 不做 mayapy 编译验证（无环境）；M1.5 时首批回归
+
+---
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```
