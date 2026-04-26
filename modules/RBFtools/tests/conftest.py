@@ -1,26 +1,69 @@
 """Pytest / unittest discovery shim — Maya + PySide mock framework.
 
+Dual-environment support
+------------------------
 Loaded automatically by pytest, and explicitly imported by widget tests
 (``import conftest # noqa``) to fire the same setup under
 ``python -m unittest`` discovery.
 
-Mocks installed (in priority order):
+Two environments are supported:
 
-    1. ``RBFtools`` package path injection so ``import RBFtools`` resolves.
-    2. ``maya`` / ``maya.cmds`` / ``maya.api.OpenMaya`` /
-       ``maya.OpenMayaUI`` — permissive MagicMocks.
-    3. PySide6 / PySide2 — when neither real binding is installed, a
-       **minimal real-class shim** is installed instead of pure
-       MagicMock. Reason: ``class Foo(QtWidgets.QWidget)`` requires
-       ``QtWidgets.QWidget`` to be a real class with a working metaclass;
-       a MagicMock instance triggers Python's metaclass machinery in
-       a way that makes the *subclass* a MagicMock too, hiding the
-       user-defined methods we want to introspect (v5 addendum §M2.4a
-       PySide-mock-trap discussion).
+  * **Pure Python** (``python``): every Maya / PySide / shiboken
+    module is mocked at ``sys.modules`` level. ~0.4 s per full
+    sweep. Used for development-time fast feedback.
 
-The shim is intentionally tiny: just enough to let widget classes
-*be defined* and *introspected*. Instantiation requires a real
-QApplication and is reserved for M1.5 mayapy E2E tests.
+  * **mayapy 2025** (``mayapy.exe``): real ``maya.cmds``,
+    ``maya.api.OpenMaya``, ``maya.OpenMayaUI``, ``maya.utils``,
+    ``PySide6 6.5.3``, ``shiboken6`` resolve via the normal
+    import machinery — **no module-level mocks installed**.
+    ~5 s per full sweep (Maya init dominates). Used for
+    integration verification + the M1.5 spillover bucket.
+
+Why mocks must be skipped under real mayapy
+-------------------------------------------
+PySide6's ``shibokensupport`` installs a hook into Python's
+``__import__`` that calls ``module.__name__`` on every imported
+module. ``MagicMock(name='maya.cmds')`` only sets the *mock's*
+own repr name — the dunder ``__name__`` lookup raises
+``AttributeError``. The fix is structural: under mayapy we let
+the real modules resolve and never plant a mock that the
+shiboken hook would later trip over. Verified F3, addendum
+§M1.5-conftest.F3.
+
+Detection contract (T_CONFTEST_DUAL_ENV permanent guard)
+--------------------------------------------------------
+Two conditions both required:
+
+    1. ``sys.executable``'s basename starts with ``mayapy``
+       (cross-platform — no ``.exe`` assumption).
+    2. ``import maya.cmds`` succeeds.
+
+Both must be checked because (1) alone is fooled when someone
+aliases ``python`` to ``mayapy``, and (2) alone is fooled by
+our own pre-installed mocks. The conjunction is the right
+answer; the probe MUST run BEFORE any mock install.
+
+Mock framework (pure-Python branch)
+-----------------------------------
+The PySide minimal shim provides real classes for widget
+inheritance — ``class Foo(QtWidgets.QWidget)`` requires
+``QtWidgets.QWidget`` to be a real class with a working
+metaclass; a MagicMock instance triggers Python's metaclass
+machinery in a way that makes the *subclass* a MagicMock too,
+hiding the user-defined methods we want to introspect (v5
+addendum §M2.4a PySide-mock-trap discussion).
+
+The shim is intentionally tiny: just enough to let widget
+classes *be defined* and *introspected*. Instantiation requires
+a real QApplication and is reserved for M1.5 mayapy E2E tests.
+
+Maya version compatibility
+--------------------------
+The dual-env support is verified on **Maya 2025 only**
+(Python 3.11.4 + PySide6 6.5.3). Maya 2022 (Python 3.7 +
+PySide2) compatibility is deferred to M5; until then assume
+mayapy testing only passes on Maya 2025. See addendum
+§M1.5-conftest caveat block + tests/README.md.
 """
 
 from __future__ import absolute_import
@@ -28,6 +71,34 @@ from __future__ import absolute_import
 import os
 import sys
 from unittest import mock
+
+
+# =====================================================================
+# 0. Dual-environment detection (T_CONFTEST_DUAL_ENV PERMANENT GUARD)
+# =====================================================================
+#
+# MUST run before any mock install. The detection probe imports
+# maya.cmds — which would succeed against an already-installed
+# mock — so the probe lives at the very top of the conftest
+# evaluation order.
+
+def _has_real_maya():
+    """True iff we're running under a real mayapy interpreter AND
+    maya.cmds is importable. Two conditions both required.
+
+    See T_CONFTEST_DUAL_ENV permanent guard — addendum §M1.5-conftest.
+    """
+    base = os.path.basename(sys.executable).lower()
+    if not base.startswith("mayapy"):
+        return False
+    try:
+        import maya.cmds  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+_REAL_MAYA = _has_real_maya()
 
 
 # ----------------------------------------------------------------------
@@ -202,6 +273,22 @@ def _install_pyside_mocks():
     sys.modules['shiboken2'] = mock.MagicMock(name='shiboken2')
 
 
-_install_package_path()
-_install_maya_mocks()
-_install_pyside_mocks()
+_install_package_path()    # always — pure sys.path; no maya dependency
+
+if not _REAL_MAYA:
+    # Pure-Python environment: full mock framework. The 12
+    # sys.modules mock targets are deliberately enumerated in the
+    # _install_*_mocks helpers above so the T_CONFTEST_DUAL_ENV
+    # permanent guard can grep their names from this file's source
+    # to verify the contract.
+    _install_maya_mocks()
+    _install_pyside_mocks()
+# else: real mayapy — let the real maya.* / PySide6 / shiboken6
+# resolve naturally. Skipping mocks is the structural fix for the
+# AttributeError __name__ chain (addendum §M1.5-conftest.F3).
+#
+# T_CONFTEST_DUAL_ENV permanent guard explicitly forbids:
+#   - calling maya.standalone.initialize() in this branch
+#     (that's M1.5 spillover, NOT this sub-task's responsibility)
+#   - removing any mock target name from _install_maya_mocks /
+#     _install_pyside_mocks (would silently break pure-Python tests)

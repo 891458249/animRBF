@@ -225,6 +225,8 @@ class T2_NodeToDict(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T3_DictToNode(unittest.TestCase):
 
     def _build_dict(self):
@@ -367,6 +369,8 @@ def _good_doc():
     }
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T4_DryRunValidation(unittest.TestCase):
 
     def test_valid_doc_passes(self):
@@ -446,6 +450,8 @@ class T4_DryRunValidation(unittest.TestCase):
         self.assertTrue(reports[0].ok, reports[0].errors)
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T5_DryRunMultiNode(unittest.TestCase):
 
     def test_mixed_ok_fail(self):
@@ -495,6 +501,8 @@ class T6_SchemaVersionUnchanged(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T9_PoseLocalTransformBypass(unittest.TestCase):
     """G.2 — Import writes poseLocalTransform directly. The
     capture_per_pose_local_transforms helper MUST NOT be invoked

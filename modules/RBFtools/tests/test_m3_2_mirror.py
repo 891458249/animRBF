@@ -342,6 +342,8 @@ class T9_ControllerMirrorWiring(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T_ROLLBACK(unittest.TestCase):
     """Inject a failure mid-orchestration; assert undo_chunk's
     closeChunk fires (so Maya rolls back) and the exception propagates

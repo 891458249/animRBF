@@ -108,6 +108,8 @@ class T3_NeutralQuatW(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T4_AddNeutralSampleSequencing(unittest.TestCase):
 
     def _stub(self, mc):
@@ -200,6 +202,8 @@ class T4_AddNeutralSampleSequencing(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T5_AutoTriggerGating(unittest.TestCase):
     """Direct MainController() instantiation goes through the Qt
     inheritance chain (PoseTableModel → QAbstractTableModel)

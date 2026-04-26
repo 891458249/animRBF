@@ -3087,6 +3087,196 @@ M2.5b deferred forward-compat (depends on M1.5):
 
 ---
 
+## §M1.5-conftest — Dual-Environment Test Adaptation
+
+> **⚠ Maya version compatibility caveat**: The dual-environment
+> support documented below is verified ONLY on **Maya 2025 +
+> Python 3.11.4 + PySide6 6.5.3**. Maya 2022 (Python 3.7 + PySide2)
+> compatibility is **deferred to M5**; until then assume mayapy
+> testing only passes on Maya 2025. This caveat is repeated at the
+> top of `tests/README.md` for user-side discoverability.
+
+This sub-task is the **environment gate** for the rest of M1.5 +
+M4.5. By making `conftest.py` aware of whether the current
+interpreter is mayapy or pure Python, the entire C++ change
+risk surface for downstream work collapses: mayapy integration
+verification becomes routinely reachable.
+
+**Scope:** ~30 lines `conftest.py` + ~150 lines new test file +
+24 class-level `skipIf` decorators across 8 existing test files +
+~70 lines docs. **Smallest sub-task in v5; highest strategic
+leverage** — verify-before-design 6th use of the canonical pattern.
+
+### M1.5-conftest.F1-F4 — Verify-before-design 7th use
+
+| # | Verified | Outcome |
+|---|---|---|
+| **F1** | mayapy detection — what's the most reliable judgement? | Two-condition: `sys.executable` basename starts with `mayapy` (cross-platform — no `.exe`-only assumption) **AND** `import maya.cmds` succeeds. Single-condition probes have known false positives (alias rebinding) or false negatives (mocked module masquerades as real). |
+| **F2** | Which modules are real under mayapy 2025? | All 12 mock targets are real: `maya` / `maya.cmds` / `maya.api.OpenMaya` / `maya.OpenMayaUI` / `maya.utils` / `PySide6 6.5.3` / `PySide6.QtCore` / `PySide6.QtWidgets` / `PySide6.QtGui` / `shiboken6`. (`shiboken2` / `PySide2` not present — Maya 2022 only.) |
+| **F3** | `AttributeError: __name__` root cause | PySide6 import installs `shibokensupport.feature.feature_imported` as `__import__` hook → subsequent `import maya.cmds` (mocked) triggers hook → hook accesses `module.__name__` → `MagicMock(name='maya.cmds')` defines mock's repr name not module's `__name__` attr → `__getattr__` raises `AttributeError('__name__')` for dunders. **Structural fix:** under mayapy, skip mock entirely; real maya.cmds exposes `__name__` natively. |
+| **F4** | Existing conftest mock-target enumeration | 12 `sys.modules` mock points + 1 PySide minimal shim (real-class subset for widget metaclass-safe inheritance, addendum §M2.4a). Pure-Python branch keeps full framework; mayapy branch skips both. |
+
+### M1.5-conftest.1 — Decision log (9 items + 3 reinforcements)
+
+| # | Decision point | Choice | Rationale |
+|---|---|---|---|
+| (A) | Detection judgement | A.3 — basename `mayapy` + `import maya.cmds` two-condition | F1 verified |
+| (B) | Mock skip granularity under mayapy | B.3 — all 12 module-level mocks skipped | Half-mock is more dangerous than no-mock (PySide metaclass trap from §M2.4a teaches us) |
+| (C) | mayapy fail handling | C.3 — empirically classify each fail / error after first run | Avoids pre-set whitelist that would mask real regressions |
+| (D) | `skipIf` granularity | D.2 — class-level | Class-level shares fixtures (`setUp` / `_reset_cmds`); method-level would leave half-fixtures dangling |
+| (E) | T_CONFTEST_DUAL_ENV scope | E.2 — detection symbol + mock target list preservation | Reinforcement 1 below adds test-count baseline; reinforcement 2 adds maya.standalone forbidance |
+| (F) | Maya 2022 compat | F.2 — defer to M5 | Caveat block at top of §M1.5-conftest + tests/README.md |
+| **Reinforcement 1** | T_CONFTEST_DUAL_ENV invariant 4 | Pure-Python collected test count ≥ baseline | Catches silent skip drift from over-broad refactor |
+| **Reinforcement 2** | mayapy fail list transparent disclosure | Empirical baseline log dated 2026-04-26 in this section | Future Maya / mayapy upgrades regression compare against logged baseline |
+| **Reinforcement 3** | Maya 2022 caveat visibility | Addendum top + tests/README.md top | Prevents user-side time-waste on unsupported version |
+
+### M1.5-conftest.2 — `_REAL_MAYA` detection
+
+```python
+def _has_real_maya():
+    """True iff running under real mayapy AND maya.cmds importable.
+
+    Two conditions both required. MUST run BEFORE any mock install
+    (else condition 2 succeeds against our own mock).
+    """
+    base = os.path.basename(sys.executable).lower()
+    if not base.startswith("mayapy"):
+        return False
+    try:
+        import maya.cmds  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+_REAL_MAYA = _has_real_maya()
+```
+
+Branch wiring at the bottom of conftest:
+
+```python
+_install_package_path()    # always — pure sys.path; no maya dep
+
+if not _REAL_MAYA:
+    _install_maya_mocks()       # 6 maya.* mock targets
+    _install_pyside_mocks()     # 6 PySide / shiboken mock targets
+# else: real mayapy — mocks skipped; real modules resolve naturally
+```
+
+### M1.5-conftest.3 — T_CONFTEST_DUAL_ENV (PERMANENT GUARD #17)
+
+`tests/test_conftest_dual_env.py` enforces 6 invariants:
+
+1. `_REAL_MAYA` symbol exists (module-level `bool`)
+2. Two-condition detection code present (basename + import probe)
+3. All 12 mock-target sys.modules names listed in conftest source
+4. Pure-Python collected test count ≥ `_PURE_PYTHON_BASELINE` (440 as of M2.5 commit `c866604` + 6 dual-env subtests)
+5. mayapy branch must NOT call `maya.standalone.initialize()` (M1.5 spillover, not this sub-task)
+6. Branch behaviour consistent: under mayapy `sys.modules['maya.cmds']` is NOT a MagicMock; under pure Python it IS
+
+Source-text guards strip docstrings + comments before scanning so legitimate documentation can name forbidden symbols (same pattern as M3.4 / M3.5 / M3.6).
+
+### M1.5-conftest.4 — Skip class registry (24 classes across 8 files)
+
+mayapy실측 fail / error after F3 fix all collapsed to one root: `cmds.reset_mock()` and `mock.patch('maya.cmds.<x>')` require `cmds` to be a MagicMock. Real `maya.cmds` is a Python module without `reset_mock`.
+
+Class-level `@unittest.skipIf(conftest._REAL_MAYA, ...)` applied to:
+
+| File | Classes |
+|---|---|
+| `test_m2_4a_core.py` | T0a_FullWrite / T0b_MidWriteFailure / T0c_EmptyList / T0d_LengthCap / T0e_TypeGuard |
+| `test_m2_5_cache.py` | T1_WriteCacheChildren / T2_SentinelSigma / T4_ReadCacheShape |
+| `test_m3_0_infrastructure.py` | T1_ShouldShowConfirmDialog / T3_ResetAllSkipConfirms / T6_SelectRigForNode |
+| `test_m3_1_prune.py` | T6_ExecutePruneSequencing / T12_InvalidGroupPreservesStart |
+| `test_m3_2_mirror.py` | T_ROLLBACK |
+| `test_m3_3_jsonio.py` | T3_DictToNode / T4_DryRunValidation / T5_DryRunMultiNode / T9_PoseLocalTransformBypass |
+| `test_m3_6_neutral.py` | T4_AddNeutralSampleSequencing / T5_AutoTriggerGating |
+| `test_m3_7_alias.py` | T5_ClearManagedPreservesUser / T6_ApplyAliasesAPIPaths / T7_ReadAliases / T8_ConflictFallback |
+
+**Total:** 24 classes (44 individual subtests after class expansion). Skip reason string is uniform: `"mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy"`.
+
+### M1.5-conftest.5 — Empirical baseline log (2026-04-26)
+
+```
+Baseline: post-M2.5 commit c866604
+
+Pure-Python (python -m unittest discover):
+  Ran 440 tests in 0.245s — OK
+  (was 434 before this sub-task; +6 from T_CONFTEST_DUAL_ENV)
+
+mayapy 2025 (mayapy.exe -m unittest discover):
+  Ran 440 tests in 0.705s — OK (skipped=44)
+  Pass: 396  /  Skip: 44  /  Fail: 0  /  Error: 0
+  All 44 skips are class-level mock-dependent skips listed above.
+```
+
+Future mayapy / Maya version upgrades regression compare against this log. New skip categories (e.g. Maya 2025.x → 2026 API changes) MUST be enumerated here AND in §M1.5-conftest.4 with rationale; new fails MUST be fixed or explicitly skipped before merge.
+
+### M1.5-conftest.6 — Forward-compat for M1.5 actual integration tests
+
+This sub-task **does NOT**:
+
+- Call `maya.standalone.initialize()` — invariant 5 forbids it
+- Load any `.mll` plugin — no compiled RBFtools.mll exists yet
+- Run `node.eval()` / real `cmds.scriptJob` triggering / real `cmds.aliasAttr` on multi-instance plugs
+
+Those are the **3 spillover items** that M1.5 will tackle:
+
+1. M2.5b — C++ compute() consumer reading `poseSigma` sentinel
+2. M3.4 — scriptJob real attributeChange triggering + `parent=` cleanup
+3. M2.5 — `decompose_swing_twist` Python ↔ C++ byte-for-byte regression
+
+The M1.5 milestone will introduce a per-test `maya.standalone` fixture (NOT a conftest-level init — that would slow every pure-Python sweep). T_CONFTEST_DUAL_ENV invariant 5 enforces this boundary.
+
+### M1.5-conftest.7 — Change list
+
+| File | Change |
+|---|---|
+| `tests/conftest.py` | +`_has_real_maya()` + `_REAL_MAYA` constant + branch wiring + dual-env docstring (~80 lines including doc) |
+| `tests/test_conftest_dual_env.py` | **New** ~150 lines — T_CONFTEST_DUAL_ENV with 6 sub-checks |
+| `tests/test_m2_4a_core.py` | +5 class-level `@skipIf` decorators |
+| `tests/test_m2_5_cache.py` | +3 class-level `@skipIf` decorators |
+| `tests/test_m3_0_infrastructure.py` | +3 class-level `@skipIf` decorators |
+| `tests/test_m3_1_prune.py` | +2 class-level `@skipIf` decorators |
+| `tests/test_m3_2_mirror.py` | +1 class-level `@skipIf` decorator |
+| `tests/test_m3_3_jsonio.py` | +4 class-level `@skipIf` decorators |
+| `tests/test_m3_6_neutral.py` | +2 class-level `@skipIf` decorators |
+| `tests/test_m3_7_alias.py` | +4 class-level `@skipIf` decorators |
+| `tests/README.md` | +Dual-environment运行 section + Maya 2022 caveat block |
+| `addendum_20260424.md` | §M1.5-conftest (this section) ~150 lines |
+
+**Total:** ~330 lines (zero business code; tests + docs + 24 decorators).
+
+### M1.5-conftest.8 — Permanent guards updated to 17
+
+Project-wide PERMANENT GUARDS now total **17**:
+
+```
+Schema integrity        — T0, T1b, T_M3_3_SCHEMA_FIELDS, T_FLOAT_ROUND_TRIP,
+                          T_M2_5_CACHE_NOT_IN_SCHEMA,
+                          T_M2_5_CORE_JSON_DIFF_EMPTY
+Read-only invariants    — T16, T_ANALYSE_READ_ONLY,
+                          T_PROFILE_READ_ONLY, T_LIVE_NO_DRIVEN_LISTEN
+Algorithmic correctness — T_QUAT_GROUP_SHIFT, T_NEUTRAL_QUAT_W,
+                          T_THROTTLE_TIME_INJECTION,
+                          T_MANAGED_ALIAS_DETECT
+UI contracts            — T_CAVEAT_VISIBLE, T_TOOLS_SECTION_PERSISTS
+Test infrastructure     — T_CONFTEST_DUAL_ENV    ← NEW (#17)
+```
+
+### M1.5-conftest.9 — Red-line confirmations
+
+- ✅ **0 业务代码改动** — `scripts/RBFtools/*.py` 完全未触碰；source 也未触碰
+- ✅ **0 C++ 改动** — M3 红线沿用
+- ✅ **i18n 永久守护未回退** — `test_i18n_no_hardcoded_strings.py` 在 mayapy 下与纯 Python 下一致通过
+- ✅ **Mock target list preserved** — invariant 3 守护
+- ✅ **Pure-Python baseline ≥ 440** — invariant 4 守护
+- ✅ **No `maya.standalone.initialize()` in conftest** — invariant 5 守护
+- ✅ **Class-level `skipIf`** (D.2) — 不允许模块级 / 文件级
+- ✅ **Maya 2022 caveat** — addendum top + README top
+- ✅ **No spillover work** — M2.5b / M3.4 / M2.5 decompose 推 M1.5
+
+---
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```

@@ -10,23 +10,40 @@
 | `test_m1_3_clamp.py` | M1.3 — Driver Clamp（per-dim bounding box + inflation）+ Matrix twist 跳过 + 缓存生命周期 + 防御分支 |
 | `test_m1_4_solver.py` | M1.4 — Tikhonov 绝对 λI + Cholesky/GE 两层 fallback + solver-tier 缓存 |
 
-## 运行
+## 运行（双环境支持）
+
+`conftest.py` 自动检测当前环境：
+
+| 环境 | 命令 | 用途 | 用时 |
+|---|---|---|---|
+| **纯 Python** | `python -m unittest discover -s modules/RBFtools/tests/` | 开发期快速反馈（mock 框架） | ~0.4 s |
+| **mayapy 2025** | `"/c/Program Files/Autodesk/Maya2025/bin/mayapy.exe" -m unittest discover -s modules/RBFtools/tests/` | 完整集成验证（真 Maya / PySide6） | ~5 s |
+
+或：
 
 ```bash
-cd X:/Plugins/RBFtools
 python -m pytest modules/RBFtools/tests/ -v
 ```
 
-或
+`conftest.py` 通过 `_REAL_MAYA` 检测（`sys.executable` basename 起始 `mayapy` + `import maya.cmds` 探针双条件）决定是否安装 mock 框架。永久守护 **T_CONFTEST_DUAL_ENV** (#17) 锁定该契约。
 
-```bash
-python -m unittest discover -s modules/RBFtools/tests/ -v
-```
+mayapy 下少量测试因依赖 mock 行为（`cmds.reset_mock()` / `mock.patch` on `cmds.*`）而 class-level `skipIf(_REAL_MAYA, ...)`。这是设计选择，**不是缺陷**——纯 Python 测试覆盖算法层；mayapy 测试覆盖集成层。
+
+### ⚠ Maya 版本兼容 caveat
+
+**当前双环境支持仅在 Maya 2025 + Python 3.11.4 + PySide6 6.5.3 下验证**。
+
+- ✅ Maya 2025（Python 3.11 + PySide6）
+- ❌ Maya 2022（Python 3.7 + PySide2）—— **不在本次 scope**，推 M5 / 长尾兼容
+- ❌ 其他 Maya 版本 —— 未测试
+
+在 Maya 2022 下跑 mayapy 测试预期会因 PySide2 vs PySide6 API 差异 fail；用户应假定 mayapy 测试只在 Maya 2025 通过。详见 addendum §M1.5-conftest 顶部 caveat block。
 
 ## 依赖
 
 - Python ≥ 3.7（`math.isclose`、`random`、`unittest` 来自 stdlib）
 - `numpy` 2.x（M1.2 的减-加回恒等、M1.4 的 Cholesky / λI / dispatcher 规约测试均用 numpy）
+- **Maya 2025**（仅 mayapy 集成验证时需要；纯 Python 路径无依赖）
 
 ## Milestone 1 测试分布（总 76 条，全绿）
 

@@ -61,6 +61,8 @@ def _reset_cmds():
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T1_WriteCacheChildren(unittest.TestCase):
 
     def test_writes_all_five_children_per_pose(self):
@@ -93,6 +95,8 @@ class T1_WriteCacheChildren(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T2_SentinelSigma(unittest.TestCase):
 
     def test_sigma_writes_minus_one(self):
@@ -171,6 +175,8 @@ class T3_ApplyPosesIntegration(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T4_ReadCacheShape(unittest.TestCase):
 
     def test_returns_dict_per_pose(self):

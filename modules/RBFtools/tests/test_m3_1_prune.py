@@ -258,6 +258,8 @@ class T5_AnalyseNodeEndToEnd(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T6_ExecutePruneSequencing(unittest.TestCase):
 
     def test_calls_apply_poses_then_write_quat_starts(self):
@@ -396,6 +398,8 @@ class T11_NoDirectAliasAttr(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T12_InvalidGroupPreservesStart(unittest.TestCase):
     """E.2 contract: an invalid quat group's start value is preserved
     in the writeback so the C++ resolver "silently skips" the

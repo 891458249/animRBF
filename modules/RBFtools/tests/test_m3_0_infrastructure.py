@@ -65,6 +65,8 @@ def _reset_optionvar_mock():
     cmds.optionVar.side_effect = None
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T1_ShouldShowConfirmDialog(unittest.TestCase):
 
     def setUp(self):
@@ -130,6 +132,8 @@ class T2_OptionVarNamingContract(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T3_ResetAllSkipConfirms(unittest.TestCase):
 
     def setUp(self):
@@ -262,6 +266,8 @@ class T5_ReadJsonSchemaCheck(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T6_SelectRigForNode(unittest.TestCase):
 
     def setUp(self):

@@ -179,6 +179,8 @@ class T4_ManagedAliasDetect(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T5_ClearManagedPreservesUser(unittest.TestCase):
 
     def test_only_managed_removed(self):
@@ -216,6 +218,8 @@ class T5_ClearManagedPreservesUser(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T6_ApplyAliasesAPIPaths(unittest.TestCase):
     """Multi-instance plug alias support is the only Maya API behaviour
     we cannot probe in mock-only tests. Cover BOTH outcomes so the
@@ -272,6 +276,8 @@ class T6_ApplyAliasesAPIPaths(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T7_ReadAliases(unittest.TestCase):
 
     def test_round_trip_input_output(self):
@@ -302,6 +308,8 @@ class T7_ReadAliases(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T8_ConflictFallback(unittest.TestCase):
 
     def test_duplicate_base_gets_index_suffix(self):

@@ -26,6 +26,8 @@ def _reset_cmds_mock():
     cmds.reset_mock()
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T0a_FullWrite(unittest.TestCase):
     """removeMultiInstance × existing-count, then setAttr × new-count, in order."""
 
@@ -51,6 +53,8 @@ class T0a_FullWrite(unittest.TestCase):
         self.assertGreaterEqual(len(set_calls), 3)
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T0b_MidWriteFailure(unittest.TestCase):
     """When a setAttr in the middle of the write raises, the undo_chunk
     finally block must still close (no leak) and a warning must fire."""
@@ -87,6 +91,8 @@ class T0b_MidWriteFailure(unittest.TestCase):
         self.assertGreaterEqual(len(chunk_calls), 2)
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T0c_EmptyList(unittest.TestCase):
     """Empty list → clears existing without writing new values."""
 
@@ -109,6 +115,8 @@ class T0c_EmptyList(unittest.TestCase):
         self.assertEqual(cmds.setAttr.call_count, 0)
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T0d_LengthCap(unittest.TestCase):
     """List longer than max_length → truncated + warning."""
 
@@ -133,6 +141,8 @@ class T0d_LengthCap(unittest.TestCase):
         self.assertEqual(cmds.setAttr.call_count, 10)
 
 
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T0e_TypeGuard(unittest.TestCase):
     """Non-list/tuple input rejected with warning, no setAttr calls."""
 
