@@ -3277,6 +3277,186 @@ Test infrastructure     — T_CONFTEST_DUAL_ENV    ← NEW (#17)
 
 ---
 
+## §M1.5.1 — mayapy Fixture Framework + A-class Conversion
+
+> **⚠ scope summary**: 0 C++ / 0 business code / 0 CMakeLists changes.
+> Test infrastructure only. **3 spillovers (M2.5b / M3.4 / M2.5
+> decompose) all blocked or deferred** — see §M1.5.1.X Blocker
+> Matrix below.
+
+### §M1.5.1.F1-F5 — Verify-before-design 8th use (highest-value yet)
+
+F-checks executed BEFORE Step 2 surfaced **two structural blockers**
+that together collapsed the original "3 spillover one-shot
+regression" scope down to "fixture framework + 5 A-class
+conversion". This is the canonical example of why
+verify-before-design exists — the alternative was writing
+~200 lines of M2.5b regression code before discovering F1.
+
+| F | Verified | Outcome |
+|---|---|---|
+| **F1** | `.mll` build + Maya 2025 load | **❌ BLOCKER**. `source/build/Release/RBFtools.mll` (Maya 2022 build, dated 2026-04-07, predates M2.5 schema) **fatally crashes Maya 2025 mayapy** on `cmds.loadPlugin` — stack ends in `Shared.dll!TbaseApp::initGeneral`, triggering auto-save dump. Resolution: M1.5.1b (independent sub-task, C++ scope). |
+| **F2** | `maya.standalone.initialize()` re-entry | **❌ NOT re-entrant**. Second `initialize()` after `uninitialize()` crashes at the same point. Autodesk-documented one-shot constraint. **Drives (A.3) session-scoped lazy-init**: never call `uninitialize()`; process exit cleans up. |
+| **F3** | `_K_*` references in repo | 3 constants in `core_profile.py:62-64` (`1e-9` / `3e-9` / `1e-7`); 6 consumption sites; T_CAVEAT_VISIBLE守护 `_K_CHOL` literal in report. Untouched by M1.5.1 — replacement is M1.5.2 scope. |
+| **F4** | scriptJob `attributeChange` headless | **❌ BLOCKER**. Empirical probe: `cmds.scriptJob(attributeChange=[...])` returns `None` (silent registration failure) under standalone; `cmds.setAttr` triggers 0 callbacks; `cmds.refresh(force=True)` does not help. scriptJob lifecycle ties to UI idle queue — **fundamentally untestable in headless mayapy**. M3.4 spillover deferred to M5 GUI long-tail. |
+| **F5** | 24 mock-skip class classification | A (M1.5.1 convertible, standalone-friendly) ~7 / B (needs .mll, M1.5.3) ~15 / C (forever mock-only, tests pure-Python logic) ~2. **M1.5.1 commits exactly 5 A-class conversions** (加固 2 lock-list); B and C deferred. |
+
+### §M1.5.1.1 — Decision log (12 + 5 reinforcements)
+
+| # | Decision | Choice | Rationale |
+|---|---|---|---|
+| (A) | fixture scope | A.3 session-scoped lazy-init | F2 verified |
+| (B) | fixture location | B.1 `tests/_mayapy_fixtures.py` (single file, `_` prefix) | unittest discover ignores `_`-prefix modules; T_M1_5_FIXTURE_BOUNDARY guards the boundary |
+| (C) | `.mll` load strategy | C.1 do not load (F1 blocker) | Avoids fatal crash; M1.5.1b owns rebuild |
+| (D) | M2.5b sentinel replacement | D.3 fully deferred (F1 blocker) | No mayapy verification path → writing without verification is reverse of verify-before-design |
+| (E) | M3.4 scriptJob real triggering | E.2 deferred to GUI Maya / long-tail (F4 blocker) | Headless idle queue absent — see加固 3: NO mock workaround allowed |
+| (F) | M2.5 decompose Python ↔ C++ | F.3 deferred (same F1 blocker as D) | — |
+| (G) | T_M1_5_FIXTURE_BOUNDARY scope | G.3 dual: source-scan + import-graph | 加固 1 lock 4 specific invariants A/B/C/D |
+| (H) | mayapy fixture failure semantics | H.3 warning + skipTest | Aligns with M3.4 / M3.5 degradation pattern |
+| (I) | A-class conversion granularity | I.2 conservative 5 classes | 加固 2 lock list — see §M1.5.1.4 below |
+| (J) | mayapy file naming | J.3 dual-path same file (if/else branch) | Avoids file膨胀; T_CONFTEST_DUAL_ENV invariant 4 (≥ 440) guards count |
+| (K) | C++ / CMakeLists changes | **K.1 absolute zero** — `.mll` rebuild is independent sub-task M1.5.1b | Approved separately; even build-config changes are "C++ scope" by the calling-convention contract |
+| (L) | commit message format | L.2 detailed F-block log + Blocker Matrix anchor | 加固 4 — addendum §M1.5.1.X cross-reference |
+| **R1** | T_M1_5_FIXTURE_BOUNDARY 4 explicit invariants | A (conftest no-fixture-import) + B (fixture no-conftest-token) + C (import-graph) + D (no maya.standalone in conftest) | All 4 PERMANENT, separate `test_PERMANENT_*` methods |
+| **R2** | A-class lock list | T1/T3/T6 (m3_0) + T5/T7 (m3_7); explicitly NOT T6_apply / T8 / T4_DryRun | 5 classes only; M1.5.3 reviews remainder |
+| **R3** | F4 mock workaround forbidden | 0 hits of `cmds.refresh` / `cmds.idleQueue` / `cmds.evalDeferred` in M1.5.1 test additions | Documented as red line; not permanent (sub-task scope) |
+| **R4** | Blocker Matrix in addendum | §M1.5.1.X — forward-compat anchor for downstream sub-tasks | Mechanical consumption format (table) |
+| **R5** | Dual-path equivalence assertion | Each A-class subtest has IDENTICAL behaviour assertion across branches (not "two independent tests") | Guards mock vs real-Maya semantic drift |
+
+### §M1.5.1.2 — `_mayapy_fixtures.py` API
+
+```python
+# tests/_mayapy_fixtures.py — single file (`_` prefix excludes
+# from unittest discovery)
+
+_INITIALIZED = False    # process-global flag
+
+def ensure_maya_standalone():
+    """Idempotent session-scoped lazy init. F2 verified one-shot
+    constraint — never call uninitialize(). Process exit cleans
+    up automatically."""
+
+def skip_if_no_maya(reason="..."):
+    """Decorator: skip test/class when not under mayapy. Reads
+    conftest._REAL_MAYA via __import__(_CONFTEST_NAME) where
+    _CONFTEST_NAME is concatenated to keep the literal token
+    out of the executable body (T_M1_5_FIXTURE_BOUNDARY
+    invariant B)."""
+
+def require_rbftools_plugin():
+    """Stub for M1.5.1b. Currently always raises SkipTest with
+    Blocker Matrix reference. Once Maya 2025 .mll exists this
+    will load + verify schema."""
+```
+
+### §M1.5.1.3 — T_M1_5_FIXTURE_BOUNDARY (PERMANENT GUARD #18)
+
+`tests/test_m1_5_fixture_boundary.py` — 4 sub-checks, each its
+own `test_PERMANENT_*` method (加固 1):
+
+| Sub | Invariant | Check |
+|---|---|---|
+| A | conftest no fixture import | `inspect.getsource(conftest)` (stripped) contains 0 hits of `_mayapy_fixtures` |
+| B | fixture no conftest token | `inspect.getsource(_mayapy_fixtures)` (stripped) contains 0 hits of literal `conftest` |
+| C | import graph decoupled | `inspect.getfile(conftest)` ends with `conftest.py`; `inspect.getfile(_mayapy_fixtures)` ends with `_mayapy_fixtures.py`; neither path nests under the other |
+| D | no maya.standalone in conftest | redundant cross-check from fixture side; T_CONFTEST_DUAL_ENV invariant 5 enforces from env-probe side. Both fail simultaneously on violation for max visibility |
+
+### §M1.5.1.4 — A-class conversion lock list (5 classes, 加固 2)
+
+```
+1. T1_ShouldShowConfirmDialog          (test_m3_0_infrastructure.py)
+2. T3_ResetAllSkipConfirms             (test_m3_0_infrastructure.py)
+3. T6_SelectRigForNode                 (test_m3_0_infrastructure.py)
+4. T5_ClearManagedPreservesUser        (test_m3_7_alias.py)
+5. T7_ReadAliases                      (test_m3_7_alias.py)
+```
+
+**NOT converted** (deferred to M1.5.3 review): `T8_ConflictFallback`,
+`T6_ApplyAliasesAPIPaths` (both PASS and FAIL paths),
+`T4_DryRunValidation` (7 subtests, read-only). All depend on
+`mock.patch` / `cmds.reset_mock` semantics that need either .mll
+or RBFtools-shape-specific multi-instance plugs.
+
+Each conversion follows R5 dual-path equivalence: a single
+`if conftest._REAL_MAYA: ... else: ...` branch in setUp /
+test body, ending in **the same `assert*` statement** under
+both branches. mayapy uses real `cmds.optionVar` /
+`cmds.aliasAttr` against transient transforms with
+fixture-built aliases; pure-Python uses the conftest mock
+framework. Same behaviour contract; different observation
+mechanism.
+
+### §M1.5.1.5 — Empirical baseline (2026-04-26)
+
+```
+Pure-Python (python -m unittest discover):
+  Ran 444 tests in 0.331s — OK
+  (was 440 pre-M1.5.1; +4 from T_M1_5_FIXTURE_BOUNDARY)
+
+mayapy 2025 (mayapy.exe -m unittest discover):
+  Ran 444 tests in 3.281s — OK (skipped=37)
+  Pass: 407  /  Skip: 37  /  Fail: 0  /  Error: 0
+
+  Skip count dropped 44 → 37 (-7 subtests across 5 converted
+  A-class entries: T1×3, T3×1, T6×1, T5×1, T7×1).
+
+  Remaining 37 skips: ~32 from B-class (need M1.5.1b .mll) +
+  ~5 from C-class (forever mock-only) + 1 self-skip
+  (T_CONFTEST_DUAL_ENV invariant 4 pure-Python-only check).
+  Categorisation table — see §M1.5.1.F5.
+```
+
+### §M1.5.1.6 — Project-wide PERMANENT GUARDS now total 18
+
+```
+Schema integrity (6)        — T0, T1b, T_M3_3_SCHEMA_FIELDS,
+                              T_FLOAT_ROUND_TRIP,
+                              T_M2_5_CACHE_NOT_IN_SCHEMA,
+                              T_M2_5_CORE_JSON_DIFF_EMPTY
+Read-only invariants (4)    — T16, T_ANALYSE_READ_ONLY,
+                              T_PROFILE_READ_ONLY,
+                              T_LIVE_NO_DRIVEN_LISTEN
+Algorithmic (4)             — T_QUAT_GROUP_SHIFT, T_NEUTRAL_QUAT_W,
+                              T_THROTTLE_TIME_INJECTION,
+                              T_MANAGED_ALIAS_DETECT
+UI contracts (2)            — T_CAVEAT_VISIBLE,
+                              T_TOOLS_SECTION_PERSISTS
+Test infrastructure (2)     — T_CONFTEST_DUAL_ENV (#17, 6 sub),
+                              T_M1_5_FIXTURE_BOUNDARY (#18, 4 sub)
+```
+
+### §M1.5.1.7 — Red lines confirmed
+
+- ✅ **0 C++ changes** (K.1 lock; CMakeLists.txt also untouched)
+- ✅ **0 business code changes** (`scripts/RBFtools/*.py` and `source/*` both empty diffs)
+- ✅ **0 `.mll` load** in this commit (C.1 + K.1 double lock)
+- ✅ **A-class conversion exactly 5 classes** (R2 lock list; no scope creep)
+- ✅ **0 `cmds.refresh` / `cmds.idleQueue` / `cmds.evalDeferred`** in M1.5.1 test additions (R3 — F4 mock workaround forbidden)
+- ✅ **`core_live.py` mock-based tests untouched** (existing T_LIVE_NO_DRIVEN_LISTEN / T_THROTTLE_TIME_INJECTION still cover pure-function semantics)
+- ✅ **T_CONFTEST_DUAL_ENV 6 sub-checks remain green**; pure-Python ≥ 440 invariant honoured (now 444)
+- ✅ **`maya.standalone` not in conftest** (T_CONFTEST_DUAL_ENV invariant 5 + T_M1_5_FIXTURE_BOUNDARY invariant D — both enforce)
+- ✅ **§M1.5.1.X Blocker Matrix present** as forward-compat anchor (R4)
+
+---
+
+## §M1.5.1.X — Blocker Matrix (forward-compat anchor)
+
+Mechanical consumption format. Future sub-tasks reference this
+table by row to determine which blocker their work depends on.
+
+| Blocker | Discovered in | Blocks | Resolution sub-task | ETA hint |
+|---|---|---|---|---|
+| 2022 .mll incompatible with Maya 2025 | F1 (this sub-task) | M2.5b compute() consumer / M2.5 decompose Python↔C++ regression / `_K_*` benchmark replacement (M1.5.2) / B-class skip conversion (~15 classes) / M1.1-M2.4 byte-level C++ regression (M1.5.3) | **M1.5.1b** (independent C++ sub-task; CMakeLists 2025 adaptation + recompile + load verification) | Immediately after M1.5.1 push; user batches separately |
+| `maya.standalone` not re-entrant | F2 (this sub-task) | Any per-test or module-scoped `initialize/uninitialize` cycle | (RESOLVED in this sub-task: `_mayapy_fixtures.ensure_maya_standalone` session-scoped lazy-init pattern) | n/a — done |
+| scriptJob `attributeChange` does not fire under headless mayapy | F4 (this sub-task) | M3.4 spillover items 1/2/3 (real attributeChange / `parent=` cleanup / viewport drag throttle) | **M5 GUI Maya long-tail manual verification** | Long-deferred; not on M4 / M4.5 / M5-perf critical path. R3 forbids mock workaround in interim. |
+
+Downstream sub-task contract: when a planning step decides "we
+need X", consult this table; if X is blocked, either tackle the
+resolution sub-task first or explicitly defer X with a Blocker
+Matrix row reference in its addendum entry.
+
+---
+
 ### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```

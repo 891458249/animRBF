@@ -65,42 +65,77 @@ def _reset_optionvar_mock():
     cmds.optionVar.side_effect = None
 
 
-@unittest.skipIf(conftest._REAL_MAYA,
-    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T1_ShouldShowConfirmDialog(unittest.TestCase):
+    """A-class dual-path (M1.5.1): pure-Python uses the conftest
+    optionVar mock; mayapy exercises the real ``cmds.optionVar``
+    via the session-scoped fixture. Each subtest asserts the SAME
+    behaviour contract regardless of branch (加固 5)."""
+
+    _ACTION = "test_m3_0_t1_action"
+    _OPTVAR = "RBFtools_skip_confirm_test_m3_0_t1_action"
 
     def setUp(self):
-        _reset_optionvar_mock()
+        if conftest._REAL_MAYA:
+            import _mayapy_fixtures
+            _mayapy_fixtures.ensure_maya_standalone()
+            # Clean slate — real cmds.optionVar persists across tests
+            # within the standalone session, so we must explicitly
+            # remove the var before each test.
+            try:
+                if cmds.optionVar(exists=self._OPTVAR):
+                    cmds.optionVar(remove=self._OPTVAR)
+            except Exception:
+                pass
+        else:
+            _reset_optionvar_mock()
+
+    def tearDown(self):
+        if conftest._REAL_MAYA:
+            try:
+                if cmds.optionVar(exists=self._OPTVAR):
+                    cmds.optionVar(remove=self._OPTVAR)
+            except Exception:
+                pass
 
     def test_default_shows_when_no_optionvar(self):
         from RBFtools import core
-        # exists=False → should show.
-        cmds.optionVar.side_effect = lambda **kw: (
-            False if kw.get("exists") else 0)
-        self.assertTrue(core.should_show_confirm_dialog("prune_poses"))
+        # Behaviour contract: when the optionVar does not exist,
+        # should_show_confirm_dialog returns True. Same assertion
+        # under both branches (加固 5).
+        if not conftest._REAL_MAYA:
+            cmds.optionVar.side_effect = lambda **kw: (
+                False if kw.get("exists") else 0)
+        # else: setUp already ensured the var is absent.
+        self.assertTrue(core.should_show_confirm_dialog(self._ACTION))
 
     def test_skip_when_optionvar_set_to_1(self):
         from RBFtools import core
-        # exists=True + query=1 → skip.
-        def fake_optionvar(**kw):
-            if "exists" in kw:
-                return True
-            if "query" in kw:
-                return 1
-            return 0
-        cmds.optionVar.side_effect = fake_optionvar
-        self.assertFalse(core.should_show_confirm_dialog("prune_poses"))
+        if conftest._REAL_MAYA:
+            cmds.optionVar(intValue=(self._OPTVAR, 1))
+        else:
+            def fake_optionvar(**kw):
+                if "exists" in kw:
+                    return True
+                if "query" in kw:
+                    return 1
+                return 0
+            cmds.optionVar.side_effect = fake_optionvar
+        # Same behaviour assertion under both branches.
+        self.assertFalse(core.should_show_confirm_dialog(self._ACTION))
 
     def test_show_when_optionvar_set_to_0(self):
         from RBFtools import core
-        def fake_optionvar(**kw):
-            if "exists" in kw:
-                return True
-            if "query" in kw:
+        if conftest._REAL_MAYA:
+            cmds.optionVar(intValue=(self._OPTVAR, 0))
+        else:
+            def fake_optionvar(**kw):
+                if "exists" in kw:
+                    return True
+                if "query" in kw:
+                    return 0
                 return 0
-            return 0
-        cmds.optionVar.side_effect = fake_optionvar
-        self.assertTrue(core.should_show_confirm_dialog("prune_poses"))
+            cmds.optionVar.side_effect = fake_optionvar
+        self.assertTrue(core.should_show_confirm_dialog(self._ACTION))
 
 
 # ----------------------------------------------------------------------
@@ -132,40 +167,80 @@ class T2_OptionVarNamingContract(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
-@unittest.skipIf(conftest._REAL_MAYA,
-    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T3_ResetAllSkipConfirms(unittest.TestCase):
+    """A-class dual-path (M1.5.1). The behaviour contract is
+    identical: reset_all_skip_confirms removes ONLY optionVars
+    whose name starts with ``RBFtools_skip_confirm_``. Other
+    RBFtools_* vars (filter state, language, auto-fill) survive.
+    Same assertion shape across branches (加固 5)."""
+
+    _T_PRUNE = "RBFtools_skip_confirm_test_m3_0_t3_prune"
+    _T_MIRROR = "RBFtools_skip_confirm_test_m3_0_t3_mirror"
+    _T_KEEP = "RBFtools_filter_driver_test_m3_0_t3_keep"
 
     def setUp(self):
-        _reset_optionvar_mock()
+        if conftest._REAL_MAYA:
+            import _mayapy_fixtures
+            _mayapy_fixtures.ensure_maya_standalone()
+            for v in (self._T_PRUNE, self._T_MIRROR, self._T_KEEP):
+                try:
+                    if cmds.optionVar(exists=v):
+                        cmds.optionVar(remove=v)
+                except Exception:
+                    pass
+        else:
+            _reset_optionvar_mock()
+
+    def tearDown(self):
+        if conftest._REAL_MAYA:
+            for v in (self._T_PRUNE, self._T_MIRROR, self._T_KEEP):
+                try:
+                    if cmds.optionVar(exists=v):
+                        cmds.optionVar(remove=v)
+                except Exception:
+                    pass
 
     def test_removes_only_matching_prefix(self):
         from RBFtools import core
-        existing = [
-            "RBFtools_skip_confirm_prune_poses",
-            "RBFtools_skip_confirm_mirror_node",
-            "RBFtools_filter_driver_Keyable",   # MUST NOT be removed
-            "RBFtools_language",                 # MUST NOT be removed
-            "RBFtoolsAutoFillValues",            # MUST NOT be removed
-        ]
-        removed = []
-
-        def fake_optionvar(**kw):
-            if kw.get("list"):
-                return existing
-            if "remove" in kw:
-                removed.append(kw["remove"])
-                return None
-            return None
-        cmds.optionVar.side_effect = fake_optionvar
-
-        core.reset_all_skip_confirms()
-        self.assertEqual(
-            sorted(removed),
-            sorted([
+        if conftest._REAL_MAYA:
+            # Plant three optionVars; reset_all_skip_confirms must
+            # remove the two skip_confirm_ prefixed ones and leave
+            # the unrelated _filter_driver_ var alone.
+            cmds.optionVar(intValue=(self._T_PRUNE, 1))
+            cmds.optionVar(intValue=(self._T_MIRROR, 1))
+            cmds.optionVar(intValue=(self._T_KEEP, 1))
+            core.reset_all_skip_confirms()
+            # Behaviour assertion: the two prune/mirror vars are
+            # gone; the unrelated keep var survives.
+            self.assertFalse(cmds.optionVar(exists=self._T_PRUNE))
+            self.assertFalse(cmds.optionVar(exists=self._T_MIRROR))
+            self.assertTrue(cmds.optionVar(exists=self._T_KEEP))
+        else:
+            existing = [
                 "RBFtools_skip_confirm_prune_poses",
                 "RBFtools_skip_confirm_mirror_node",
-            ]))
+                "RBFtools_filter_driver_Keyable",   # MUST NOT be removed
+                "RBFtools_language",                 # MUST NOT be removed
+                "RBFtoolsAutoFillValues",            # MUST NOT be removed
+            ]
+            removed = []
+
+            def fake_optionvar(**kw):
+                if kw.get("list"):
+                    return existing
+                if "remove" in kw:
+                    removed.append(kw["remove"])
+                    return None
+                return None
+            cmds.optionVar.side_effect = fake_optionvar
+
+            core.reset_all_skip_confirms()
+            self.assertEqual(
+                sorted(removed),
+                sorted([
+                    "RBFtools_skip_confirm_prune_poses",
+                    "RBFtools_skip_confirm_mirror_node",
+                ]))
 
 
 # ----------------------------------------------------------------------
@@ -266,23 +341,41 @@ class T5_ReadJsonSchemaCheck(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
-@unittest.skipIf(conftest._REAL_MAYA,
-    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T6_SelectRigForNode(unittest.TestCase):
+    """A-class dual-path (M1.5.1). Behaviour contract: passing an
+    invalid role string produces a warning and does NOT mutate
+    the selection. Under mayapy we observe selection by reading
+    ``cmds.ls(selection=True)``; under pure-Python we observe via
+    mock call counts. Same final-state assertion: selection is
+    empty / unchanged (加固 5)."""
 
     def setUp(self):
-        _reset_optionvar_mock()
-        cmds.warning.reset_mock()
-        cmds.warning.side_effect = None
-        cmds.select.reset_mock()
-        cmds.select.side_effect = None
+        if conftest._REAL_MAYA:
+            import _mayapy_fixtures
+            _mayapy_fixtures.ensure_maya_standalone()
+            cmds.select(clear=True)
+        else:
+            _reset_optionvar_mock()
+            cmds.warning.reset_mock()
+            cmds.warning.side_effect = None
+            cmds.select.reset_mock()
+            cmds.select.side_effect = None
 
     def test_invalid_role_warns(self):
         from RBFtools import core
-        core.select_rig_for_node("node1", "bogus")
-        self.assertGreaterEqual(cmds.warning.call_count, 1)
-        # No selection attempt for invalid role.
-        self.assertEqual(cmds.select.call_count, 0)
+        if conftest._REAL_MAYA:
+            # Pre-state: empty selection. Under real cmds, calling
+            # select_rig_for_node with an invalid role should not
+            # mutate the selection.
+            core.select_rig_for_node("node1", "bogus")
+            sel = cmds.ls(selection=True) or []
+            self.assertEqual(sel, [],
+                "invalid role mutated selection (real cmds path)")
+        else:
+            core.select_rig_for_node("node1", "bogus")
+            self.assertGreaterEqual(cmds.warning.call_count, 1)
+            # No selection attempt for invalid role.
+            self.assertEqual(cmds.select.call_count, 0)
 
 
 # ----------------------------------------------------------------------

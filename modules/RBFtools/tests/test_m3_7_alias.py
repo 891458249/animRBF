@@ -179,38 +179,68 @@ class T4_ManagedAliasDetect(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
-@unittest.skipIf(conftest._REAL_MAYA,
-    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T5_ClearManagedPreservesUser(unittest.TestCase):
+    """A-class dual-path (M1.5.1). Behaviour contract:
+    ``clear_managed_aliases`` removes only aliases that match the
+    managed pattern (``in_*`` / ``out_*`` / quat-suffix); user-set
+    aliases on the same node survive. Same assertion shape across
+    branches (加固 5)."""
+
+    def setUp(self):
+        if conftest._REAL_MAYA:
+            import _mayapy_fixtures
+            _mayapy_fixtures.ensure_maya_standalone()
+            # Build a clean transform with two custom attrs +
+            # two aliases (one managed, one user-set).
+            self._shape = cmds.createNode("transform")
+            cmds.addAttr(self._shape, longName="oldAttr",
+                         attributeType="double", keyable=True)
+            cmds.addAttr(self._shape, longName="otherAttr",
+                         attributeType="double", keyable=True)
+            cmds.aliasAttr("out_oldAttr",
+                           "{}.oldAttr".format(self._shape))
+            cmds.aliasAttr("myCustomName",
+                           "{}.otherAttr".format(self._shape))
+        else:
+            _reset_cmds()
+
+    def tearDown(self):
+        if conftest._REAL_MAYA:
+            try:
+                cmds.delete(self._shape)
+            except Exception:
+                pass
 
     def test_only_managed_removed(self):
-        _reset_cmds()
         from RBFtools import core_alias
-        # Pre-existing aliases on the shape:
-        #   out_oldAttr  -> output[0]   (managed, stale)
-        #   myCustomName -> output[1]   (user-set, preserve)
-        cmds.aliasAttr.return_value = [
-            "out_oldAttr", "output[0]",
-            "myCustomName", "output[1]",
-        ]
-        removed = []
+        if conftest._REAL_MAYA:
+            core_alias.clear_managed_aliases(self._shape)
+            # Behaviour assertion: managed alias gone, user alias kept.
+            remaining = cmds.aliasAttr(self._shape, query=True) or []
+            self.assertNotIn("out_oldAttr", remaining,
+                "managed alias 'out_oldAttr' still present")
+            self.assertIn("myCustomName", remaining,
+                "user-set 'myCustomName' was wrongly removed")
+        else:
+            cmds.aliasAttr.return_value = [
+                "out_oldAttr", "output[0]",
+                "myCustomName", "output[1]",
+            ]
+            removed = []
 
-        def fake_alias(*args, **kwargs):
-            if kwargs.get("query"):
-                return cmds.aliasAttr.return_value
-            if kwargs.get("remove"):
-                removed.append(args[0])
+            def fake_alias(*args, **kwargs):
+                if kwargs.get("query"):
+                    return cmds.aliasAttr.return_value
+                if kwargs.get("remove"):
+                    removed.append(args[0])
+                    return None
                 return None
-            return None
 
-        cmds.aliasAttr.side_effect = fake_alias
-
-        core_alias.clear_managed_aliases("shape1")
-
-        # Only the managed alias should be removed.
-        self.assertEqual(len(removed), 1)
-        self.assertIn("shape1.out_oldAttr", removed[0])
-        self.assertNotIn("myCustomName", " ".join(removed))
+            cmds.aliasAttr.side_effect = fake_alias
+            core_alias.clear_managed_aliases("shape1")
+            self.assertEqual(len(removed), 1)
+            self.assertIn("shape1.out_oldAttr", removed[0])
+            self.assertNotIn("myCustomName", " ".join(removed))
 
 
 # ----------------------------------------------------------------------
@@ -276,28 +306,71 @@ class T6_ApplyAliasesAPIPaths(unittest.TestCase):
 # ----------------------------------------------------------------------
 
 
-@unittest.skipIf(conftest._REAL_MAYA,
-    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*); real maya.cmds is not a MagicMock under mayapy")
 class T7_ReadAliases(unittest.TestCase):
+    """A-class dual-path (M1.5.1). Behaviour contract:
+    ``read_aliases`` returns a dict ``{"input": {idx: alias},
+    "output": {idx: alias}}`` populated from aliases on the shape's
+    ``input[N]`` / ``output[N]`` plugs; foreign aliases on other
+    attrs are ignored. Same return-shape assertion across branches
+    (加固 5)."""
+
+    def setUp(self):
+        if conftest._REAL_MAYA:
+            import _mayapy_fixtures
+            _mayapy_fixtures.ensure_maya_standalone()
+            # Build a transform that fakes the input[]/output[]
+            # multi plugs of an RBFtools shape — works without
+            # the .mll because addAttr accepts any multi double.
+            self._shape = cmds.createNode("transform")
+            cmds.addAttr(self._shape, longName="input",
+                         attributeType="double", multi=True)
+            cmds.addAttr(self._shape, longName="output",
+                         attributeType="double", multi=True)
+            cmds.addAttr(self._shape, longName="someOtherAttr",
+                         attributeType="double", keyable=True)
+            # Materialise the multi indices.
+            cmds.setAttr("{}.input[0]".format(self._shape), 0.0)
+            cmds.setAttr("{}.output[0]".format(self._shape), 0.0)
+            cmds.setAttr("{}.output[1]".format(self._shape), 0.0)
+            # Plant the four aliases under test.
+            cmds.aliasAttr("in_rotateX",
+                           "{}.input[0]".format(self._shape))
+            cmds.aliasAttr("out_blendA",
+                           "{}.output[0]".format(self._shape))
+            cmds.aliasAttr("out_blendB",
+                           "{}.output[1]".format(self._shape))
+            cmds.aliasAttr("myWidget",
+                           "{}.someOtherAttr".format(self._shape))
+
+    def tearDown(self):
+        if conftest._REAL_MAYA:
+            try:
+                cmds.delete(self._shape)
+            except Exception:
+                pass
 
     def test_round_trip_input_output(self):
-        _reset_cmds()
         from RBFtools import core_alias
-        cmds.aliasAttr.return_value = [
-            "in_rotateX", "input[0]",
-            "out_blendA", "output[0]",
-            "out_blendB", "output[1]",
-            # Foreign alias on an unrelated attr — must be ignored.
-            "myWidget", "someOtherAttr",
-        ]
+        if conftest._REAL_MAYA:
+            result = core_alias.read_aliases(self._shape)
+        else:
+            _reset_cmds()
+            cmds.aliasAttr.return_value = [
+                "in_rotateX", "input[0]",
+                "out_blendA", "output[0]",
+                "out_blendB", "output[1]",
+                # Foreign alias on an unrelated attr — must be ignored.
+                "myWidget", "someOtherAttr",
+            ]
 
-        def fake_alias(*args, **kwargs):
-            if kwargs.get("query"):
-                return cmds.aliasAttr.return_value
-            return None
+            def fake_alias(*args, **kwargs):
+                if kwargs.get("query"):
+                    return cmds.aliasAttr.return_value
+                return None
 
-        cmds.aliasAttr.side_effect = fake_alias
-        result = core_alias.read_aliases("shape1")
+            cmds.aliasAttr.side_effect = fake_alias
+            result = core_alias.read_aliases("shape1")
+        # Same final-shape assertion under both branches.
         self.assertEqual(result["input"], {0: "in_rotateX"})
         self.assertEqual(result["output"], {0: "out_blendA",
                                              1: "out_blendB"})

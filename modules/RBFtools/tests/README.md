@@ -29,6 +29,14 @@ python -m pytest modules/RBFtools/tests/ -v
 
 mayapy 下少量测试因依赖 mock 行为（`cmds.reset_mock()` / `mock.patch` on `cmds.*`）而 class-level `skipIf(_REAL_MAYA, ...)`。这是设计选择，**不是缺陷**——纯 Python 测试覆盖算法层；mayapy 测试覆盖集成层。
 
+### ⚠ mayapy `.mll` 限制（M1.5.1 Blocker Matrix 第 1 行）
+
+mayapy 测试**当前不加载** `RBFtools.mll`：现有的 Maya 2022 build (`source/build/Release/RBFtools.mll`, dated 2026-04-07) 在 Maya 2025 mayapy 下 `cmds.loadPlugin` 时**致命崩溃**。任何依赖真实 RBFtools 节点的测试（`apply_poses` 流水线 / cache 字段读写 / mirror 真实回归 / JSON IO 真节点 round-trip）当前 **skip**，待 M1.5.1b（独立 C++ 子任务）重建 Maya 2025 兼容 `.mll` 后再启动。
+
+详见 addendum §M1.5.1.X Blocker Matrix。
+
+`tests/_mayapy_fixtures.py:require_rbftools_plugin` 是 M1.5.1b 落点的 forward-compat stub —— 调用它当前总是 raise SkipTest 并指向 Blocker Matrix。
+
 ### ⚠ Maya 版本兼容 caveat
 
 **当前双环境支持仅在 Maya 2025 + Python 3.11.4 + PySide6 6.5.3 下验证**。
