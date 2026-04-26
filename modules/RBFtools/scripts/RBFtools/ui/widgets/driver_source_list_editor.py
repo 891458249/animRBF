@@ -125,12 +125,47 @@ class DriverSourceListEditor(_OrderedListEditorBase):
     ``listChanged`` signal payload is ``list[DriverSource]``. Per
     Hardening 5, also exposes a deprecated single-driver mirror
     (:meth:`node_name`) so 14 legacy call-sites in main_window.py /
-    pose_editor.py / controller.py keep working unchanged."""
+    pose_editor.py / controller.py keep working unchanged.
+
+    M_UIRECONCILE wiring (decision A.2 + F.1): the ``+`` and ``-``
+    buttons no longer mutate local widget state directly. They emit
+    ``addRequested`` / ``removeRequested`` so the controller layer
+    (via ``main_window``) drives the real ``core.add_driver_source``
+    / ``core.remove_driver_source`` mutation, then reloads the
+    widget from the resulting node state. This closes the
+    M_B24b1 island-widget gap (see addendum
+    §M_UIRECONCILE.m_b24b1-correction).
+    """
+
+    # M_UIRECONCILE: payload-less request signals - main_window owns
+    # the cmds.ls call that resolves the current Maya selection, so
+    # the widget stays free of `import maya.cmds` (MVC red line).
+    addRequested    = QtCore.Signal()
+    removeRequested = QtCore.Signal(int)
 
     def __init__(self, parent=None):
         super(DriverSourceListEditor, self).__init__(parent)
         self.set_label(tr("driver_source_list_header"))
         self.set_empty_hint(tr("driver_source_list_empty_hint"))
+
+    # --- M_UIRECONCILE: override base button handlers --------------
+
+    def _on_add_clicked(self):
+        """M_UIRECONCILE (decision A.2): replace the legacy
+        ``base._add_row_internal(<unset>)`` behaviour. We forward
+        the click to the controller layer via ``addRequested``.
+        The widget will reload via ``set_sources`` once the
+        controller emits ``driverSourcesChanged``."""
+        self.addRequested.emit()
+
+    def _on_remove_clicked(self):
+        """M_UIRECONCILE: forward selected row index. Controller
+        runs the path-A confirm + core.remove_driver_source +
+        emits driverSourcesChanged for reload."""
+        row = self._list.currentRow()
+        if row < 0:
+            return
+        self.removeRequested.emit(row)
 
     # --- _OrderedListEditorBase virtuals -------------------------------
 

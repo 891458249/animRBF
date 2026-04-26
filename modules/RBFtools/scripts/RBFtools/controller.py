@@ -61,6 +61,11 @@ class MainController(QtCore.QObject):
     radiusUpdated   = QtCore.Signal(float, bool, bool)
     editorLoaded    = QtCore.Signal()
     statusMessage   = QtCore.Signal(str)
+    # M_UIRECONCILE (F.1): MVC-clean signal that fires after every
+    # add_driver_source / remove_driver_source mutation so the UI can
+    # reload its multi-source widgets from the new node state. Widgets
+    # never talk to each other directly - they all subscribe here.
+    driverSourcesChanged = QtCore.Signal()
 
     def __init__(self, parent=None):
         super(MainController, self).__init__(parent)
@@ -206,13 +211,18 @@ class MainController(QtCore.QObject):
             cmds.warning("add_driver_source: no current node")
             return None
         try:
-            return core.add_driver_source(
+            idx = core.add_driver_source(
                 self._current_node, driver_node, driver_attrs,
                 weight=weight, encoding=encoding)
         except Exception as exc:
             cmds.warning(
                 "add_driver_source failed: {}".format(exc))
             return None
+        # M_UIRECONCILE (F.1): notify subscribers so the
+        # DriverSourceListEditor + any future multi-source widgets
+        # reload from the post-mutation node state.
+        self.driverSourcesChanged.emit()
+        return idx
 
     def remove_driver_source(self, index):
         """Path A entry-point for removing a driver source. Walks
@@ -230,11 +240,14 @@ class MainController(QtCore.QObject):
             return False
         try:
             core.remove_driver_source(self._current_node, index)
-            return True
         except Exception as exc:
             cmds.warning(
                 "remove_driver_source failed: {}".format(exc))
             return False
+        # M_UIRECONCILE (F.1): notify subscribers - same channel as
+        # add_driver_source above.
+        self.driverSourcesChanged.emit()
+        return True
 
     def read_driver_sources(self):
         """Read current node's driver sources (multi). Returns

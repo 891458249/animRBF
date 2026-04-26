@@ -389,11 +389,13 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._va_section = VectorAngleSection()
         self._rbf_section = RBFSection()
         # M_B24b1: multi-source driver section (B2 + B4 UI primary
-        # deliverable per user override 2026-04-26). Collapsible so the
-        # legacy single-driver pose-editor flow remains the default
-        # entry point until M_B24b2 lands the downstream consumers.
+        # deliverable per user override 2026-04-26).
+        # M_UIRECONCILE (decision C.1 + D.1): default to expanded so
+        # the wired multi-source editor is the first thing the TD
+        # sees; the section header label dropped the "(preview)"
+        # qualifier in the i18n dictionary.
         self._driver_sources_section = CollapsibleFrame(
-            tr("section_driver_sources"), collapsed=True)
+            tr("section_driver_sources"), collapsed=False)
         self._driver_source_list = DriverSourceListEditor()
         self._output_encoding_combo = OutputEncodingCombo()
         self._driver_sources_section.add_widget(self._driver_source_list)
@@ -833,6 +835,22 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Row context-menu callback
         pe._row_action_callback = self._on_pose_row_action
 
+        # ---- M_UIRECONCILE: DriverSourceListEditor wiring -----------
+        # Closes the M_B24b1 island-widget gap (see addendum
+        # §M_UIRECONCILE.m_b24b1-correction). The widget emits
+        # request signals; main_window owns the cmds.ls call and
+        # delegates to controller.add_driver_source /
+        # remove_driver_source, then reloads via the controller's
+        # driverSourcesChanged signal (decision F.1, MVC clean).
+        self._driver_source_list.addRequested.connect(
+            self._on_driver_source_add_requested)
+        self._driver_source_list.removeRequested.connect(
+            self._on_driver_source_remove_requested)
+        ctrl.driverSourcesChanged.connect(self._reload_driver_sources)
+        ctrl.editorLoaded.connect(self._reload_driver_sources)
+        ctrl.nodesRefreshed.connect(
+            lambda _names: self._reload_driver_sources())
+
     # =================================================================
     #  Deferred init
     # =================================================================
@@ -927,6 +945,70 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
               else self._pose_editor.driven_list)
         al.set_node_name(sel[0])
         self._refresh_attr_list(role)
+
+    # =================================================================
+    #  M_UIRECONCILE — DriverSourceListEditor slot wiring
+    # =================================================================
+
+    def _on_driver_source_add_requested(self):
+        """M_UIRECONCILE (decision A.2 + Hardening 3): batch-add
+        every transform in the current Maya selection as a
+        driverSource entry on the active node. Driver attrs are
+        left empty - the TD configures them per-row via the
+        widget once the row is materialised by the post-mutation
+        reload. The current RBFtools shape is filtered out so a
+        node never wires itself as its own driver."""
+        sel = cmds.ls(selection=True, type="transform") or []
+        if not sel:
+            cmds.warning(tr("warning_driver_source_no_selection"))
+            return
+        current = self._ctrl.current_node or ""
+        current_shape = ""
+        if current:
+            try:
+                from RBFtools import core as _core
+                current_shape = _core.get_shape(current) or ""
+            except Exception:
+                current_shape = ""
+        sel_filtered = [
+            n for n in sel if n != current and n != current_shape]
+        if not sel_filtered:
+            cmds.warning(tr("warning_driver_source_self_excluded"))
+            return
+        for node in sel_filtered:
+            self._ctrl.add_driver_source(
+                node, [], weight=1.0, encoding=0)
+        # The controller emits driverSourcesChanged inside each
+        # add_driver_source call - the reload slot fires
+        # automatically; no explicit call needed here.
+
+    def _on_driver_source_remove_requested(self, index):
+        """M_UIRECONCILE: forward the row index to controller's
+        path-A confirm + remove flow."""
+        self._ctrl.remove_driver_source(int(index))
+
+    def _reload_driver_sources(self):
+        """M_UIRECONCILE: reload DriverSourceListEditor + maintain
+        the pose-editor multi-source banner (decision C.1 +
+        Hardening 2 - banner gated on len(sources) > 1, single
+        source keeps the legacy AttributeList workflow visually
+        unchanged per red line 14 backcompat parity)."""
+        try:
+            sources = list(self._ctrl.read_driver_sources())
+        except Exception:
+            sources = []
+        self._driver_source_list.set_sources(sources)
+        try:
+            if len(sources) > 1:
+                self._pose_editor.show_multi_source_banner(
+                    tr("banner_multi_source_detected"))
+            else:
+                self._pose_editor.hide_multi_source_banner()
+        except AttributeError:
+            # pose_editor banner support is added by P2 below; this
+            # branch keeps the wiring forward-compatible if the
+            # banner methods land in a follow-up commit.
+            pass
 
     def _on_filters_changed(self, role, filters):
         for k, v in filters.items():

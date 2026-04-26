@@ -171,7 +171,7 @@ _EN = {
     "live_edit_warn_no_attrs":         "no driver attrs to listen on",
     "live_edit_warn_failed":           "Live Edit toggle failed",
     # -- M_B24b1: multi-source driver section + outputEncoding --
-    "section_driver_sources":          "Multi-Source Drivers (preview)",
+    "section_driver_sources":          "Driver Sources",
     "driver_source_list_header":       "Driver Sources",
     "driver_source_list_empty_hint":
         "No driver sources. Use Add to register one or more drivers.",
@@ -316,6 +316,19 @@ _EN = {
     #    so the language toggle reaches the script-editor warning. --
     "warning_pose_pruner_no_node":
         "Pose Pruner: pick an RBF node first.",
+    # -- M_UIRECONCILE: DriverSourceListEditor add-flow warnings +
+    #    pose-editor multi-source banner. --
+    "warning_driver_source_no_selection":
+        "Driver Sources: select one or more transforms in the "
+        "scene before clicking +.",
+    "warning_driver_source_self_excluded":
+        "Driver Sources: the current RBF node was excluded from "
+        "the selection (a node cannot drive itself); nothing to "
+        "add.",
+    "banner_multi_source_detected":
+        "Multi-source driver detected on this node. Use the "
+        "Driver Sources editor above; the single-driver picker "
+        "below shows the first source only.",
 }
 
 _ZH = {
@@ -466,7 +479,7 @@ _ZH = {
     "live_edit_warn_no_attrs":         u"\u65e0 driver \u5c5e\u6027\u53ef\u76d1\u542c",
     "live_edit_warn_failed":           u"\u5b9e\u65f6\u7f16\u8f91\u5f00\u542f\u5931\u8d25",
     # -- M_B24b1 multi-source driver section --
-    "section_driver_sources":          u"\u591a\u6e90\u9a71\u52a8 (\u9884\u89c8)",
+    "section_driver_sources":          u"\u9a71\u52a8\u6e90",
     "driver_source_list_header":       u"\u9a71\u52a8\u6e90",
     "driver_source_list_empty_hint":
         u"\u672a\u914d\u7f6e\u9a71\u52a8\u6e90\u3002\u70b9\u51fb Add \u6dfb\u52a0\u3002",
@@ -600,6 +613,14 @@ _ZH = {
         u"\u4e3a\u5f53\u524d\u6d3b\u52a8\u8282\u70b9\u91cd\u65b0\u8ba1\u7b97 Profile \u62a5\u544a\u3002",
     "warning_pose_pruner_no_node":
         u"Pose Pruner: \u8bf7\u5148\u9009\u62e9\u4e00\u4e2a RBF \u8282\u70b9\u3002",
+    "warning_driver_source_no_selection":
+        u"Driver Sources: \u70b9\u51fb + \u4e4b\u524d\u8bf7\u5728\u573a\u666f\u4e2d\u9009\u62e9\u4e00\u4e2a\u6216\u591a\u4e2a transform\u3002",
+    "warning_driver_source_self_excluded":
+        u"Driver Sources: \u5f53\u524d RBF \u8282\u70b9\u5df2\u88ab\u6392\u9664\uff08\u8282\u70b9\u4e0d\u80fd\u9a71\u52a8\u81ea\u8eab\uff09\uff0c"
+        u"\u65e0\u53ef\u6dfb\u52a0\u7684\u6e90\u3002",
+    "banner_multi_source_detected":
+        u"\u8be5\u8282\u70b9\u5df2\u914d\u7f6e\u591a\u6e90\u9a71\u52a8\u3002\u8bf7\u4f7f\u7528\u4e0a\u65b9 Driver Sources \u7f16\u8f91\u5668\uff1b"
+        u"\u4e0b\u65b9\u5355\u9a71\u52a8\u9009\u62e9\u5668\u4ec5\u663e\u793a\u7b2c\u4e00\u4e2a\u6e90\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

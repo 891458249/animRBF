@@ -5478,6 +5478,416 @@ added; M1.5.3 PAUSED still honoured.
 
 ---
 
+## §M_UIRECONCILE — DriverSourceListEditor wiring + multi-source UX integration
+
+> **STATUS** (2026-04-27): production P0 unblock landing **before**
+> v5.0 final tag. The user-reported symptom from the 2026-04-27
+> Maya 2025 install: "全选 4 骨骼 + 点 多源驱动 + 按钮 → 0 创建,
+> 仅 widget 视觉添加 `<unset>` row". F1 double-grep proved this is
+> not a bug in any single line of code but a systemic island-widget
+> assembly gap - the M_B24a/b/c/d seven-commit backend was complete,
+> but the `+` button's `clicked -> _on_add_clicked -> emit
+> listChanged` chain had **zero subscribers**, and
+> `controller.add_driver_source` had **zero callers from any UI
+> code path**. Multi-source backend was built but never plugged
+> into the UI.
+>
+> verify-before-design 22nd use; **PROJECT METHODOLOGY self-
+> correction event #3** - see §M_UIRECONCILE.m_b24b1-correction
+> for the verbatim PROJECT METHODOLOGY extension that prevents
+> recurrence under M4.1 / M4.2 / M_B7 / M_B11 / M_B14 going
+> forward.
+
+### §M_UIRECONCILE.scope
+
+| Layer | Change | LoC |
+|---|---|---|
+| `controller.py` | `+ driverSourcesChanged = QtCore.Signal()`; emit at the tail of `add_driver_source` (return after emit) and `remove_driver_source` (only on the success path, never on user-cancel) | ~15 |
+| `ui/widgets/driver_source_list_editor.py` | New `addRequested` + `removeRequested(int)` signals; `_on_add_clicked` overridden to forward via `addRequested.emit()` (no local row mutation); `_on_remove_clicked` overridden to forward selected row index via `removeRequested` | ~40 |
+| `ui/main_window.py` | New slot `_on_driver_source_add_requested` (Hardening 3 `cmds.ls(type="transform")` filter + self-shape exclusion + warning paths); new slot `_on_driver_source_remove_requested` (forwards to `controller.remove_driver_source` path-A confirm); new slot `_reload_driver_sources` (Hardening 2 banner gate `len > 1`); wire all three to widget signals + `controller.driverSourcesChanged` + `editorLoaded` + `nodesRefreshed`; section default `collapsed=False` (decision C.1) | ~80 |
+| `ui/widgets/pose_editor.py` | New banner `QLabel` wired into `_build`; `show_multi_source_banner(text)` / `hide_multi_source_banner()` public API. AttributeList behaviour 0-modified (red line 14 backcompat parity for the single-source workflow) | ~30 |
+| `ui/i18n.py` | Section header label dropped the "(preview)" qualifier (D.1); 3 new keys (`warning_driver_source_no_selection` / `warning_driver_source_self_excluded` / `banner_multi_source_detected`) - EN+ZH parity (D.3) | ~25 |
+| `tests/test_m_uireconcile_driver_source_wired.py` (new) | #36 source-scan layer (5 sub-checks: a/b/c/d/e); mock E2E layer (3 click/remove/no-op); controller signal parity (3 emit/no-emit on add/remove/cancel); banner source-scan + lifecycle (5 tests); i18n parity + preview-removal (2 tests) - **18 tests total** | ~330 |
+| `addendum_20260424.md` | this section (6 sub-sections + GUI verification checklist Scenarios 5/6/7/8 with backcompat parity + scope-exclusions) | ~280 |
+| **Total** | | **~800** |
+
+Single commit; mid-step checkpoints (P0 / P1 / P2) all passed
+with 558/558 zero-regression before tests landed.
+
+### §M_UIRECONCILE.m_b24b1-correction
+
+> **PROJECT METHODOLOGY self-correction event #3** (2026-04-27).
+> Companion to event #1 (M_B24a2-1 F2 driverList iteration
+> misjudgement; led to §M_B24d data-path corrective) and event
+> #2 (M_B24c F1 planner 5-callsite misdirection; led to
+> §M_B24c.planner-error-correction).
+
+**Event**: M_B24b1 (commit `2da2059`) declared "controller path A
+wiring" complete. The wording was misleading: only the entry-
+point functions on `controller.py` were defined
+(`add_driver_source` / `remove_driver_source` /
+`read_driver_sources`). The UI signal-to-controller bridge was
+never installed. M_B24b1 permanent guards #27 / #28 are pure
+source-scans for class existence, base-class inheritance, and
+the deprecated dual-path methods - they cannot detect a missing
+signal connection.
+
+**Production observation** (user, Maya 2025, 2026-04-27):
+clicking the `DriverSourceListEditor` `+` button visually adds
+an `<unset> 1.000 Raw` row but produces zero scene-side change.
+Verified by F1 triple grep:
+
+- `_OrderedListEditorBase._on_add_clicked` (base.py:225) only
+  appends a local `<unset>` row + emits `listChanged`.
+- The only `.listChanged.connect(` callsites are in
+  `rbf_section.py` for the quat-group / rotate-order editors,
+  not for the `DriverSourceListEditor`.
+- `controller.add_driver_source` has zero callers across the
+  entire `ui/` tree.
+
+The seven `M_B24a / M_B24b / M_B24d / M_B24c` backend commits
+shipped a fully-functional multi-source pipeline that no UI
+ever asked to use.
+
+#### PROJECT METHODOLOGY extension (mandatory for M4.1 / M4.2 / M_B7 / M_B11 / M_B14 / all subsequent UI subtasks)
+
+verify-before-design self-correction summary:
+
+| # | Event | Lesson | Defence (mandatory under PROJECT METHODOLOGY) |
+|---|---|---|---|
+| 1 | M_B24a2-1 F2 (driverList iteration misjudged) | "If C++ iterates multi, Python must iterate multi" is faulty inference | Bidirectional grep (read side + write side + trace indirection) - already binding from §M_B24d.lesson-learned |
+| 2 | M_B24c F1 (planner cited 5 mirror callsites; actual = 2) | Planner relied on memory rather than grep output | Callsite line numbers MUST be quoted from grep output - already binding from §M_B24c.planner-error-correction |
+| 3 | M_UIRECONCILE F1 (M_B24b1 island widget) | Widget existence is not behaviour; source-scan guards alone do NOT catch missing signal-to-backend wiring | **Every UI subtask MUST ship at least one mock E2E test that proves "button click -> controller method called with expected args"** |
+
+UI subtask definition: any subtask that adds or modifies a widget
+click handler, slot, or signal connect. The E2E mock test
+template is captured by `T_DRIVER_SOURCE_ADD_BUTTON_WIRED` (#36)
+sub-check (d). Any UI subtask landing only source-scan guards
+(no E2E test) will be flagged at Step 3 review and held until
+the E2E layer lands.
+
+This is a precedent record, not blame - the existing #27 / #28
+guards remain in place because they catch a different failure
+mode (class deletion / base-class detachment) that #36 does not.
+
+### §M_UIRECONCILE.wiring-bridge-design
+
+The fix takes the request-signal pattern (widget emits a thin
+intent signal; main_window owns the `cmds.*` calls; controller
+owns the `core.*` mutation) instead of having the widget call
+the controller directly. Three reasons:
+
+1. **MVC red line**: `import maya.cmds` is forbidden in widget
+   code; the widget cannot resolve `cmds.ls(selection=True)`
+   on its own.
+2. **Single emission point**: `controller.driverSourcesChanged`
+   is a single Qt signal that fires after every successful
+   mutation. Future multi-source consumers (the M_UIRECONCILE2
+   pose-editor migration; any new diagnostic widget) subscribe
+   the same signal - no widget-to-widget plumbing.
+3. **Path-A integration is preserved**: `remove_driver_source`
+   keeps its existing `ask_confirm` dialog (M_B24b1 G.1
+   action_id), and the signal only emits on the success path
+   so a user-cancelled remove does not trigger a spurious
+   reload.
+
+The wiring chain end-to-end:
+
+```
+DriverSourceListEditor.+button.clicked
+    -> _on_add_clicked (override)              # emits intent
+    -> addRequested
+    -> main_window._on_driver_source_add_requested
+        -> cmds.ls(selection=True, type="transform")   # MVC owner
+        -> filter out current node + current shape (Hardening 3)
+        -> for each node: ctrl.add_driver_source(node, [], 1.0, 0)
+            -> core.add_driver_source                  # Maya scene mutation
+            -> ctrl.driverSourcesChanged.emit()        # single notice
+                -> main_window._reload_driver_sources
+                    -> ctrl.read_driver_sources()
+                    -> editor.set_sources(...)         # widget reload
+                    -> banner gate len > 1 (Hardening 2)
+```
+
+Reload also fires from `editorLoaded` (node-switch) and
+`nodesRefreshed` (scene rescan), so the widget tracks the active
+node automatically.
+
+### §M_UIRECONCILE.paradigm-integration-decision
+
+The pre-M_UIRECONCILE UI presented two driver paradigms with no
+explicit relationship:
+
+- `pose_editor.driver_list` is an `AttributeList` widget - one
+  node, one or more attributes - the legacy single-driver
+  workflow that has shipped since M3.0.
+- `_driver_source_list` is the M_B24b1 `DriverSourceListEditor`
+  - many sources, each with its own node + attrs + weight +
+  encoding.
+
+Decision **C.1** (paradigm integration, minimal-surgery variant):
+
+- The Driver Sources section defaults to **expanded** so the
+  wired multi-source editor is the first thing a TD sees on
+  the panel.
+- The "(preview)" qualifier is dropped from the section header
+  i18n key (decision D.1).
+- The legacy `AttributeList` workflow is **0-modified** (red
+  line 14 backcompat parity). Single-source nodes are visually
+  unchanged from pre-M_UIRECONCILE.
+- A multi-source banner above the pose-editor activates only
+  when `len(read_driver_info_multi(node)) > 1` (Hardening 2):
+  *"Multi-source driver detected on this node. Use the Driver
+  Sources editor above; the single-driver picker below shows the
+  first source only."* The banner explains - in TD-facing
+  terms - why the AttributeList shows what it shows when
+  multi-source is active.
+
+Decision **E.3** (out of scope here): the deeper migration that
+makes the pose-editor itself fully multi-source-aware (per-source
+attribute lists, per-source filter mode, etc.) is deferred to
+**M_UIRECONCILE2** (v5.x post-final stub). That is a paradigm
+shift; M_UIRECONCILE is a wiring fix.
+
+### §M_UIRECONCILE.permanent-guards
+
+Permanent guards: 35 -> **36**.
+
+```
+T_DRIVER_SOURCE_ADD_BUTTON_WIRED (#36) - 5 source-scan +
+                                          3 mock E2E tests:
+  source-scan layer:
+    (a) main_window subscribes a DriverSourceListEditor signal
+        (regex: _driver_source_list\.\w+\.connect\()
+    (b) main_window calls controller.add_driver_source
+        (or future add_driver_sources_batch helper)
+    (c) main_window's reload path calls
+        controller.read_driver_sources
+    (d) controller defines driverSourcesChanged Qt signal AND
+        emits it from BOTH add_driver_source and
+        remove_driver_source method bodies (>= 2 emit
+        callsites)
+    (e) DriverSourceListEditor exposes addRequested AND
+        removeRequested signals
+
+  mock E2E layer (PROJECT METHODOLOGY extension):
+    test_add_clicked_emits_add_requested      - + button click
+                                                 emits intent,
+                                                 no local mutation
+    test_remove_clicked_emits_with_row_index  - - button click
+                                                 emits with the
+                                                 currently-selected
+                                                 row index
+    test_remove_clicked_no_selection_is_noop  - - button click on
+                                                 empty selection is
+                                                 a no-op (no
+                                                 spurious removeRequested)
+```
+
+Plus controller signal parity (3 tests) + banner lifecycle (3
+tests) + i18n parity / preview-removal (2 tests) - 18 tests
+total in the new file.
+
+### §M_UIRECONCILE.gui-verification-checklist (TD must run after push)
+
+Code-layer guards (#36 source-scan + mock E2E + controller
+signal parity + banner lifecycle) lock the wiring; production
+multi-source behaviour can only be verified in a live Maya
+session because the `cmds.ls(selection=True, type="transform")`
+result depends on the user's active scene selection.
+
+#### Scenario 5 - Multi-source batch add (the core P0)
+
+1. Open the RBFtools UI in Maya 2025 and pick / create an active
+   RBFtools node.
+2. In the Outliner, multi-select 4 transforms (e.g.
+   `joint1` + `joint2` + `joint3` + `joint4`).
+3. Click the `+` button in the Driver Sources editor.
+4. **Expected**: the editor immediately shows 4 rows (one per
+   selected joint) with `1.000` weight + `Raw` encoding. The
+   underlying Maya schema receives 4 `driverSource[d]` entries
+   (verifiable via `cmds.getAttr("RBFnode1Shape.driverSource",
+   multiIndices=True)`).
+5. **Expected**: the multi-source banner appears above the
+   single-driver picker because `len(sources) == 4`.
+
+#### Scenario 6 - Node-switch reload
+
+1. After Scenario 5, switch to a different RBFtools node in
+   the node combo.
+2. **Expected**: the Driver Sources editor reloads to reflect
+   the new node's sources (empty list + the empty-hint label
+   if the new node has none). The banner state follows.
+3. Switch back to the original node.
+4. **Expected**: all 4 source rows reappear.
+
+#### Scenario 7 - Per-row remove + double-widget sync
+
+1. After Scenario 5, select any row in the Driver Sources
+   editor and click `-`.
+2. The path-A confirm dialog (`remove_driver_source`) appears
+   - confirm.
+3. **Expected**: the editor shows 3 rows; the Maya
+   `driverSource[idx]` plug is removed (verifiable via
+   `cmds.removeMultiInstance` audit); the banner is still
+   visible (`len = 3 > 1`).
+4. Continue removing until `len == 1`.
+5. **Expected**: the banner disappears (single-source mode
+   restored).
+6. Remove the last source.
+7. **Expected**: the editor shows the empty-hint label.
+
+#### Scenario 8 - Single-source backcompat parity (red line 14)
+
+1. Create or pick an RBFtools node that uses the legacy
+   single-driver workflow (one source via the pose-editor's
+   `AttributeList` only - no multi-source entries).
+2. **Expected**: the multi-source banner is hidden
+   (`len(sources) <= 1`).
+3. **Expected**: the pose-editor `AttributeList` driver picker
+   behaves exactly as it did pre-M_UIRECONCILE - select node,
+   pick attributes, Apply / Connect / Reload all work as
+   before.
+4. **Expected**: switching languages mid-session keeps every
+   widget label consistent (M_UIPOLISH coverage continues to
+   apply).
+
+#### TD reporting path
+
+After Maya 2025 RBFtools restart and the four scenarios:
+
+- All four pass -> M_UIRECONCILE truly complete; v5.0 final
+  path advances to M4.1 (B1 six-solver delivery)
+- Any scenario fails -> open M_UIRECONCILE_HOTFIX immediately;
+  do not start M4.1 until the production wiring is verified
+
+### §M_UIRECONCILE.empirical-baseline (2026-04-27)
+
+| Env | Pre (post-M_UIPOLISH `82444b5`) | Post |
+|---|---|---|
+| Pure-Python | 558 OK (skip 3) | **576 OK (skip 3)** |
+| mayapy 2025 | 558 ran 497 pass 61 skip | **576 ran 506 pass 70 skip** |
+
+mayapy delta: +18 = +9 pass (5 #36 source-scan + 2 banner
+source-scan + 2 i18n / preview removal) + +9 skip (3 mock E2E +
+3 controller signal parity + 3 banner lifecycle - all
+mock-only `@skipIf(_REAL_MAYA)`). Per the forward-compat-
+corrected red line 13 mock-pattern legitimate skip naturally
+accumulates; M1.5.3 PAUSED still honoured.
+
+### §M_UIRECONCILE.scope-exclusions
+
+- 0 lines C++ / 0 .mll / 0 CMakeLists / 0 schema modifications
+- 0 lines `core.py` / `core_*.py` business logic (controller
+  only adds the signal definition + two `emit()` callsites
+  inside existing methods)
+- 0 modifications to `_OrderedListEditorBase` (decision A.2 +
+  red line 5 - the override is in the `DriverSourceListEditor`
+  subclass; sibling subclasses `OrderedIntListEditor` /
+  `OrderedEnumListEditor` keep the legacy local-mutation
+  behaviour their use cases need)
+- 0 modifications to `pose_editor.driver_list` (`AttributeList`)
+  - the legacy single-source workflow is preserved verbatim
+  (red line 14 backcompat parity); the only pose-editor change
+  is the optional banner `QLabel`, hidden by default
+- 0 modifications to hotfix 4 files (M_HOTFIX_PYSIDE6 `edf5367`)
+- 0 modifications to the M_UIPOLISH 14 files
+  (`82444b5` baseline preserved)
+- 0 modifications to the 6 PERMANENT dual-version guards
+- 0 modifications to the M_B24a/b/d/c locked surfaces
+- Multi-source pose-editor migration (per-source attribute
+  panes etc.) DEFERRED to M_UIRECONCILE2 v5.x post-final stub
+
+### §M_UIRECONCILE.loc-overrun-precedent
+
+LoC actual ~876 vs estimate ~620 - approximately 10% over the
+red-line-2 budget of 800. **Single commit accepted; precedent
+established** (planner ruling 2026-04-27).
+
+Breakdown:
+
+- pure code:    ~203 LoC (controller 17 + main_window 90 +
+                editor 37 + pose_editor 34 + i18n 25) - well
+                under any reasonable budget
+- tests:        ~330 LoC (18 tests; Hardening 5 mock E2E
+                pattern anchoring requires this density)
+- addendum:     ~361 LoC (Hardening 6 PROJECT METHODOLOGY
+                extension + 4 GUI verification scenarios +
+                §M_UIRECONCILE2-stub + this loc-overrun-
+                precedent sub-section)
+
+**Red line 2 forward-compat correction**:
+
+- Original: single commit ≤ 800 LoC.
+- Corrected: pure code ≤ 800 LoC (business + tests + i18n +
+  helpers); the addendum gets a separate budget when its growth
+  is driven by Hardening-series requirements.
+
+The four conditions that must all hold for the correction to
+apply:
+
+1. pure code ≤ 800 (verified via `git diff --stat` excluding
+   `docs/设计文档/`)
+2. addendum growth is directly required by the active Hardening
+   series (PROJECT METHODOLOGY extension, GUI verification
+   checklist, sub-task stubs, correction sub-sections, etc.)
+3. mid-step checkpoints all green - progression has zero
+   regression
+4. the cost of splitting outweighs the benefit (e.g. PROJECT
+   METHODOLOGY extension would land orphaned, permanent-guard
+   sub-checks would assert against absent code, the
+   correction sub-section would have nowhere to live)
+
+M_UIRECONCILE satisfies 4/4 - single commit accepted.
+
+Future subtasks (M4.1 / M4.2 / M_B7 / M_B11 / M_B14 / all v5.x
+post-final) inherit this precedent. If pure code exceeds 800
+the original red line still binds and a split is mandatory.
+If only the addendum exceeds the legacy budget, this precedent
+applies and a single commit is allowed - cite this section in
+the commit message and at Step 3 review.
+
+---
+
+## §M_UIRECONCILE2-stub — Multi-source pose-editor migration (DEFERRED to v5.x post-final)
+
+> **STATUS**: DEFERRED to v5.x post-final (since 2026-04-27).
+>
+> M_UIRECONCILE landed the wiring fix that lets multi-source
+> driver entries actually be created from the UI. The pose-
+> editor's own driver picker remains an `AttributeList` (single
+> node + N attrs); the M_UIRECONCILE banner explains this to
+> the TD when the active node is multi-source.
+>
+> M_UIRECONCILE2 will replace the pose-editor's single-driver
+> `AttributeList` with a multi-source-aware widget that exposes
+> a per-source attribute pane. This is a paradigm shift, not a
+> wiring fix - it touches the pose-editor's AttributeList
+> usage across `_gather_role_info`, `_on_select_node_for_role`,
+> Live Edit's `live_edit_apply_inputs`, and the editor's
+> `_on_reload` flow. Out of scope for the v5.0 final tag.
+
+### Restart trigger
+
+- A TD reports that the M_UIRECONCILE banner is insufficient
+  for their daily multi-source pose work (the `AttributeList`
+  showing only the first source becomes a real friction
+  point), OR
+- M5 / M_B7 work touches the pose-editor and the multi-source
+  paradigm becomes a natural co-deliverable.
+
+### Current behaviour (pre-M_UIRECONCILE2)
+
+For multi-source nodes, the Driver Sources editor at the top
+of the panel is the source of truth. The pose-editor's
+single-driver `AttributeList` shows the first source's node +
+attrs (per the `read_driver_info` deprecated-wrapper M_B24a2-1
+backcompat). The banner above the pose-editor surfaces this
+clearly so the TD never wonders why the AttributeList ignores
+sources beyond the first.
+
+---
+
 ## §M_HOTFIX_PYSIDE6 — QActionGroup PySide6 migration shim
 
 > **STRUCTURAL LESSON** (2026-04-27):

@@ -45,6 +45,26 @@ class PoseEditor(CollapsibleFrame):
     def _build(self):
         lay = self.content_layout()
 
+        # M_UIRECONCILE (decision C.1 + Hardening 2): multi-source
+        # banner. Hidden by default - main_window shows it only when
+        # the active node carries > 1 driverSource entries (single-
+        # source nodes keep the legacy AttributeList workflow
+        # visually unchanged per red line 14 backcompat parity).
+        self._lbl_multi_source_banner = QtWidgets.QLabel("")
+        self._lbl_multi_source_banner.setWordWrap(True)
+        self._lbl_multi_source_banner.setStyleSheet(
+            "QLabel {"
+            "  background: #3a3320;"
+            "  color: #f0d070;"
+            "  border: 1px solid #6a5a30;"
+            "  border-radius: 4px;"
+            "  padding: 6px 8px;"
+            "  font-size: 11px;"
+            "}"
+        )
+        self._lbl_multi_source_banner.setVisible(False)
+        lay.addWidget(self._lbl_multi_source_banner)
+
         # Auto-fill checkbox
         self._cb_auto = QtWidgets.QCheckBox(tr("auto_fill_bs"))
         self._cb_auto.toggled.connect(self.autoFillChanged)
@@ -139,6 +159,20 @@ class PoseEditor(CollapsibleFrame):
         the per-driven-attribute scale flag rows after the driven attrs
         are resolved."""
         return self._output_scale_editor
+
+    def show_multi_source_banner(self, text):
+        """M_UIRECONCILE: surface the multi-source notice. Called by
+        main_window when the active node carries > 1 driverSource
+        entries so the TD knows the AttributeList below shows only
+        the first source."""
+        self._lbl_multi_source_banner.setText(text or "")
+        self._lbl_multi_source_banner.setVisible(bool(text))
+
+    def hide_multi_source_banner(self):
+        """M_UIRECONCILE: hide the banner. Called for single-source
+        nodes (the default case under red line 14 backcompat
+        parity)."""
+        self._lbl_multi_source_banner.setVisible(False)
 
     def set_auto_fill(self, checked):
         blocked = self._cb_auto.blockSignals(True)
