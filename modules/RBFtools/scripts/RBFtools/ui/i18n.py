@@ -270,6 +270,52 @@ _EN = {
     # -- menu --
     "open":                "Open RBF Tools",
     "settings":            "Settings",
+    # -- M_UIPOLISH (B.3 micro): per-widget tooltips on the 8 widgets
+    #    that have neither a HelpButton companion nor an existing
+    #    setToolTip surface. EN/ZH parity (decision D.3, _tip suffix
+    #    naming convention shared with the M_B24b1 batch). --
+    "attribute_list_select_tip":
+        "Pick the selected scene node + its attributes into this "
+        "list. Use multi-selection in the channel box to add several "
+        "attrs at once.",
+    "import_dialog_btn_tip":
+        "Import the JSON file using the chosen mode. Replace wipes "
+        "the current node; Append adds new poses to it.",
+    "live_edit_toggle_tip":
+        "Toggle Live Edit. While ON, scene-level driver edits are "
+        "captured into the active pose row in real time.",
+    "mirror_dialog_btn_tip":
+        "Run Mirror with the current configuration. Multi-source "
+        "Generic mode is supported; Matrix-mode multi-source mirror "
+        "is blocked at the engine entry (M_B24c2).",
+    "mirror_dialog_pattern_tip":
+        "Custom regex pattern (Python re syntax) matched against the "
+        "source driver / driven names.",
+    "mirror_dialog_replacement_tip":
+        "Custom replacement applied when the pattern matches.",
+    "node_selector_combo_tip":
+        "Active RBFtools node. The list reflects every RBFtools "
+        "shape in the scene.",
+    "node_selector_pick_tip":
+        "Set the active node from the current Maya selection.",
+    "node_selector_new_tip":
+        "Create a new RBFtools node + transform.",
+    "node_selector_delete_tip":
+        "Delete the active RBFtools node and its connections.",
+    "node_selector_refresh_tip":
+        "Re-scan the scene and rebuild the node list.",
+    "pose_editor_apply_tip":
+        "Write the table's pose data onto the node (Apply).",
+    "pose_editor_connect_tip":
+        "Wire driver / driven attributes to the node (Connect).",
+    "prune_dialog_btn_tip":
+        "Run the prune workflow with the selected categories.",
+    "profile_widget_refresh_tip":
+        "Re-compute the profile report for the active node.",
+    # -- M_UIPOLISH cmds.warning string lifted out of main_window.py:660
+    #    so the language toggle reaches the script-editor warning. --
+    "warning_pose_pruner_no_node":
+        "Pose Pruner: pick an RBF node first.",
 }
 
 _ZH = {
@@ -515,6 +561,45 @@ _ZH = {
     "chinese":             u"\u4e2d\u6587",
     "open":                u"\u6253\u5f00 RBF Tools",
     "settings":            u"\u8bbe\u7f6e",
+    # -- M_UIPOLISH per-widget tooltip ZH parity --
+    "attribute_list_select_tip":
+        u"\u5c06\u573a\u666f\u4e2d\u5f53\u524d\u9009\u62e9\u7684\u8282\u70b9 + \u901a\u9053\u76d2\u4e2d\u9009\u4e2d\u7684\u5c5e\u6027"
+        u"\u52a0\u5165\u8be5\u5217\u8868\u3002\u53ef\u5728\u901a\u9053\u76d2\u591a\u9009\u4e00\u6b21\u6dfb\u52a0\u591a\u4e2a\u5c5e\u6027\u3002",
+    "import_dialog_btn_tip":
+        u"\u4f7f\u7528\u6240\u9009\u6a21\u5f0f\u5bfc\u5165 JSON \u6587\u4ef6\u3002Replace \u4f1a\u6e05\u7a7a\u5f53\u524d\u8282\u70b9\uff1b"
+        u"Append \u4f1a\u5411\u5f53\u524d\u8282\u70b9\u8ffd\u52a0\u65b0\u59ff\u52bf\u3002",
+    "live_edit_toggle_tip":
+        u"\u5207\u6362 Live Edit\u3002\u5f00\u542f\u65f6\uff0c\u5bf9\u573a\u666f\u4e2d\u9a71\u52a8\u8282\u70b9\u7684\u4fee\u6539"
+        u"\u4f1a\u5b9e\u65f6\u5199\u5165\u5f53\u524d\u9009\u4e2d\u7684\u59ff\u52bf\u884c\u3002",
+    "mirror_dialog_btn_tip":
+        u"\u6309\u5f53\u524d\u914d\u7f6e\u6267\u884c\u955c\u50cf\u3002\u5df2\u652f\u6301\u591a\u6e90 Generic \u6a21\u5f0f\uff1b"
+        u"\u591a\u6e90 Matrix \u6a21\u5f0f\u5728\u5f15\u64ce\u5165\u53e3\u88ab\u62e6\u622a\uff08M_B24c2\uff09\u3002",
+    "mirror_dialog_pattern_tip":
+        u"\u81ea\u5b9a\u4e49\u6b63\u5219\u6a21\u5f0f\uff08Python re \u8bed\u6cd5\uff09\uff0c\u7528\u4e8e\u5339\u914d\u6e90"
+        u"\u9a71\u52a8 / \u88ab\u9a71\u52a8\u8282\u70b9\u540d\u3002",
+    "mirror_dialog_replacement_tip":
+        u"\u6a21\u5f0f\u5339\u914d\u547d\u4e2d\u65f6\u4f7f\u7528\u7684\u66ff\u6362\u5b57\u7b26\u4e32\u3002",
+    "node_selector_combo_tip":
+        u"\u5f53\u524d\u6d3b\u52a8\u7684 RBFtools \u8282\u70b9\u3002\u4e0b\u62c9\u5217\u8868\u8986\u76d6\u573a\u666f\u4e2d\u6240\u6709 "
+        u"RBFtools shape\u3002",
+    "node_selector_pick_tip":
+        u"\u5c06 Maya \u5f53\u524d\u9009\u62e9\u8bbe\u4e3a\u6d3b\u52a8\u8282\u70b9\u3002",
+    "node_selector_new_tip":
+        u"\u65b0\u5efa\u4e00\u4e2a RBFtools \u8282\u70b9 + transform\u3002",
+    "node_selector_delete_tip":
+        u"\u5220\u9664\u5f53\u524d\u6d3b\u52a8\u7684 RBFtools \u8282\u70b9\u53ca\u5176\u8fde\u63a5\u3002",
+    "node_selector_refresh_tip":
+        u"\u91cd\u65b0\u626b\u63cf\u573a\u666f\u5e76\u91cd\u5efa\u8282\u70b9\u5217\u8868\u3002",
+    "pose_editor_apply_tip":
+        u"\u5c06\u8868\u683c\u4e2d\u7684\u59ff\u52bf\u6570\u636e\u5199\u5165\u8282\u70b9\uff08Apply\uff09\u3002",
+    "pose_editor_connect_tip":
+        u"\u5c06\u9a71\u52a8 / \u88ab\u9a71\u52a8\u5c5e\u6027\u8fde\u63a5\u5230\u8282\u70b9\uff08Connect\uff09\u3002",
+    "prune_dialog_btn_tip":
+        u"\u6309\u6240\u9009\u7c7b\u522b\u6267\u884c Prune \u6d41\u7a0b\u3002",
+    "profile_widget_refresh_tip":
+        u"\u4e3a\u5f53\u524d\u6d3b\u52a8\u8282\u70b9\u91cd\u65b0\u8ba1\u7b97 Profile \u62a5\u544a\u3002",
+    "warning_pose_pruner_no_node":
+        u"Pose Pruner: \u8bf7\u5148\u9009\u62e9\u4e00\u4e2a RBF \u8282\u70b9\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

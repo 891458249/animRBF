@@ -57,6 +57,7 @@ class PruneDialog(QtWidgets.QDialog):
         btn_box = QtWidgets.QHBoxLayout()
         btn_box.addStretch(1)
         self._btn_prune = QtWidgets.QPushButton(tr("btn_prune"))
+        self._btn_prune.setToolTip(tr("prune_dialog_btn_tip"))
         self._btn_cancel = QtWidgets.QPushButton(tr("cancel"))
         self._btn_prune.clicked.connect(self.accept)
         self._btn_cancel.clicked.connect(self.reject)

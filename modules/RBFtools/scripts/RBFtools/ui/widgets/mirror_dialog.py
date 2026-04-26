@@ -92,11 +92,13 @@ class MirrorDialog(QtWidgets.QDialog):
         # Custom pattern fields (hidden unless rule == Custom).
         self._lbl_pat = QtWidgets.QLabel(tr("label_custom_pattern"))
         self._txt_pat = QtWidgets.QLineEdit()
+        self._txt_pat.setToolTip(tr("mirror_dialog_pattern_tip"))
         self._txt_pat.textChanged.connect(self._recompute_target_preview)
         lay.addRow(self._lbl_pat, self._txt_pat)
 
         self._lbl_rep = QtWidgets.QLabel(tr("label_custom_replacement"))
         self._txt_rep = QtWidgets.QLineEdit()
+        self._txt_rep.setToolTip(tr("mirror_dialog_replacement_tip"))
         self._txt_rep.textChanged.connect(self._recompute_target_preview)
         lay.addRow(self._lbl_rep, self._txt_rep)
 
@@ -116,6 +118,7 @@ class MirrorDialog(QtWidgets.QDialog):
         btn_row.addStretch()
         self._btn_cancel = QtWidgets.QPushButton(tr("cancel"))
         self._btn_mirror = QtWidgets.QPushButton(tr("btn_mirror"))
+        self._btn_mirror.setToolTip(tr("mirror_dialog_btn_tip"))
         self._btn_mirror.setDefault(True)
         self._btn_cancel.clicked.connect(self.reject)
         self._btn_mirror.clicked.connect(self.accept)

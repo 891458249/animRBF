@@ -5225,6 +5225,259 @@ exempts single-source).
 
 ---
 
+## §M_UIPOLISH — i18n + tooltip coverage + HelpBubble minimize-aware
+
+> **STATUS** (2026-04-27): production UX polish landing **before**
+> v5.0 final tag. Addresses three user-reported issues:
+>
+> 1. i18n EN/ZH coverage gaps in non-widget call paths
+>    (`cmds.warning` strings + `main_window.py` out of guard scope)
+> 2. Tooltip coverage gaps on 8 key interactive widgets
+> 3. **P1 UX bug**: `HelpBubble` (the `?`-button popup) stays
+>    visible on the desktop when Maya is minimised — a top-level
+>    `Qt.Tool | Qt.WindowStaysOnTopHint` window with no listener
+>    on the main window's state changes.
+>
+> verify-before-design 21st use - the F1-F3 double-grep produced
+> two important corrections to the planner premise: i18n is
+> **already** near-complete (the existing guard is green; only
+> `cmds.warning` + `main_window` slip the scope), and tooltips
+> follow a **HelpButton + HelpBubble** paradigm, not Qt-native
+> setToolTip. The (B) decision narrowed from "all 17 missing
+> widgets" to "8 widgets with neither HelpButton companion nor
+> setToolTip surface".
+
+### §M_UIPOLISH.scope
+
+| Layer | Change | LoC |
+|---|---|---|
+| `ui/widgets/help_button.py` | `HelpButton.eventFilter` extended with `WindowStateChange` + `Hide` branches (un-pin pinned bubble); `_install/_uninstall_move_filter` connect/disconnect `QApplication.applicationStateChanged`; new `_on_application_state_changed` handler (Hardening 4 idempotence guard); legacy Move/Resize path **0-modified** (red line 14 backcompat parity) | ~50 |
+| `ui/widgets/{attribute_list,import_dialog,live_edit_widget,mirror_dialog,node_selector,pose_editor,prune_dialog,profile_widget}.py` | 15 `setToolTip(tr(...))` calls on the 8 widgets identified by the Hardening 1 evidence table - widgets with neither HelpButton companion nor existing setToolTip | ~15 |
+| `ui/main_window.py` | `cmds.warning("Pose Pruner: pick an RBF node first.")` -> `cmds.warning(tr("warning_pose_pruner_no_node"))` (1 site; (E.3) i18n guard scope catches everything else) | ~3 |
+| `ui/i18n.py` | 16 new keys (15 `*_tip` + 1 warning) - EN + ZH parity (D.3, sustaining the M_B24b1 _tip suffix convention) | ~80 |
+| `tests/test_i18n_no_hardcoded_strings.py` | Scope extension to also scan `ui/main_window.py`; KNOWN_VIOLATIONS **0-modified** (Hardening 3) | ~30 |
+| `tests/test_m_uipolish_tooltip_minimize.py` (new) | #34 + #35 source-scan guards + Hardening 2/4 lifecycle mock tests + i18n key-parity test (13 tests total) | ~270 |
+| `addendum_20260424.md` | this section (5 sub-sections + GUI verification checklist + scope-exclusions) | ~250 |
+| **Total** | | **~698** |
+
+≤ 800 LoC hard limit honoured; single commit.
+
+### §M_UIPOLISH.tooltip-coverage-decision
+
+Hardening 1 mandated a per-widget evidence table BEFORE any
+`setToolTip` was added, so the (B.3) micro decision could be
+applied without doubling up on widgets that already carry a
+`HelpButton` companion. Verbatim grep evidence:
+
+| Widget | HelpButton/Combo (count) | Existing setToolTip | M_UIPOLISH change | Reason |
+|---|---|---|---|---|
+| `_ordered_list_editor_base.py` | 0 | 8 | none | already covered |
+| `attribute_list.py` | 0 | 0 | **+1 setToolTip** on the Select button | key interaction surface |
+| `collapsible.py` | 0 | 0 | none | UI primitive (collapsing frame), not a control |
+| `confirm_dialog.py` | 0 | 0 | none | generic path-A dialog primitive (caller owns text) |
+| `driver_source_list_editor.py` | 0 | 4 | none | already covered |
+| `general_section.py` | 3 | 0 | none | HelpButton companions cover all controls |
+| `help_button.py` | self | 0 | none | self-referential (the help mechanism itself) |
+| `import_dialog.py` | 0 | 0 | **+1 setToolTip** on the Import button | key interaction surface |
+| `live_edit_widget.py` | 0 | 0 | **+1 setToolTip** on the live-edit toggle checkbox | key interaction surface |
+| `mirror_dialog.py` | 0 | 0 | **+3 setToolTip** on Mirror button + custom pattern + custom replacement | key interaction surfaces |
+| `node_selector.py` | 0 | 0 | **+5 setToolTip** on combo + 4 buttons (refresh/pick/new/delete) | every control is a key surface |
+| `ordered_enum_list_editor.py` | 0 | 0 | none | base ordered editor (subclasses tooltip the rows) |
+| `ordered_int_list_editor.py` | 0 | 1 | none | already covered |
+| `output_encoding_combo.py` | 0 | 1 | none | already covered |
+| `output_scale_editor.py` | 1 | 0 | none | HelpButton companion covers |
+| `pose_editor.py` | 0 | 0 | **+2 setToolTip** on Apply + Connect buttons | the two write-side surfaces |
+| `pose_table.py` | 0 | 0 | none | data table view (column tooltips deferred to a future polish) |
+| `prune_dialog.py` | 0 | 0 | **+1 setToolTip** on the Prune button | key interaction surface |
+| `profile_widget.py` | 0 | 0 | **+1 setToolTip** on the Refresh button | key interaction surface |
+| `rbf_section.py` | 20 | 0 | none | HelpButton companions cover |
+| `vector_angle_section.py` | 11 | 0 | none | HelpButton companions cover |
+
+**Total**: 8 widgets touched, 15 `setToolTip` calls added, 4
+widgets intentionally skipped (UI primitives + ordered-editor
+base + the help mechanism itself + the data-table view). Pinned
+by permanent guard #34 (`KEY_INTERACTIVE_WIDGETS` hardcoded
+list); the 4 skipped widgets are NOT in that list - any future
+addition of a control surface to one of them MUST add the
+widget to the list in the same commit (atomicity per
+PROJECT-CONSTITUTIONAL-EVENT pattern).
+
+### §M_UIPOLISH.helpbubble-fix-rationale
+
+`HelpBubble` is a top-level Qt window created with the flag set
+`Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint`
+(`help_button.py:19-25`). Top-level windows do **not** inherit
+their parent's state - when Maya is minimised the bubble keeps
+floating on the desktop, aggravated by `WindowStaysOnTopHint`
+which keeps it above other applications too.
+
+The pre-M_UIPOLISH `eventFilter` (`help_button.py:141-147`) only
+listened for `Move` / `Resize`, so the only way a pinned bubble
+hid was the user clicking the `?` again or `hideEvent` firing on
+the button itself (which Maya minimise does **not** trigger on
+individual children).
+
+**Fix path (decision C.2 + Hardening 4)**:
+
+1. Extend `eventFilter` with an `elif` branch on
+   `QEvent.WindowStateChange` and `QEvent.Hide`. When a pinned
+   bubble is visible, call `_on_click()` to toggle the un-pin
+   path (which already handles bubble.hide() + filter cleanup).
+2. Connect `QApplication.applicationStateChanged` and react to
+   `Qt.ApplicationInactive` for the alt-tab case (Maya stays
+   active in the OS but loses application focus). Disconnect on
+   `_uninstall_move_filter` for symmetry.
+3. **Hardening 4 idempotence**: the new branches gate on
+   `self._pinned and self._bubble.isVisible()` so a second
+   minimise (already hidden) is a no-op.
+
+**Red line 14 backcompat parity** (#35 sub-checks `e` + `f`
+guard this):
+
+- The existing `if et in (Move, Resize): ... reposition`
+  branch is **0-modified**.
+- `eventFilter` returns `False` (non-consuming) - Maya's normal
+  event flow is undisturbed.
+- `disconnect` is wrapped in `try/except (TypeError, RuntimeError)`
+  so an un-pin / un-install on an already-disconnected signal
+  never re-raises.
+
+### §M_UIPOLISH.i18n-guard-extension
+
+The pre-M_UIPOLISH `test_i18n_no_hardcoded_strings.py` only
+scanned `ui/widgets/`. F4 evidence: `main_window.py` has 37 tr()
+calls (already well-covered) but was out of scan range; and the
+single `cmds.warning("Pose Pruner: pick an RBF node first.")` at
+`main_window.py:660` slipped past every defence.
+
+(E.3) extends the guard with a second test method
+(`test_no_hardcoded_strings_in_main_window`) that runs the same
+`_scan_path` helper against `ui/main_window.py`. The original
+`test_no_hardcoded_strings_in_widgets` is preserved verbatim;
+the helper was extracted as `_scan_path` to avoid duplication
+(net 0 behaviour change for the widget scan).
+
+**Hardening 3**: `KNOWN_VIOLATIONS` is **0-modified** under
+M_UIPOLISH. The two existing entries (`pose_table.py:105/110`
+numeric `'{:.3f}'` format-spec literals) remain on the
+whitelist - they are non-translatable format-specs by intent.
+The new `cmds.warning("Pose Pruner...")` site was fixed in
+the same commit by wrapping with `tr("warning_pose_pruner_no_node")`
+and adding the EN/ZH key pair, so the extended guard is green
+without requiring any new whitelist entry.
+
+### §M_UIPOLISH.permanent-guards
+
+Permanent guards: 33 -> **35**.
+
+```
+T_TOOLTIP_COVERAGE_PRESENT       (#34) source-scan against the
+  hardcoded KEY_INTERACTIVE_WIDGETS list. Each widget must
+  contain at least one of:
+    setToolTip(  /  HelpButton(  /  ComboHelpButton(
+
+  The list pins the Hardening 1 evidence table - 16 widgets
+  total (8 newly-covered by M_UIPOLISH + 8 previously covered
+  by HelpButton or setToolTip). New widgets MUST add themselves
+  to the list in the same commit that introduces them.
+
+T_HELPBUBBLE_MINIMIZE_AWARE      (#35) source-scan
+  ui/widgets/help_button.py for the M_UIPOLISH C.2 fix:
+    (a) WindowStateChange handler present
+    (b) QtCore.QEvent.Hide handler present
+    (c) applicationStateChanged signal connected
+    (d) ApplicationInactive checked in the slot
+    (e) legacy Move/Resize handler preserved (red line 14
+        backcompat parity)
+    (f) eventFilter returns False (non-consuming, red line 14)
+```
+
+### §M_UIPOLISH.gui-verification-checklist (TD must run after push)
+
+After M_UIPOLISH push + Maya 2025 RBFtools restart, the TD
+performs the following four scenarios on a real session. Code-
+layer guards (#34/#35 + lifecycle mock tests) cover the wiring;
+production behaviour can only be verified in a live GUI session
+(mayapy is headless).
+
+#### Scenario 1 — Tooltip persistence bug fix (the core P1)
+
+1. Open the RBFtools UI in Maya 2025.
+2. Click any `?` HelpButton to **pin** a HelpBubble.
+3. Minimise Maya (window minimise button / Win+M / Cmd+H).
+4. **Expected**: the HelpBubble disappears immediately (no
+   longer floats on top of other windows).
+5. Restore Maya. **Expected**: the bubble does NOT reappear
+   (un-pinned state is now correct).
+
+#### Scenario 2 — Application focus loss (alt-tab fallback)
+
+1. Repeat Scenario 1 steps 1-2 (pin a bubble).
+2. Switch to another application (Alt+Tab / Cmd+Tab) WITHOUT
+   minimising Maya.
+3. **Expected**: the HelpBubble follows Maya and disappears
+   (`Qt.ApplicationInactive` fallback engaged).
+
+#### Scenario 3 — Existing functionality intact (red line 14)
+
+1. Repeat Scenario 1 steps 1-2 (pin a bubble).
+2. Without minimising, **move** and **resize** the Maya main
+   window.
+3. **Expected**: the HelpBubble stays visible and tracks the
+   button position (legacy Move/Resize path 0-modified).
+4. Click the `?` again. **Expected**: bubble hides and
+   un-pins (legacy click toggle 0-modified).
+
+#### Scenario 4 — i18n EN/ZH switch end-to-end
+
+1. Switch UI language EN <-> ZH via the Language menu.
+2. Open every dialog that received a tooltip in M_UIPOLISH:
+   Mirror / Import / Prune / Profile / NodeSelector controls.
+3. Hover each new tooltip surface.
+4. **Expected**: every tooltip shows in the active language
+   (no English residue when ZH is selected, modulo the
+   KNOWN_VIOLATIONS numeric format-specs in the pose table).
+5. With the active language set to ZH, trigger Pose Pruner
+   without a node selected. **Expected**: the script editor
+   warning shows the ZH text (not the legacy EN literal).
+
+#### TD reporting path
+
+After running the four scenarios on Maya 2025, the TD reports:
+
+- ✅ All four scenarios pass -> M_UIPOLISH is **truly** complete
+- ⚠️ Any scenario fails -> open M_UIPOLISH_HOTFIX immediately;
+  do not progress to M4.1 until the production behaviour is
+  verified
+
+### §M_UIPOLISH.empirical-baseline (2026-04-27)
+
+| Env | Pre-M_UIPOLISH (post-M_B24c) | Post-M_UIPOLISH |
+|---|---|---|
+| Pure-Python | 544 OK (skip 3) | **558 OK (skip 3)** |
+| mayapy 2025 | 544 ran 489 pass 55 skip | **558 ran 497 pass 61 skip** |
+
+mayapy delta accounting follows the forward-compat-corrected
+red line 13 - mock-only `@skipIf(_REAL_MAYA)` test methods
+accumulate in the skip pool naturally; no plugin-load skips
+added; M1.5.3 PAUSED still honoured.
+
+### §M_UIPOLISH.scope-exclusions
+
+- 0 lines C++ / 0 .mll / 0 CMakeLists / 0 schema modifications
+- 0 lines `core.py` / `core_*.py` / `controller.py` business
+  logic (controller.py has no edits at all under M_UIPOLISH;
+  the only non-UI string fix is `main_window.py` cmds.warning)
+- 0 modifications to the M_B24a/b/d/c locked surfaces
+- 0 modifications to hotfix 4 files (M_HOTFIX_PYSIDE6 `edf5367`)
+- 0 modifications to the 6 PERMANENT dual-version guards
+- 0 modifications to KNOWN_VIOLATIONS in i18n guard (Hardening 3)
+- HelpBubble retains its `Qt.Tool | Qt.WindowStaysOnTopHint`
+  flag set - the fix is event-driven, not flag-driven (red line
+  14: do not break the existing pinned UX)
+
+---
+
 ## §M_HOTFIX_PYSIDE6 — QActionGroup PySide6 migration shim
 
 > **STRUCTURAL LESSON** (2026-04-27):

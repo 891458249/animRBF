@@ -132,18 +132,62 @@ class HelpButton(QtWidgets.QToolButton):
         win = self._find_main_window()
         if win:
             win.installEventFilter(self)
+        # M_UIPOLISH (Hardening 4): also listen to QApplication state
+        # changes so a Maya alt-tab away (no minimize) hides the
+        # pinned bubble. Idempotent — Qt deduplicates connect() if the
+        # same signal/slot pair is already wired.
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                app.applicationStateChanged.connect(
+                    self._on_application_state_changed)
+            except Exception:
+                pass
 
     def _uninstall_move_filter(self):
         win = self._find_main_window()
         if win:
             win.removeEventFilter(self)
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                app.applicationStateChanged.disconnect(
+                    self._on_application_state_changed)
+            except (TypeError, RuntimeError):
+                # disconnect raises when not connected; harmless.
+                pass
+
+    def _on_application_state_changed(self, state):
+        """M_UIPOLISH (C.2 fallback): when Maya loses application
+        active state (alt-tab to another app, screen-saver, etc.)
+        hide the pinned bubble. Idempotent (Hardening 4) - only
+        toggles when actually pinned + visible."""
+        if state == QtCore.Qt.ApplicationInactive:
+            if (self._pinned and self._bubble is not None
+                    and self._bubble.isVisible()):
+                self._on_click()
 
     def eventFilter(self, obj, event):
-        """Track main window move/resize to reposition pinned bubble."""
-        if event.type() in (QtCore.QEvent.Move, QtCore.QEvent.Resize):
+        """Track main-window events.
+
+        - Move / Resize (legacy, M_B24b1): reposition pinned bubble.
+        - WindowStateChange / Hide (M_UIPOLISH C.2): hide the pinned
+          bubble when Maya is minimised or the main window hides.
+
+        Always returns False (non-consuming) - red line 14 backcompat
+        parity: never swallow events the rest of the app expects."""
+        et = event.type()
+        # Legacy path - 0-modification (red line 14 backcompat parity).
+        if et in (QtCore.QEvent.Move, QtCore.QEvent.Resize):
             if self._pinned and self._bubble and self._bubble.isVisible():
                 self._bubble.reposition(
                     self.mapToGlobal(QtCore.QPoint(self.width(), 0)))
+        # M_UIPOLISH C.2 / Hardening 2 + 4 - hide on minimise / hide.
+        # Idempotent: only un-pins when pinned AND bubble visible.
+        elif et in (QtCore.QEvent.WindowStateChange, QtCore.QEvent.Hide):
+            if (self._pinned and self._bubble is not None
+                    and self._bubble.isVisible()):
+                self._on_click()
         return False
 
     def enterEvent(self, event):

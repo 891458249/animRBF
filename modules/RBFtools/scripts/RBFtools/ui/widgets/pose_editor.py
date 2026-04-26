@@ -102,7 +102,9 @@ class PoseEditor(CollapsibleFrame):
         btn_row = QtWidgets.QHBoxLayout()
         self._btn_add = QtWidgets.QPushButton(tr("add_pose"))
         self._btn_apply = QtWidgets.QPushButton(tr("apply"))
+        self._btn_apply.setToolTip(tr("pose_editor_apply_tip"))
         self._btn_connect = QtWidgets.QPushButton(tr("connect"))
+        self._btn_connect.setToolTip(tr("pose_editor_connect_tip"))
         self._btn_reload = QtWidgets.QPushButton(tr("reload"))
 
         for btn in (self._btn_add, self._btn_apply,

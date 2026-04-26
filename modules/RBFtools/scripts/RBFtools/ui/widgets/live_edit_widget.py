@@ -73,6 +73,7 @@ class LiveEditWidget(QtWidgets.QWidget):
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._cb = QtWidgets.QCheckBox(tr("live_edit_toggle_label"))
+        self._cb.setToolTip(tr("live_edit_toggle_tip"))
         self._cb.toggled.connect(self._on_toggled)
         layout.addWidget(self._cb)
         self._status = QtWidgets.QLabel(tr("live_edit_status_idle"))

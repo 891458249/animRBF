@@ -34,6 +34,7 @@ class ProfileWidget(QtWidgets.QWidget):
         # ----- Refresh button row -----
         btn_row = QtWidgets.QHBoxLayout()
         self._btn_refresh = QtWidgets.QPushButton(tr("btn_refresh_profile"))
+        self._btn_refresh.setToolTip(tr("profile_widget_refresh_tip"))
         self._btn_refresh.clicked.connect(self._on_refresh)
         btn_row.addWidget(self._btn_refresh)
         btn_row.addStretch(1)

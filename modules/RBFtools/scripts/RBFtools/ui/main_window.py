@@ -657,7 +657,8 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         node = self._ctrl.current_node
         if not node:
             from maya import cmds as _cmds
-            _cmds.warning("Pose Pruner: pick an RBF node first.")
+            from RBFtools.ui.i18n import tr
+            _cmds.warning(tr("warning_pose_pruner_no_node"))
             return
         dlg = PruneDialog(node, self._ctrl, parent=self)
         if dlg.exec_() != QtWidgets.QDialog.Accepted:

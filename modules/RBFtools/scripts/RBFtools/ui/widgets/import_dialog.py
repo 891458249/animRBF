@@ -63,6 +63,7 @@ class ImportDialog(QtWidgets.QDialog):
         btn_box = QtWidgets.QHBoxLayout()
         btn_box.addStretch(1)
         self._btn_import = QtWidgets.QPushButton(tr("btn_import"))
+        self._btn_import.setToolTip(tr("import_dialog_btn_tip"))
         self._btn_cancel = QtWidgets.QPushButton(tr("cancel"))
         self._btn_import.clicked.connect(self.accept)
         self._btn_cancel.clicked.connect(self.reject)

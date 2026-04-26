@@ -8,6 +8,12 @@ this as a permanent rule: every visible string must go through
 
 KNOWN_VIOLATIONS holds a maintained whitelist for legacy violations
 that pre-date this guard. New entries are 0-tolerance.
+
+M_UIPOLISH (E.3 + Hardening 3): the scan range is extended to
+also cover ``ui/main_window.py``. The KNOWN_VIOLATIONS whitelist
+is **0-modified** under M_UIPOLISH (the only existing entries -
+``pose_table.py:105/110`` numeric format-spec literals - remain
+on the whitelist).
 """
 
 from __future__ import absolute_import
@@ -49,6 +55,29 @@ def _has_letter(s):
 
 class TestNoHardcodedVisibleStrings(unittest.TestCase):
 
+    def _scan_path(self, py, violations):
+        """Scan a single .py file and append any violations."""
+        text = py.read_text(encoding="utf-8")
+        for line_no, line in enumerate(text.splitlines(), 1):
+            # Allow comments — strip from "#" to EOL.
+            code = line.split("#", 1)[0]
+            for m in _PATTERN.finditer(code):
+                method, literal = m.groups()
+                # Skip if the line ALSO contains tr( before the method
+                # call (means tr(...) is the argument, not a literal).
+                prefix = code.split("." + method, 1)[0]
+                if "tr(" in prefix:
+                    continue
+                # Single character or no-letter strings are fine
+                # (separators, units, numeric placeholders).
+                if not _has_letter(literal) or len(literal) <= 1:
+                    continue
+                location = "{}:{}".format(py.name, line_no)
+                if location in KNOWN_VIOLATIONS:
+                    continue
+                violations.append("{} {}({!r})".format(
+                    location, method, literal))
+
     def test_no_hardcoded_strings_in_widgets(self):
         # tests/ → parent → RBFtools/ (module) → scripts/RBFtools/ui/widgets
         widgets_dir = (pathlib.Path(__file__).resolve().parent.parent
@@ -60,33 +89,31 @@ class TestNoHardcodedVisibleStrings(unittest.TestCase):
         for py in widgets_dir.rglob("*.py"):
             if py.name == "__init__.py":
                 continue
-            text = py.read_text(encoding="utf-8")
-            for line_no, line in enumerate(text.splitlines(), 1):
-                # Allow comments — strip from "#" to EOL.
-                code = line.split("#", 1)[0]
-                for m in _PATTERN.finditer(code):
-                    method, literal = m.groups()
-                    # Skip if the line ALSO contains tr( before the method
-                    # call (means tr(...) is the argument, not a literal).
-                    prefix = code.split("." + method, 1)[0]
-                    if "tr(" in prefix:
-                        # tr() wrapper detected — but our regex already
-                        # excluded that case by requiring a literal arg.
-                        # This branch is defensive.
-                        continue
-                    # Single character or no-letter strings are fine
-                    # (separators, units, numeric placeholders).
-                    if not _has_letter(literal) or len(literal) <= 1:
-                        continue
-                    location = "{}:{}".format(py.name, line_no)
-                    if location in KNOWN_VIOLATIONS:
-                        continue
-                    violations.append("{} {}({!r})".format(
-                        location, method, literal))
+            self._scan_path(py, violations)
 
         self.assertEqual(violations, [],
             "Hardcoded visible strings found (violation of M2.4a addendum "
             "i18n guard). Wrap with tr(\"key\") and add the key to i18n.py:\n  "
+            + "\n  ".join(violations))
+
+    def test_no_hardcoded_strings_in_main_window(self):
+        """M_UIPOLISH (E.3 + Hardening 3): extend the scan to
+        ui/main_window.py - it carries 37 tr() calls already but
+        was historically out of scan range. KNOWN_VIOLATIONS is
+        0-modified; any new finding here must be fixed by
+        wrapping with tr() in the SAME commit (red line 14
+        backcompat parity)."""
+        main_window = (pathlib.Path(__file__).resolve().parent.parent
+                       / "scripts" / "RBFtools" / "ui" / "main_window.py")
+        if not main_window.exists():
+            self.skipTest("main_window.py not found: {}".format(main_window))
+
+        violations = []
+        self._scan_path(main_window, violations)
+
+        self.assertEqual(violations, [],
+            "Hardcoded visible strings found in main_window.py "
+            "(M_UIPOLISH E.3 guard extension). Wrap with tr(\"key\"):\n  "
             + "\n  ".join(violations))
 
 

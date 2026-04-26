@@ -41,6 +41,7 @@ class NodeSelector(QtWidgets.QWidget):
         lay.addWidget(self._label)
 
         self._combo = QtWidgets.QComboBox()
+        self._combo.setToolTip(tr("node_selector_combo_tip"))
         self._combo.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self._combo.addItem(self.NONE_ITEM)
@@ -48,9 +49,13 @@ class NodeSelector(QtWidgets.QWidget):
         lay.addWidget(self._combo)
 
         self._btn_refresh = QtWidgets.QPushButton(tr("refresh"))
+        self._btn_refresh.setToolTip(tr("node_selector_refresh_tip"))
         self._btn_pick = QtWidgets.QPushButton(tr("pick_sel"))
+        self._btn_pick.setToolTip(tr("node_selector_pick_tip"))
         self._btn_new = QtWidgets.QPushButton(tr("new"))
+        self._btn_new.setToolTip(tr("node_selector_new_tip"))
         self._btn_delete = QtWidgets.QPushButton(tr("delete"))
+        self._btn_delete.setToolTip(tr("node_selector_delete_tip"))
 
         for btn in (self._btn_refresh, self._btn_pick,
                     self._btn_new, self._btn_delete):

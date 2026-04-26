@@ -61,6 +61,7 @@ class AttributeList(QtWidgets.QWidget):
         self._field = QtWidgets.QLineEdit()
         self._field.setReadOnly(True)
         self._btn_sel = QtWidgets.QPushButton(tr("select"))
+        self._btn_sel.setToolTip(tr("attribute_list_select_tip"))
         self._btn_sel.setFixedWidth(55)
         self._btn_sel.clicked.connect(self.selectNodeRequested)
         top.addWidget(self._lbl)
