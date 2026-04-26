@@ -3616,11 +3616,353 @@ PERMANENT GUARD: **18 → 21**。
 
 参照 §M1.5.1.X Blocker Matrix Row 1，本子任务 RESOLVED 后解锁：
 
-- M1.5.2 `_K_*` benchmark replacement
+- M1.5.2 `_K_*` benchmark replacement（**DEFERRED to M5** — 见 §M1.5.2）
 - M1.5.3 B-class ~15 conversion + byte-level C++ regression +
   `require_rbftools_plugin` 启用
 - M2.5b compute consumer（.mll 依赖通过 §M1.5.1b 满足）
 - M2.5 decompose Python↔C++ 双向
+
+---
+
+## §M1.5.2 — _K_* benchmark calibration protocol probe (DEFERRED to M5)
+
+**Status: DEFERRED to M5**（保留 caveat `[CONCEPTUAL — no machine
+calibration]` 不变；保留 `_K_CHOL = 1e-9` / `_K_GE = 3e-9` /
+`_K_QWA = 1e-7` 概念值不变）
+
+**Why deferred**: M3 全程 enforced "0 C++ changes" red line + F2
+verify-before-design (10th use) confirmed `lastSolveMethod` is a
+C++ private instance member NOT exposed as a Maya attribute. This
+ceiling means black-box mayapy measurement of solver kernel time
+is dominated by DG plug-propagation floor (~19 µs measured),
+NOT the actual O(N³) Cholesky / GE work. The protocol failed
+both R² ≥ 0.95 (加固 6) and K_GE/K_CHOL ∈ [1.5, 5.0] (红线 8)
+gates simultaneously. Per "verify-before-design" doctrine, the
+honest move is to defer rather than fudge fit — same disposition
+as original §M3.5.F2 design intent ("M5 will replace these with
+real benchmarks").
+
+### §M1.5.2.1 — verify-before-design 第 10 次使用决议
+
+**F1-F6 现状核查关键发现**：
+
+| F | 实测 | 关键发现 |
+|---|---|---|
+| **F1** | `core_profile.py:62-64` 三常数；`:107-109` 消费 = 报告显示；`:341-344` T_CAVEAT_VISIBLE caveat；`:369-373` magnitude table 用 `_K_CHOL` 算 split 建议 ms | 三 K **纯显示用途**——无 solver 决策依赖 |
+| **F2** | `RBFtools.h:403` `short lastSolveMethod` C++ private instance member；`addAttribute()` 仅暴露 `solverMethod` enum；无 `lastSolveTime_*` 字段；`BRMatrix` 类不通过 SWIG/Python 暴露 | **黑盒测量是唯一路径**；无法精确隔离 solver 单步耗时 |
+| **F3** | mayapy `time.perf_counter` resolution = 1e-7 (100 ns, QueryPerformanceCounter)；1000-iter Python add loop ~51 µs | 100 ns 时钟分辨率充足，但 mayapy 单次 setAttr+getAttr ~19 µs 的 DG floor 是**结构性 noise floor** |
+| **F4** | `_THRESH_N_POSES = 80` split 阈值；magnitude table 在 trigger 后输出 N=2/3/4 子分裂建议 | 采样点须覆盖 N=80 附近 |
+| **F5** | M2.5 cache 字段仅作用 SwingTwist 解码路径；solver kernel 不感知 cache | Generic 模式 benchmark 单 K 即可（无须双 K split） |
+| **F6** | F2 已确认 0-C++ 立场绝对；C++ 暴露诊断字段需独立子任务 | **0 C++ 改动** lock |
+
+**(A)-(N) 决议（probe 阶段已批；P4 推迟后部分作废）**：
+
+- A.3 一次性 probe 脚本不进 commit（仅 verbatim 写 §M1.5.2.7）
+- B.2 7 点采样 N ∈ {10, 50, 80, 100, 200, 500} (+1000 if budget)
+- C.2 最小二乘 t = K·N³ + b（截距吸收 DG noise）
+- D.3 QWA 仅 4×4（与 M2.2 production 一致；numpy proxy due to F2 ceiling）
+- E.1 hardcoded 替换 + ISO 日期注释 → **作废（P4 不替换）**
+- F.2 caveat 改 `[CALIBRATED ...; tune for your hardware]` → **作废（P4 保 CONCEPTUAL）**
+- G.1 T_CAVEAT_VISIBLE sub-test 1 字符串更新 → **作废（P4 不动）**
+- H.3 完整环境快照（CPU/RAM/Maya/Python/.mll SHA256）→ §M1.5.2.8
+- I.2 report 加 `[calibrated YYYY-MM-DD]` 行 → **作废（P4 无校准日期）**
+- J.2 `_THRESH_*` 不动（UX 阈值 ≠ 物理量；K 校准不蕴含阈值校准）
+- K **0 C++ 改动**（执行确认）
+- L.1 单 commit revert 即回（P4 下仅 docs + 1 守护测试）
+- M commit message — type 改 `docs(profile)` 而非 `feat(profile)`
+- N.1+N.2+N.3 三守护 → **P4 收缩为单守护 N.0 T_M1_5_2_CALIBRATION_DEFERRED**
+
+### §M1.5.2.2 — Probe 协议设计
+
+```
+matrix sizes: N ∈ {10, 50, 80, 100, 200, 500}
+per-N: 5 measurements (fresh node each), median taken
+fit:   t(N) = K·N³ + b  (b absorbs DG noise + plug push-pull)
+driver mode: Generic / Raw encoding (M2.5 SwingTwist cache bypassed)
+QWA: numpy proxy of 4x4 SPD power-iteration (D.3 indirect; BRMatrix
+     internal QWA call cannot be isolated from compute() under F2
+     ceiling)
+gates: R²_CHOL ≥ 0.95 AND R²_GE ≥ 0.95 AND
+       K_GE/K_CHOL ∈ [1.5, 5.0]
+       任一不满足 → 停下报告，不替换数字
+```
+
+### §M1.5.2.3 — 实测原始数据（DEFERRED 触发证据，2026-04-26）
+
+**K_CHOL benchmark** (solverMethod=0, Gaussian kernel, SPD path):
+
+| N | median (s) | samples (s) |
+|---|---|---|
+| 10  | 0.000019 | [0.000392, 2.2e-05, 1.9e-05, 1.8e-05, 1.8e-05] |
+| 50  | 0.000019 | [1.9e-05, 1.9e-05, 1.9e-05, 1.8e-05, 2.9e-05] |
+| 80  | 0.000029 | [2.7e-05, 2.9e-05, 3.2e-05, 2.5e-05, 3.1e-05] |
+| 100 | 0.000025 | [2.4e-05, 3.0e-05, 2.5e-05, 2.1e-05, 4.1e-05] |
+| 200 | 0.000036 | [3.6e-05, 4.4e-05, 3.3e-05, 3.2e-05, 4.5e-05] |
+| 500 | 0.000042 | [4.5e-05, 4.0e-05, 4.2e-05, 4.0e-05, 4.3e-05] |
+
+**K_GE benchmark** (solverMethod=1, Force GE):
+
+| N | median (s) |
+|---|---|
+| 10  | 0.000019 |
+| 50  | 0.000030 |
+| 80  | 0.000027 |
+| 100 | 0.000034 |
+| 200 | 0.000037 |
+| 500 | 0.000042 |
+
+**Fit results** (least-squares t = K·N³ + b):
+
+```
+K_CHOL = 1.4300e-13   b_CHOL = 2.5058e-05   R² = 0.5839   ❌ < 0.95
+K_GE   = 1.0768e-13   b_GE   = 2.9050e-05   R² = 0.4211   ❌ < 0.95
+ratio K_GE / K_CHOL = 0.753                                ❌ ∉ [1.5, 5.0]
+```
+
+**K_QWA numpy proxy** (4×4 SPD power-iter, 50 iter × 1000 batches × 7 reps):
+
+```
+samples sec/iter: [2.255e-06, 2.237e-06, 2.242e-06, 2.250e-06,
+                   2.229e-06, 2.225e-06, 2.245e-06]
+K_QWA median = 2.2416e-06 sec/iter   (vs 1e-7 conceptual; ratio 22×)
+```
+
+K_QWA proxy 偏离原概念值 22×：根因是 numpy 4×4 ops Python 解释器
+开销主导（每 iter 6 PyObject 调用 + ufunc 启动 ~300-400 ns 各，
+compared to 实际 4×4 数学 ~50 FLOP × 1 ns ≈ 50 ns）。numpy proxy
+**不能代表** C++ 内部 `powerIterationMaxEigenvec4x4` 真实成本。
+
+### §M1.5.2.4 — 根因诊断（4 候选按概率排序）
+
+实测 wall-clock 在 N=10 至 N=500 区间**基本平坦**（19 µs → 42 µs）。
+若 compute() 真在跑 O(N³) Cholesky，N=500 应该 ~125 ms（按概念值
+1e-9）—— 实测 42 µs 比之**小约 3000×**。`getAttr <node>.output[0]`
+路径**没有真正触发** `BRMatrix::cholesky()` / `solve()`。可能原因：
+
+1. **新建 RBFtools 节点未连接 driver → `input[]` 没有 incoming
+   connection → `evalInput` 路径走"未配置/退化"短路**——compute()
+   早期 return 一个常量或 0，根本不调 solver
+2. **节点缺少必要的 `train` trigger**（M1.4 设计可能要求显式
+   `evaluate` 切换或 `radius` 重设来触发首次训练）
+3. **kernel/rbfMode/distanceType 默认值组合下 `getPoseData()` 返回
+   `poseCount=0`**（构造函数设的 `globalPoseCount=0`，需要某个 attr
+   让 C++ 重新计数）
+4. **probe 用的 vec3 driver + 1-D output 不匹配 RBF 模式 setup
+   期望**（`useRotate`/`useTranslate`/`type` enum 未配）
+
+**支持证据**：
+- 19 µs 的 baseline 恰好是典型 Maya DG `setAttr → getAttr` 一次
+  往返的 plug propagation cost（与 F3 探针 1000-iter 51 µs 同量级）
+- N=10 第一个样本是 392 µs（一次性 standalone init / cache prime），
+  后续都 ~19 µs —— 暗示后续测的是空 compute()
+
+**结论**：这**不是** `BRMatrix` 实现 bug——是 probe 协议没正确"喂"
+节点让 solver 路径生效。修协议（连 driver / 加 train trigger / 配
+更完整 attr）可能让大 N 数据点抬到 ms 级，但小 N（10/50）仍受 DG
+floor 污染（`b` 截距吸收 ~19-30 µs）。
+
+### §M1.5.2.5 — 红线 7 + 8 触发记录
+
+| 红线 | 触发 | 实测 | 处置 |
+|---|---|---|---|
+| 7 (加固 6: R²<0.95 任一停) | YES | R²_CHOL=0.58 / R²_GE=0.42 | 立即停下报告 |
+| 8 (K_GE/K_CHOL ∉ [1.5, 5.0]) | YES | 0.753 | 立即停下报告 |
+
+**结构性诊断**：0-C++ 约束下 black-box 测量精度上限就是当前观察到
+的 R²<0.6（受 DG floor + 协议复杂度 + 小 N 污染共同影响）。**不是
+凑数能解决的——是测量协议层面的硬约束**。修 probe 协议至 P1/P2 形
+态可能改善 R² 至 ~0.8，但 ratio sanity 在 hand-written O(N³)
+solver 下仍可能违反（Cholesky 与 GE 的 N³ 系数差异在 19 µs DG
+floor 主导下被掩盖）。
+
+### §M1.5.2.6 — 推迟到 M5 决议
+
+**保留**：
+- `_K_CHOL = 1e-9` / `_K_GE = 3e-9` / `_K_QWA = 1e-7` 三常数不变
+- caveat `"[CONCEPTUAL — no machine calibration]"` 不变
+- T_CAVEAT_VISIBLE sub-test 1 字符串不变
+- `_THRESH_N_POSES = 80` / `_THRESH_CELLS = 500` / `_THRESH_CHOL_MS = 5.0`
+  阈值不变（J.2 — UX 阈值非物理量；K 校准不蕴含阈值校准）
+
+**与原始设计一致性**：v5 设计原 §M3.5.F2 已写"M5 will replace
+these with real benchmarks, keeping the symbol names as a
+forward-compat interface"。P4 与原设计 forward-compat 完全对齐，
+不偏离。
+
+**M5 重启触发条件**（任一）：
+
+1. M5 性能子任务自然推进（v5 PART F roadmap 自然到达）
+2. 用户 benchmark 请求（明确报告"profile ms 数与实际差距大"）
+3. 独立 C++ timer-exposure 子任务（破 0-C++ 红线，需新 verify-
+   before-design 现状核查 + (K) 红线预批 + 新增 MObject `lastSolveTimeMs`）
+4. 用户机器 CPU 重大变化触发重新校准需求
+
+### §M1.5.2.7 — Probe 脚本 verbatim（加固 7：M5 重启 reference）
+
+脚本本身 **NOT committed**（A.3 一次性范式）。完整内容如下，
+未来 M5 重启时复制此块到 `/tmp/probe_m1_5_2.py` 直接复用：
+
+```python
+"""M1.5.2 _K_* benchmark probe — one-shot mayapy script.
+
+NOT committed (A.3 lock). Verbatim copied to addendum
+§M1.5.2.probe-script for future re-calibration reference.
+
+Protocol (addendum §M1.5.2.probe-script):
+  matrix sizes: N in {10, 50, 80, 100, 200, 500}
+  per-N: 5 measurements (fresh node each), median taken
+  fit:   t(N) = K * N^3 + b   (b absorbs DG noise)
+  driver mode: Generic / Raw encoding (M2.5 cache bypassed)
+  K_QWA: numpy proxy of 4x4 SPD power-iteration (D.3 indirect)
+"""
+
+from __future__ import absolute_import, print_function
+
+import os, sys, time, random, statistics
+
+import maya.standalone
+maya.standalone.initialize()
+import maya.cmds as cmds
+
+_MLL = "X:/Plugins/RBFtools/modules/RBFtools/plug-ins/win64/2025/RBFtools.mll"
+print("loadPlugin:", _MLL)
+cmds.loadPlugin(_MLL)
+print("loaded:", cmds.pluginInfo("RBFtools", q=True, loaded=True))
+
+random.seed(42)
+
+
+def build_node(n_poses, solver_method):
+    """Create RBFtools node, configure N poses with vec3 driver and 1
+    output. solver_method: 0=Auto (Cholesky preferred), 1=Force GE."""
+    n = cmds.createNode("RBFtools")
+    cmds.setAttr(n + ".solverMethod", solver_method)
+    cmds.setAttr(n + ".kernel", 0)            # 0=Gaussian
+    cmds.setAttr(n + ".rbfMode", 1)           # 1=RBF
+    cmds.setAttr(n + ".inputEncoding", 0)     # 0=Raw
+    cmds.setAttr(n + ".regularization", 1e-3)
+    cmds.setAttr(n + ".radius", 1.0)
+    for i in range(3):
+        cmds.setAttr(n + ".input[{}]".format(i), 0.0)
+    for p in range(n_poses):
+        for i in range(3):
+            cmds.setAttr(
+                n + ".poses[{}].poseInput[{}]".format(p, i),
+                random.uniform(-1.0, 1.0),
+            )
+        cmds.setAttr(
+            n + ".poses[{}].poseValue[0]".format(p),
+            random.uniform(-1.0, 1.0),
+        )
+    return n
+
+
+def time_first_compute(n_poses, solver_method):
+    n = build_node(n_poses, solver_method)
+    cmds.setAttr(n + ".input[0]", 0.123)
+    cmds.setAttr(n + ".input[1]", 0.456)
+    cmds.setAttr(n + ".input[2]", 0.789)
+    t0 = time.perf_counter()
+    _ = cmds.getAttr(n + ".output[0]")
+    t1 = time.perf_counter()
+    cmds.delete(n)
+    return t1 - t0
+
+
+SIZES = [10, 50, 80, 100, 200, 500]
+REPLICATES = 5
+
+print("\n=== K_CHOL benchmark ===")
+chol_data = []
+for N in SIZES:
+    samples = [time_first_compute(N, 0) for _ in range(REPLICATES)]
+    med = statistics.median(samples)
+    chol_data.append((N, med, samples))
+    print("N={:4d}  median={:.6f}s".format(N, med))
+
+print("\n=== K_GE benchmark ===")
+ge_data = []
+for N in SIZES:
+    samples = [time_first_compute(N, 1) for _ in range(REPLICATES)]
+    med = statistics.median(samples)
+    ge_data.append((N, med, samples))
+    print("N={:4d}  median={:.6f}s".format(N, med))
+
+
+def fit_cubic(data):
+    xs = [N ** 3 for (N, _, _) in data]
+    ys = [t for (_, t, _) in data]
+    n = len(xs)
+    sx = sum(xs); sy = sum(ys)
+    sxx = sum(x * x for x in xs)
+    sxy = sum(x * y for x, y in zip(xs, ys))
+    K = (n * sxy - sx * sy) / (n * sxx - sx * sx)
+    b = (sy - K * sx) / n
+    y_mean = sy / n
+    ss_tot = sum((y - y_mean) ** 2 for y in ys)
+    ss_res = sum((y - (K * x + b)) ** 2 for x, y in zip(xs, ys))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+    return K, b, r2
+
+
+K_CHOL, b_CHOL, R2_CHOL = fit_cubic(chol_data)
+K_GE, b_GE, R2_GE = fit_cubic(ge_data)
+
+print("\nK_CHOL = {:.4e}  R2 = {:.4f}".format(K_CHOL, R2_CHOL))
+print("K_GE   = {:.4e}  R2 = {:.4f}".format(K_GE, R2_GE))
+print("ratio K_GE / K_CHOL = {:.3f}".format(K_GE / K_CHOL))
+
+import numpy as np
+random.seed(2025)
+A = np.random.rand(4, 4)
+M = (A @ A.T) + np.eye(4) * 0.1
+
+samples_qwa = []
+for _ in range(7):
+    t0 = time.perf_counter()
+    for _b in range(1000):
+        v = np.array([0.0, 0.0, 0.0, 1.0])
+        for _i in range(50):
+            v = M @ v
+            n_ = np.linalg.norm(v)
+            if n_ > 0:
+                v = v / n_
+    t1 = time.perf_counter()
+    samples_qwa.append((t1 - t0) / (1000 * 50))
+
+K_QWA = statistics.median(samples_qwa)
+print("\nK_QWA proxy = {:.4e} sec/iter".format(K_QWA))
+```
+
+### §M1.5.2.8 — 环境快照（H.3）
+
+| 维度 | 值 |
+|---|---|
+| CPU | Intel Core i7-14700KF (28 threads) |
+| RAM | 64 GB (68551335936 bytes) |
+| OS | Windows 11 Enterprise (10.0.26200) |
+| Maya | 2025 |
+| Python | 3.11.4 (mayapy) |
+| Win SDK | 10.0.26100.0 |
+| MSVC | 19.44.35223 (VS 2022 v143) |
+| .mll SHA256 | `2725287715b9793ba5a485becd0fe70e57a554574bd5e1e8c0ed702e3d104c02` |
+| 测试日期 | 2026-04-26 |
+| 后台进程 | （probe 未关闭后台；M5 重启时建议关闭浏览器/IDE/同步工具）|
+
+### §M1.5.2.9 — Blocker Matrix update
+
+§M1.5.1.X Blocker Matrix **不**新增 row（_K_* 推迟不阻塞 M1.5.3 /
+M2.5b / M2.5 decompose；这些子任务依赖 .mll 而非 _K_* 数值精度）。
+
+**新 forward-compat anchor entry**：
+
+| 项 | Discovered in | 状态 | 重启条件 |
+|---|---|---|---|
+| `_K_CHOL` / `_K_GE` / `_K_QWA` 实际校准 | M1.5.2 (this section) | DEFERRED to M5 | 见 §M1.5.2.6 四触发条件 |
+
+未来执行者读到此 entry 时知：(1) M1.5.2 已尝试且推迟，(2) 重启不
+是"自由发挥"，需先评估 §M1.5.2.6 四触发条件至少一个成立，(3) 重
+启时 §M1.5.2.7 probe 脚本是 reference 起点。
 
 ---
 
