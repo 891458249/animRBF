@@ -1,0 +1,45 @@
+{
+  "_comment": "Legacy v5.0-pre-M_B24 schema fixture. PERMANENT - DO NOT DELETE. Used by T_VERSIONED_SCHEMA_PRESENT (#26) + T_M_B2_MIGRATION_BACKCOMPAT (#25.d) to verify backcompat read path. See addendum M_B24a2.legacy-fixtures.",
+  "schema_version": "rbftools.v5.m3",
+  "nodes": [
+    {
+      "name": "RBF1",
+      "type_mode": "RBF",
+      "settings": {
+        "active": true,
+        "radius": 1.0,
+        "regularization": 1e-08,
+        "kernel": 0
+      },
+      "driver": {
+        "node": "drv1",
+        "attrs": [
+          {"index": 0, "name": "translateX", "alias": null},
+          {"index": 1, "name": "translateY", "alias": null},
+          {"index": 2, "name": "translateZ", "alias": null}
+        ],
+        "rotate_orders": []
+      },
+      "driven": {
+        "node": "drvn1",
+        "attrs": [
+          {"index": 0, "name": "blendA", "alias": null,
+           "is_scale": false, "base_value": 0.0}
+        ]
+      },
+      "output_quaternion_groups": [],
+      "poses": [
+        {
+          "index": 0,
+          "inputs": [0.0, 0.0, 0.0],
+          "values": [0.0],
+          "local_transform": {
+            "translate": [0.0, 0.0, 0.0],
+            "quat": [0.0, 0.0, 0.0, 1.0],
+            "scale": [1.0, 1.0, 1.0]
+          }
+        }
+      ]
+    }
+  ]
+}

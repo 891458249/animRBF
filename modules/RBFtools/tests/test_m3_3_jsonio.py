@@ -185,9 +185,13 @@ class T2_NodeToDict(unittest.TestCase):
             self._full_stub(mc, ma)
             d = core_json.node_to_dict("RBF1")
         self.assertEqual(d["name"], "RBF1")
-        self.assertEqual(len(d["driver"]["attrs"]), 2)
+        # M_B24a2-2: driver -> drivers[] (multi-source list).
+        self.assertEqual(len(d["drivers"][0]["attrs"]), 2)
         self.assertEqual(len(d["driven"]["attrs"]), 2)
         self.assertEqual(d["output_quaternion_groups"], [{"start": 0}])
+        # M_B24a2-2: output_encoding present at node-dict top level
+        # (default Euler=0).
+        self.assertEqual(d["output_encoding"], 0)
 
     def test_driver_attr_alias_propagation(self):
         from RBFtools import core_json
@@ -195,7 +199,8 @@ class T2_NodeToDict(unittest.TestCase):
              mock.patch("RBFtools.core_json.core_alias") as ma:
             self._full_stub(mc, ma)
             d = core_json.node_to_dict("RBF1")
-        self.assertEqual(d["driver"]["attrs"][0]["alias"], "in_rotateX")
+        # M_B24a2-2: driver -> drivers[] (multi-source list).
+        self.assertEqual(d["drivers"][0]["attrs"][0]["alias"], "in_rotateX")
         self.assertEqual(d["driven"]["attrs"][1]["alias"], "out_blendB")
 
     def test_driven_baseline_and_isscale(self):
@@ -490,10 +495,25 @@ class T5_DryRunMultiNode(unittest.TestCase):
 
 
 class T6_SchemaVersionUnchanged(unittest.TestCase):
+    """PERMANENT GUARD - DO NOT REMOVE.
 
-    def test_PERMANENT_GUARD(self):
+    M_B24a2-2 dual-version form. Original semantic preserved:
+    'commit must not silently change SCHEMA_VERSION'. The bump from
+    rbftools.v5.m3 to rbftools.v5.m_b24 was performed atomically in
+    M_B24a2-2 with same-commit guard upgrade. LEGACY membership of
+    rbftools.v5.m3 is itself a PERMANENT invariant (T_VERSIONED_SCHEMA_PRESENT
+    #26.b) so legacy fixtures stay readable forever.
+    """
+
+    def test_PERMANENT_current_schema_version(self):
         from RBFtools.core_json import SCHEMA_VERSION
-        self.assertEqual(SCHEMA_VERSION, "rbftools.v5.m3")
+        self.assertEqual(SCHEMA_VERSION, "rbftools.v5.m_b24")
+
+    def test_PERMANENT_legacy_schema_versions_present(self):
+        from RBFtools.core_json import LEGACY_SCHEMA_VERSIONS
+        self.assertIn("rbftools.v5.m3", LEGACY_SCHEMA_VERSIONS,
+            "rbftools.v5.m3 MUST remain in LEGACY_SCHEMA_VERSIONS - "
+            "deletion would orphan v5.0-pre-M_B24 .json fixtures")
 
 
 # ----------------------------------------------------------------------
@@ -736,8 +756,9 @@ class T_FloatRoundTrip(unittest.TestCase):
     def test_load_dump_idempotent(self):
         # Build a payload with messy floats; ensure dump(load(dump(d)))
         # equals dump(d) byte for byte.
+        # M_B24a2-2: literal bumped from rbftools.v5.m3 to rbftools.v5.m_b24.
         d = {
-            "schema_version": "rbftools.v5.m3",
+            "schema_version": "rbftools.v5.m_b24",
             "nodes": [{
                 "name": "RBF1",
                 "settings": {"radius": 0.10000000000000002,

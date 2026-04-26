@@ -47,12 +47,23 @@ class T0_SchemaVersionImmutability(unittest.TestCase):
     """
 
     def test_schema_version_unchanged_M3_0(self):
-        from RBFtools.core_json import SCHEMA_VERSION
+        # M_B24a2-2 dual-version: original M3.0 contract said "schema
+        # evolution requires a NEW version string + multi-version
+        # reader" - that is exactly what M_B24a2-2 did. SCHEMA_VERSION
+        # is now the M_B24 string; the M3.0 string is preserved in
+        # LEGACY_SCHEMA_VERSIONS so legacy fixtures stay readable.
+        from RBFtools.core_json import (
+            SCHEMA_VERSION, LEGACY_SCHEMA_VERSIONS,
+        )
         self.assertEqual(
-            SCHEMA_VERSION, "rbftools.v5.m3",
-            "SCHEMA_VERSION changed — addendum §M3.0 contract violation. "
-            "Schema evolution requires a NEW version string + multi-"
-            "version reader, NOT mutation of the existing string.")
+            SCHEMA_VERSION, "rbftools.v5.m_b24",
+            "SCHEMA_VERSION mismatch - M_B24a2-2 bumped to "
+            "rbftools.v5.m_b24; further evolution requires a new "
+            "string + LEGACY extension + same-commit guard upgrade.")
+        self.assertIn("rbftools.v5.m3", LEGACY_SCHEMA_VERSIONS,
+            "M3.0 SCHEMA_VERSION lost from LEGACY_SCHEMA_VERSIONS - "
+            "addendum M3.0 contract violation: legacy fixtures would "
+            "be orphaned.")
 
 
 # ----------------------------------------------------------------------

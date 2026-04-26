@@ -496,11 +496,19 @@ class T11_I18nParity(unittest.TestCase):
 
 class T12_SchemaVersionUnchanged(unittest.TestCase):
     """M3.7 must NOT bump SCHEMA_VERSION. Aliases are Maya metadata,
-    not part of the RBFtools shape schema. See addendum §M3.7 (D.1)."""
+    not part of the RBFtools shape schema. See addendum M3.7 (D.1).
+
+    M_B24a2-2 dual-version note: M_B24a2 IS a legitimate bump (B2 +
+    B4 schema fields). M3.7's contract was 'M3.7 itself does not
+    bump' - that contract holds (no alias-related schema change).
+    Test now asserts current M_B24 + LEGACY M3 preservation."""
 
     def test_schema_version_still_m3(self):
-        from RBFtools.core_json import SCHEMA_VERSION
-        self.assertEqual(SCHEMA_VERSION, "rbftools.v5.m3")
+        from RBFtools.core_json import (
+            SCHEMA_VERSION, LEGACY_SCHEMA_VERSIONS,
+        )
+        self.assertEqual(SCHEMA_VERSION, "rbftools.v5.m_b24")
+        self.assertIn("rbftools.v5.m3", LEGACY_SCHEMA_VERSIONS)
 
 
 # ----------------------------------------------------------------------

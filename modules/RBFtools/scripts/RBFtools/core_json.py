@@ -40,13 +40,21 @@ import os
 import tempfile
 
 
-# === Permanent invariant (addendum §M3.0 — DO NOT MODIFY) ===
+# === Schema version (addendum §M3.0 + §M_B24a2 — bump protocol) ===
 # Changing this string breaks downstream engine integration's
 # compatibility gate. Any schema evolution MUST introduce a new
-# version string and a multi-version reader. See the module
-# docstring above and addendum §M3.0 Schema Version Immutability
-# Contract before making any change.
-SCHEMA_VERSION = "rbftools.v5.m3"
+# version string AND extend LEGACY_SCHEMA_VERSIONS atomically in
+# the SAME commit, with PERMANENT guard updates (T6 / T_M3_3_SCHEMA_FIELDS
+# / T_FLOAT_ROUND_TRIP) flipped to dual-version form. See addendum
+# §M_B24a2 PROJECT-CONSTITUTIONAL-EVENT for the precedent.
+SCHEMA_VERSION = "rbftools.v5.m_b24"
+
+# M_B24a2 — versions older than SCHEMA_VERSION that this loader can
+# upgrade in-memory. PERMANENT inclusion: removing entries here would
+# orphan legacy fixtures (T_VERSIONED_SCHEMA_PRESENT #26.b).
+LEGACY_SCHEMA_VERSIONS = frozenset({
+    "rbftools.v5.m3",
+})
 
 
 class SchemaVersionError(Exception):
@@ -121,11 +129,14 @@ def read_json_with_schema_check(path):
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     got = data.get("schema_version") if isinstance(data, dict) else None
-    if got != SCHEMA_VERSION:
-        raise SchemaVersionError(
-            "Schema mismatch: expected {!r}, got {!r}".format(
-                SCHEMA_VERSION, got))
-    return data
+    if got == SCHEMA_VERSION:
+        return data
+    if got in LEGACY_SCHEMA_VERSIONS:
+        # M_B24a2 versioned dispatch — in-memory upgrade.
+        return _upgrade_legacy_dict(data)
+    raise SchemaVersionError(
+        "Schema mismatch: expected {!r} (or LEGACY {}), got {!r}".format(
+            SCHEMA_VERSION, sorted(LEGACY_SCHEMA_VERSIONS), got))
 
 
 # =====================================================================
@@ -236,7 +247,21 @@ _ATTR_NAME_TO_JSON_KEY = {
 _JSON_KEY_TO_ATTR_NAME = {v: k for k, v in _ATTR_NAME_TO_JSON_KEY.items()}
 
 # Frozen key set for permanent guard T_M3_3_SCHEMA_FIELDS.
+# M_B24a2-2: drivers (plural list, M_B24 multi-source) replaces driver
+# (singular) and output_encoding is added at the node-dict top level.
 EXPECTED_NODE_DICT_KEYS = frozenset({
+    "name", "type_mode", "settings",
+    "drivers",                    # was "driver" pre-M_B24
+    "driven",
+    "output_quaternion_groups",
+    "output_encoding",            # NEW M_B24a2-2 (node-level enum 0..2)
+    "poses",
+})
+
+# M_B24a2-2: PERMANENT — keys for legacy v5.0-pre-M_B24 schema.
+# Used by _upgrade_legacy_dict + permanent guards. DO NOT shrink:
+# removal would orphan legacy fixtures.
+LEGACY_NODE_DICT_KEYS_M3 = frozenset({
     "name", "type_mode", "settings",
     "driver", "driven",
     "output_quaternion_groups",
@@ -253,6 +278,57 @@ _TYPE_MODE_LABEL = {0: "VectorAngle", 1: "RBF"}
 # =====================================================================
 #  Export — node_to_dict + dump entrypoints
 # =====================================================================
+
+def _upgrade_legacy_node(ndata):
+    """In-memory upgrade of a single legacy v5.0-pre-M_B24 node dict
+    to the new M_B24 shape. One-way (加固 5): the result NEVER carries
+    legacy keys. Unknown / unrecognized fields are preserved verbatim
+    so a caller adding meta data is not silently stripped, but the
+    well-known legacy keys are translated.
+
+    Translation:
+      driver: {node, attrs, rotate_orders}     ->
+        drivers: [{node, attrs, rotate_orders, weight: 1.0, encoding: 0}]
+      (no output_encoding in legacy)           ->
+        output_encoding: 0  (Euler default; matches C++ M_B24a1 default)
+    """
+    if not isinstance(ndata, dict):
+        return ndata
+    # Already new shape — pass-through.
+    if "drivers" in ndata and "output_encoding" in ndata:
+        return ndata
+    out = dict(ndata)  # shallow copy; nested dicts/lists are shared
+    legacy_driver = out.pop("driver", None)
+    if legacy_driver is None:
+        legacy_driver = {"node": "", "attrs": [], "rotate_orders": []}
+    legacy_driver = dict(legacy_driver)
+    legacy_driver["weight"] = 1.0
+    legacy_driver["encoding"] = 0
+    out["drivers"] = [legacy_driver]
+    out.setdefault("output_encoding", 0)
+    return out
+
+
+def _upgrade_legacy_dict(data):
+    """In-memory upgrade of a top-level v5.0-pre-M_B24 document dict
+    to the M_B24 shape. Idempotent: if data is already new, returns
+    a shallow copy with schema_version forced to current. One-way
+    only (加固 5): callers that dump the result MUST write the new
+    SCHEMA_VERSION; there is no inverse transform.
+
+    Drops _comment field at the top level (fixture-only metadata,
+    not part of the runtime schema; 加固 5).
+    """
+    if not isinstance(data, dict):
+        return data
+    out = dict(data)
+    out.pop("_comment", None)         # fixture-only metadata
+    out["schema_version"] = SCHEMA_VERSION
+    nodes = out.get("nodes")
+    if isinstance(nodes, list):
+        out["nodes"] = [_upgrade_legacy_node(n) for n in nodes]
+    return out
+
 
 def node_to_dict(node):
     """Read a fully-loaded RBFtools node into a JSON-ready dict.
@@ -290,7 +366,10 @@ def node_to_dict(node):
     baselines = core.read_output_baselines(node)
     # baselines is list[(base_value, is_scale)] aligned to output[k] idx.
 
-    driver_block = {
+    # M_B24a2-2: drivers[] list (single-element until M_B24b UI exposes
+    # multi-source editing). The legacy single-driver shape is the
+    # element at index 0; weight/encoding are M_B24a1 schema defaults.
+    driver_block_legacy = {
         "node": driver_node or "",
         "attrs": [
             {"index": i, "name": name,
@@ -298,7 +377,10 @@ def node_to_dict(node):
             for i, name in enumerate(driver_attrs)
         ],
         "rotate_orders": list(rotate_orders),
+        "weight": 1.0,
+        "encoding": 0,
     }
+    drivers_block = [driver_block_legacy]
 
     driven_block = {
         "node": driven_node or "",
@@ -335,13 +417,17 @@ def node_to_dict(node):
             },
         })
 
+    # M_B24a2-2: read node-level outputEncoding (M_B24a1 schema field)
+    output_encoding = int(core.safe_get(shape + ".outputEncoding", 0))
+
     return {
         "name": str(node),
         "type_mode": type_mode,
         "settings": settings,
-        "driver": driver_block,
+        "drivers": drivers_block,
         "driven": driven_block,
         "output_quaternion_groups": quat_groups,
+        "output_encoding": output_encoding,
         "poses": pose_dicts,
     }
 
@@ -453,10 +539,11 @@ def dry_run(data, mode="add"):
             type(data).__name__))
     else:
         sv = data.get("schema_version")
-        if sv != SCHEMA_VERSION:
+        if sv != SCHEMA_VERSION and sv not in LEGACY_SCHEMA_VERSIONS:
             fatal.append(
-                "schema_version: expected {!r}, got {!r}".format(
-                    SCHEMA_VERSION, sv))
+                "schema_version: expected {!r} (or LEGACY {}), "
+                "got {!r}".format(
+                    SCHEMA_VERSION, sorted(LEGACY_SCHEMA_VERSIONS), sv))
         if "nodes" not in data:
             fatal.append("top-level: required field 'nodes' missing")
         elif not isinstance(data["nodes"], list):
@@ -485,8 +572,15 @@ def _validate_node_dict(ndata, rpt, mode, idx):
     if not isinstance(ndata, dict):
         rpt.fail(prefix + ": expected object")
         return
+    # M_B24a2-2: defensive upgrade. dry_run is also called by user code
+    # paths that may pass a still-legacy ndata; idempotent on new dicts.
+    if "driver" in ndata and "drivers" not in ndata:
+        upgraded = _upgrade_legacy_node(ndata)
+        ndata.clear()
+        ndata.update(upgraded)
+        rpt.data = ndata     # keep PerNodeReport in sync
     for required in ("name", "type_mode", "settings",
-                     "driver", "driven",
+                     "drivers", "driven",
                      "output_quaternion_groups", "poses"):
         if required not in ndata:
             rpt.fail(prefix + ": required field {!r} missing".format(
@@ -513,7 +607,11 @@ def _validate_node_dict(ndata, rpt, mode, idx):
             rpt.fail("unknown import mode {!r}".format(mode))
 
     # ---- driver / driven scene presence ----
-    drv = ndata.get("driver", {})
+    # M_B24a2-2: pull first driver from new "drivers" list. Backend
+    # validation stays single-driver until M_B24b multi-source UI;
+    # extra entries (if any) get a sanity check below.
+    drivers_list = ndata.get("drivers", []) or []
+    drv = drivers_list[0] if drivers_list else {}
     drvn_ = ndata.get("driven", {})
     drv_node = drv.get("node", "")
     drvn_node = drvn_.get("node", "")
@@ -659,6 +757,13 @@ def import_path(path, mode="add"):
 def dict_to_node(ndata, mode="add", will_overwrite=False):
     """Materialise one node-dict into the scene.
 
+    M_B24a2-2: defensive in-memory upgrade for legacy ndata. When
+    callers pass a still-legacy node dict (driver singular, no
+    output_encoding) it is transparently upgraded via
+    :func:`_upgrade_legacy_node`. The upgrade is one-way (加固 5):
+    once normalized, the result will be written/read as the M_B24
+    schema only.
+
     META FIELD CONTRACT (addendum §M3.3.J):
       The 'meta' block is metadata only. This function MUST NOT read
       meta.* for any behavioural decision. Removing or modifying meta
@@ -672,6 +777,10 @@ def dict_to_node(ndata, mode="add", will_overwrite=False):
       ``capture_per_pose_local_transforms``. This is the ONLY legal
       bypass of the M2.3 auto-capture path — see addendum.
     """
+
+    # M_B24a2-2 defensive upgrade — idempotent on new-shape input.
+    if isinstance(ndata, dict) and "driver" in ndata and "drivers" not in ndata:
+        ndata = _upgrade_legacy_node(ndata)
 
     name = ndata["name"]
     target = name
@@ -709,7 +818,11 @@ def dict_to_node(ndata, mode="add", will_overwrite=False):
                         json_key, target, attr, exc))
 
         # ---- driver / driven wiring ----
-        drv = ndata.get("driver", {})
+        # M_B24a2-2: drivers[] (plural). Take element 0 for the single-
+        # driver wiring path; M_B24b will iterate all elements with the
+        # multi-source UI / connectAttr flow.
+        drivers_list = ndata.get("drivers", []) or []
+        drv = drivers_list[0] if drivers_list else {}
         drvn = ndata.get("driven", {})
         drv_attrs = [a["name"] for a in drv.get("attrs", [])]
         drvn_attrs = [a["name"] for a in drvn.get("attrs", [])]

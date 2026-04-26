@@ -292,21 +292,24 @@ class T_CacheNotInSchema(unittest.TestCase):
 
 
 class T_CoreJsonDiffEmpty(unittest.TestCase):
-    """PERMANENT GUARD — DO NOT REMOVE.
+    """PERMANENT GUARD - DO NOT REMOVE.
 
-    M2.5 must change ZERO lines in core_json.py — this is the
+    M2.5 must change ZERO lines in core_json.py - this is the
     constitutional proof that schema additions can be made
-    without touching the JSON schema layer (addendum §M2.5).
+    without touching the JSON schema layer (addendum M2.5).
 
-    Implementation: the SCHEMA_VERSION constant must remain
-    "rbftools.v5.m3" AND none of the cache field names appear in
-    the module. Both invariants are checked here. Together with
-    T_CacheNotInSchema and T0 they form the "can-add-schema-
-    without-bumping-version" argument."""
+    M_B24a2-2 update: M_B24a2 IS a JSON-schema-touching commit
+    (legitimate bump per PROJECT-CONSTITUTIONAL-EVENT). The M2.5
+    invariant remains: M2.5 cache field names still must not appear
+    in core_json.py. SCHEMA_VERSION is now M_B24 with M3 preserved
+    in LEGACY_SCHEMA_VERSIONS."""
 
     def test_PERMANENT_schema_version_locked(self):
-        from RBFtools.core_json import SCHEMA_VERSION
-        self.assertEqual(SCHEMA_VERSION, "rbftools.v5.m3")
+        from RBFtools.core_json import (
+            SCHEMA_VERSION, LEGACY_SCHEMA_VERSIONS,
+        )
+        self.assertEqual(SCHEMA_VERSION, "rbftools.v5.m_b24")
+        self.assertIn("rbftools.v5.m3", LEGACY_SCHEMA_VERSIONS)
 
 
 if __name__ == "__main__":
