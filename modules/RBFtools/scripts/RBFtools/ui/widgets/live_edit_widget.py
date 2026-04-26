@@ -111,7 +111,13 @@ class LiveEditWidget(QtWidgets.QWidget):
             return
         try:
             from RBFtools import core as _core
-            drv_node, drv_attrs = _core.read_driver_info(node)
+            # M_B24b2: multi-source listen. List[(node, attr)] preserves
+            # source order (C.2). Legacy single-driver auto-migrates so
+            # the result is byte-equivalent to the previous (drv_node,
+            # drv_attrs) pair, expanded into pairs.
+            sources = _core.read_driver_info_multi(node)
+            pairs = [(src.node, attr) for src in sources for attr in src.attrs]
+            drv_attrs = [a for _n, a in pairs]
         except Exception as exc:
             self._fail_to_idle(str(exc))
             return
@@ -122,7 +128,7 @@ class LiveEditWidget(QtWidgets.QWidget):
         # Register a scriptJob per driver attr (C.2 — per-attr
         # precision), parented to the window for auto-cleanup.
         self._jobs = []
-        for attr in drv_attrs:
+        for drv_node, attr in pairs:
             try:
                 jid = cmds.scriptJob(
                     attributeChange=[
@@ -221,7 +227,9 @@ class LiveEditWidget(QtWidgets.QWidget):
             node = self._ctrl.current_node
             drv_attrs = []
             if node:
-                _drv_node, drv_attrs = _core.read_driver_info(node)
+                # M_B24b2: multi-source aggregate (legacy auto-migrates).
+                _sources = _core.read_driver_info_multi(node)
+                drv_attrs = [a for src in _sources for a in src.attrs]
         except Exception:
             drv_attrs = []
         plan = core_live.planned_transition_on_node_change(

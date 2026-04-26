@@ -359,12 +359,30 @@ class MainController(QtCore.QObject):
         if not self._current_node:
             return None
         from RBFtools import core, core_mirror
+        from RBFtools.ui.i18n import tr
 
         source = self._current_node
         target_name = config.get("target_name", "")
         if not target_name:
             cmds.warning("mirror_current_node: empty target_name")
             return None
+
+        # M_B24b2: multi-source mirror is DEFERRED to v5.x post-final
+        # (M_B24c). When the source node has > 1 driverSource entries
+        # we surface a path A confirm dialog so the TD knows only the
+        # first source will be mirrored. See addendum
+        # §M_B24b2.mirror-deferred-rationale.
+        try:
+            _msrc = core.read_driver_info_multi(source)
+        except Exception:
+            _msrc = []
+        if len(_msrc) > 1:
+            proceed = self.ask_confirm(
+                action_id="mirror_multi_source_warning",
+                title=tr("title_mirror_multi_source"),
+                summary=tr("summary_mirror_multi_source"))
+            if not proceed:
+                return None
 
         target_exists = core._exists(target_name)
         # Build preview text per addendum §M3.2.Q8.

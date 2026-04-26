@@ -116,6 +116,10 @@ class T3_ProfileNodeEndToEnd(unittest.TestCase):
             PoseData(1, [1.0, 0.0], [0.0, 1.0]),
         ]
         mc.read_driver_info.return_value = ("drv", ["rotateX", "rotateY"])
+        # M_B24b2: core_profile now consumes read_driver_info_multi.
+        from RBFtools.core import DriverSource
+        mc.read_driver_info_multi.return_value = [
+            DriverSource(node="drv", attrs=("rotateX", "rotateY"))]
         mc.read_driven_info.return_value = ("drvn", ["a", "b"])
         mc.read_quat_group_starts.return_value = []
         mc.safe_get.side_effect = lambda path, default=0: default

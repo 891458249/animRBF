@@ -109,7 +109,8 @@ class PruneAction(object):
                  "redundant_input_indices", "constant_output_indices",
                  "quat_group_effects",
                  "driver_attr_names", "driven_attr_names",
-                 "n_poses_before", "n_inputs_before", "n_outputs_before")
+                 "n_poses_before", "n_inputs_before", "n_outputs_before",
+                 "cross_source_redundant")
 
     def __init__(self):
         self.duplicate_pose_indices = []     # list[int] — pose.index values
@@ -122,6 +123,9 @@ class PruneAction(object):
         self.n_poses_before = 0
         self.n_inputs_before = 0
         self.n_outputs_before = 0
+        # M_B24b2: cross-source attr-name collision report — list of
+        # (attr_name, first_source_idx, duplicate_source_idx) tuples.
+        self.cross_source_redundant = []
 
     def has_changes(self):
         """Return True iff at least one prune class would actually do
@@ -266,7 +270,26 @@ def analyse_node(node, opts=None):
 
     action = PruneAction()
     poses = core.read_all_poses(node)
-    _drv_node, drv_attrs = core.read_driver_info(node)
+    # M_B24b2: multi-source aggregation. read_driver_info_multi
+    # returns list[DriverSource]; for legacy single-driver nodes the
+    # auto-migration in core.py yields a single-element list, so the
+    # aggregation reduces to the legacy attrs list byte-equivalent
+    # (sanity-tested in test_m_b24b2_downstream.py).
+    drv_sources = core.read_driver_info_multi(node)
+    drv_attrs = []
+    _seen_attr_to_source = {}
+    cross_source_redundant = []
+    for sidx, src in enumerate(drv_sources):
+        for attr in src.attrs:
+            if attr in _seen_attr_to_source:
+                # M_B24b2 (A.2): same attr name appearing in two or
+                # more sources is flagged as cross-source redundant
+                # alongside the within-source redundancy detection.
+                cross_source_redundant.append(
+                    (attr, _seen_attr_to_source[attr], sidx))
+            else:
+                _seen_attr_to_source[attr] = sidx
+            drv_attrs.append(attr)
     _drvn_node, drvn_attrs = core.read_driven_info(node)
     quat_starts = core.read_quat_group_starts(node)
 
@@ -275,6 +298,7 @@ def analyse_node(node, opts=None):
     action.n_poses_before = len(poses)
     action.n_inputs_before = len(drv_attrs)
     action.n_outputs_before = len(drvn_attrs)
+    action.cross_source_redundant = cross_source_redundant
 
     if opts.duplicates:
         dup, conflicts = _scan_duplicates(poses)
@@ -314,7 +338,11 @@ def execute_prune(node, action):
     is no longer a quat-friendly driven slot. That is the documented
     "user has been warned, group will be silently skipped" outcome.
     """
-    drv_node, drv_attrs = core.read_driver_info(node)
+    # M_B24b2: same multi-source aggregation as analyse_node — for
+    # legacy single-driver nodes the result is byte-equivalent.
+    drv_sources_e = core.read_driver_info_multi(node)
+    drv_node = drv_sources_e[0].node if drv_sources_e else ""
+    drv_attrs = [a for src in drv_sources_e for a in src.attrs]
     drvn_node, drvn_attrs = core.read_driven_info(node)
     poses = core.read_all_poses(node)
 

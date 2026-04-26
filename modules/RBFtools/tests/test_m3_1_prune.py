@@ -214,6 +214,11 @@ class T5_AnalyseNodeEndToEnd(unittest.TestCase):
             PoseData(3, [2.0, 5.0], [5.0, 6.0, 7.0]),
         ]
         mc.read_driver_info.return_value = ("drv", ["rotateX", "rotateY"])
+        # M_B24b2: core_prune now consumes read_driver_info_multi; mock
+        # the new entry-point too so existing tests keep their fixture.
+        from RBFtools.core import DriverSource
+        mc.read_driver_info_multi.return_value = [
+            DriverSource(node="drv", attrs=("rotateX", "rotateY"))]
         mc.read_driven_info.return_value = ("drvn", ["a", "b", "c"])
         mc.read_quat_group_starts.return_value = []
         # vector_eq: simple element-wise tolerance.
@@ -241,6 +246,9 @@ class T5_AnalyseNodeEndToEnd(unittest.TestCase):
                 PoseData(1, [0.0, 0.0], [9.0]),  # input same, value diff
             ]
             mc.read_driver_info.return_value = ("drv", ["x", "y"])
+            from RBFtools.core import DriverSource
+            mc.read_driver_info_multi.return_value = [
+                DriverSource(node="drv", attrs=("x", "y"))]
             mc.read_driven_info.return_value = ("drvn", ["o"])
             action = core_prune.analyse_node("RBF1")
         self.assertEqual(action.duplicate_pose_indices, [])
@@ -272,6 +280,9 @@ class T6_ExecutePruneSequencing(unittest.TestCase):
                 PoseData(1, [0.0, 1.0], [1.0, 2.0]),  # duplicate
             ]
             mc.read_driver_info.return_value = ("drv", ["x", "y"])
+            from RBFtools.core import DriverSource
+            mc.read_driver_info_multi.return_value = [
+                DriverSource(node="drv", attrs=("x", "y"))]
             mc.read_driven_info.return_value = ("drvn", ["a", "b"])
             mc.PoseData = PoseData
             mc.undo_chunk.return_value.__enter__ = lambda s: None
@@ -417,6 +428,9 @@ class T12_InvalidGroupPreservesStart(unittest.TestCase):
                                      7.0, 9.0]),
             ]
             mc.read_driver_info.return_value = ("drv", ["x"])
+            from RBFtools.core import DriverSource
+            mc.read_driver_info_multi.return_value = [
+                DriverSource(node="drv", attrs=("x",))]
             mc.read_driven_info.return_value = ("drvn",
                 ["a", "b", "c", "d", "e", "f", "g", "h"])
             mc.PoseData = PoseData

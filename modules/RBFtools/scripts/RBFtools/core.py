@@ -878,6 +878,12 @@ def read_driver_info_multi(node):
         driver.translateX -> RBFtoolsShape.input[0]
         driver.translateY -> RBFtoolsShape.input[1]
         ...
+
+    Mirror operations on multi-source nodes are CURRENTLY DEFERRED
+    to v5.x post-final M_B24c sub-task. See addendum
+    §M_B24b2.mirror-deferred-rationale for the controller-layer
+    migration plan and the 14 deprecated read_driver_info call-sites
+    (including 5 in mirror flow) preserved by M_B24a2-1 backcompat.
     """
     shape = get_shape(node)
     if not _exists(shape):

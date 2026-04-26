@@ -145,7 +145,12 @@ def profile_node(node):
 
     # ---- Topology ----
     poses = core.read_all_poses(node)
-    drv_node, drv_attrs = core.read_driver_info(node)
+    # M_B24b2: multi-source aggregation. Legacy single-driver auto-
+    # migrates to a single-element list, preserving byte-equivalent
+    # behavior for the n_inputs / drv_attrs derived values below.
+    drv_sources = core.read_driver_info_multi(node)
+    drv_node = drv_sources[0].node if drv_sources else ""
+    drv_attrs = [a for src in drv_sources for a in src.attrs]
     drvn_node, drvn_attrs = core.read_driven_info(node)
     quat_starts = core.read_quat_group_starts(node)
 
@@ -206,6 +211,14 @@ def profile_node(node):
         "wiring": {
             "driver_node": drv_node or "",
             "driven_node": drvn_node or "",
+            # M_B24b2: per-source list (B.2 5-column table).
+            "driver_sources": [
+                {"index": i, "node": s.node,
+                 "attrs": list(s.attrs),
+                 "weight": float(s.weight),
+                 "encoding": int(s.encoding)}
+                for i, s in enumerate(drv_sources)
+            ],
         },
         "memory": mem,
         "performance": {
@@ -312,6 +325,22 @@ def format_report(profile):
         w["driver_node"] or "(unconnected)"))
     lines.append("  driven_node       : {}".format(
         w["driven_node"] or "(unconnected)"))
+    # M_B24b2: 5-column multi-source table (idx | node | attrs |
+    # weight | encoding). Renders even for legacy single-driver
+    # nodes (1-row table from auto-migrated drivers[0]).
+    sources = w.get("driver_sources") or []
+    if sources:
+        lines.append("  Driver sources (multi):")
+        lines.append("    idx | node           | attrs                   | "
+                     "weight | enc")
+        for s in sources:
+            attrs_joined = ",".join(s["attrs"]) or "(none)"
+            lines.append("     {:>2} | {:<14} | {:<23} | {:>6.3f} | {}".format(
+                s["index"],
+                (s["node"] or "(unset)")[:14],
+                attrs_joined[:23],
+                s["weight"],
+                s["encoding"]))
     lines.append("")
 
     # ---- Memory ----

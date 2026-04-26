@@ -190,6 +190,13 @@ _EN = {
     "title_remove_driver_source":      "Remove Driver Source",
     "summary_remove_driver_source":
         "Remove this driver source entry from the current node?",
+    # -- M_B24b2: Mirror multi-source warning (DEFERRED to M_B24c) --
+    "title_mirror_multi_source":       "Mirror — Multi-source node",
+    "summary_mirror_multi_source":
+        "This node has multiple driver sources. Mirror will currently "
+        "process only the FIRST source (deferred to M_B24c per addendum "
+        "M_B24b2.mirror-deferred-rationale). Continue with single-source "
+        "mirror?",
     # -- M3.5: Pose Profiler + ToolsSection (spillover §3) --
     "section_tools":                   "Tools",
     "menu_profile_to_se":              "Profile to Script Editor",
@@ -429,6 +436,12 @@ _ZH = {
     "title_remove_driver_source":      u"\u79fb\u9664\u9a71\u52a8\u6e90",
     "summary_remove_driver_source":
         u"\u4ece\u5f53\u524d\u8282\u70b9\u79fb\u9664\u8be5\u9a71\u52a8\u6e90\uff1f",
+    # -- M_B24b2 Mirror \u591a\u6e90\u8b66\u544a (DEFERRED to M_B24c) --
+    "title_mirror_multi_source":       u"\u955c\u50cf \u2014 \u591a\u6e90\u8282\u70b9",
+    "summary_mirror_multi_source":
+        u"\u6b64\u8282\u70b9\u914d\u7f6e\u4e86\u591a\u4e2a\u9a71\u52a8\u6e90\u3002Mirror \u5f53\u524d\u4ec5\u5904\u7406\u7b2c\u4e00\u4e2a\u6e90 "
+        u"(\u63a8\u8fdf\u5230 M_B24c, \u89c1 addendum M_B24b2.mirror-deferred-rationale)\u3002"
+        u"\u7ee7\u7eed\u5355\u6e90\u955c\u50cf\uff1f",
     # -- M3.5 --
     "section_tools":                   u"\u5de5\u5177",
     "menu_profile_to_se":              u"\u8f93\u51fa Profile \u5230\u811a\u672c\u7f16\u8f91\u5668",
