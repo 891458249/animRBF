@@ -23,8 +23,46 @@ from __future__ import absolute_import
 
 import contextlib
 import math
+import warnings
+from dataclasses import dataclass
 
 import maya.cmds as cmds
+
+
+# =====================================================================
+#  M_B24a2-1 — Multi-source driver public API + dataclass
+# =====================================================================
+
+# Module-level per-session flag for legacy migration warning. Reset to
+# False at module reload; first migration sets True so subsequent
+# legacy-node loads stay quiet. Pure-python tests reset via monkeypatch.
+_MIGRATION_WARNING_ISSUED = False
+
+
+@dataclass(frozen=True)
+class DriverSource:
+    """Per-driver companion metadata for the M_B24 multi-source schema.
+
+    Mirrors C++ ``driverSource[d]`` compound (see RBFtools.h M_B24a1).
+    Frozen for safety; ``attrs`` is a tuple (not list) to satisfy
+    immutability. Construct from a list via ``tuple(attrs_list)``.
+
+    encoding values match inputEncoding enum:
+        0 = Raw, 1 = Quaternion, 2 = BendRoll, 3 = ExpMap, 4 = SwingTwist
+    """
+    node: str
+    attrs: tuple
+    weight: float = 1.0
+    encoding: int = 0
+
+    def __post_init__(self):
+        if self.weight < 0.0:
+            raise ValueError(
+                "DriverSource.weight must be >= 0, got {}".format(self.weight))
+        if self.encoding not in (0, 1, 2, 3, 4):
+            raise ValueError(
+                "DriverSource.encoding must be 0..4, got {}".format(
+                    self.encoding))
 
 from RBFtools.constants import (
     PLUGIN_NAME,
@@ -733,52 +771,224 @@ def list_filtered_attributes(node, filters):
 #  5. Connection tracing — driver / driven discovery
 # =====================================================================
 
-def read_driver_info(node):
-    """Discover which node and attributes drive the *input[]* array.
-
-    Traces connections into ``<shape>.input[i]`` and extracts the
-    upstream node name plus each connected attribute.
-
-    Parameters
-    ----------
-    node : str
-        Transform or shape of a ``RBFtools`` node.
-
-    Returns
-    -------
-    (str, list[str])
-        ``(driver_node_name, [attr_1, attr_2, ...])``.
-        Returns ``("", [])`` if nothing is connected.
-
-    Connection topology::
-
-        driver.translateX  →  RBFtoolsShape.input[0]
-        driver.translateY  →  RBFtoolsShape.input[1]
-        driver.translateZ  →  RBFtoolsShape.input[2]
-    """
+def _read_legacy_input_connections(node):
+    """Internal: trace <shape>.input[i] connections, single-driver
+    legacy semantics. Returns (first_driver, [attrs]) — same shape as
+    the legacy read_driver_info."""
     shape = get_shape(node)
     if not _exists(shape):
         return "", []
-
     conns = cmds.listConnections(
         shape + ".input",
         source=True, destination=False,
         plugs=True, connections=True,
         skipConversionNodes=True,
     ) or []
-
     driver = ""
     attrs = []
-    # ``conns`` is a flat list: [dest_plug, src_plug, dest_plug, src_plug, ...]
     for i in range(0, len(conns), 2):
-        src_plug = conns[i + 1]                # e.g. "pSphere1.translateX"
+        src_plug = conns[i + 1]
         parts = src_plug.split(".")
         if not driver:
             driver = parts[0]
         if len(parts) > 1:
             attrs.append(parts[1])
-
     return driver, attrs
+
+
+def _migrate_legacy_single_driver(node):
+    """Detect a v5.0-pre-M_B24 single-driver node and migrate it to the
+    M_B24 multi-source schema (write driverSource[0] from existing
+    input[] connections). Fail-soft per addendum 加固 4: returns the
+    legacy tuple even if the migration write fails, so callers never
+    break. Best-effort.
+
+    Returns
+    -------
+    (str, list[str])
+        Legacy tuple — same shape as :func:`read_driver_info`.
+    """
+    global _MIGRATION_WARNING_ISSUED
+    try:
+        legacy_node, legacy_attrs = _read_legacy_input_connections(node)
+        if not legacy_node:
+            return ("", [])
+        shape = get_shape(node)
+        if not _exists(shape):
+            return (legacy_node, legacy_attrs)
+        # Detect: has the migration already run? Check if
+        # driverSource[0].driverSource_node has an incoming connection
+        # OR driverSource_attrs default differs from empty.
+        already = False
+        try:
+            srcs = cmds.listConnections(
+                shape + ".driverSource[0].driverSource_node",
+                source=True, destination=False) or []
+            already = bool(srcs)
+        except Exception:
+            already = False
+        if already:
+            return (legacy_node, legacy_attrs)
+        # Best-effort migration write.
+        try:
+            cmds.connectAttr(
+                legacy_node + ".message",
+                shape + ".driverSource[0].driverSource_node",
+                force=True)
+            cmds.setAttr(
+                shape + ".driverSource[0].driverSource_attrs",
+                len(legacy_attrs), *legacy_attrs, type="stringArray")
+            cmds.setAttr(
+                shape + ".driverSource[0].driverSource_weight", 1.0)
+            cmds.setAttr(
+                shape + ".driverSource[0].driverSource_encoding", 0)
+            if not _MIGRATION_WARNING_ISSUED:
+                cmds.warning(
+                    "RBFtools: Legacy single-driver schema detected on "
+                    "'{}'. Migrated to multi-source driverSource[0]. "
+                    "See addendum #M_B24a2.".format(node))
+                _MIGRATION_WARNING_ISSUED = True
+        except Exception as exc:
+            cmds.warning(
+                "RBFtools: Migration failed on '{}': {}. Continuing "
+                "with legacy schema.".format(node, exc))
+        return (legacy_node, legacy_attrs)
+    except Exception:
+        return ("", [])
+
+
+def read_driver_info_multi(node):
+    """Discover all drivers + per-source metadata on a M_B24 node.
+
+    Returns a list of :class:`DriverSource` objects. Empty list if no
+    drivers are connected. For legacy v5.0-pre-M_B24 nodes (no
+    driverSource[]), the function calls
+    :func:`_migrate_legacy_single_driver` so the read returns the
+    migrated single-element list seamlessly.
+
+    Connection topology (M_B24)::
+
+        driverSource[d].driverSource_node    <- driver.message
+        driverSource[d].driverSource_attrs    = [attr1, attr2, ...]
+        driverSource[d].driverSource_weight   = 1.0
+        driverSource[d].driverSource_encoding = 0..4
+
+    Legacy fallback topology::
+
+        driver.translateX -> RBFtoolsShape.input[0]
+        driver.translateY -> RBFtoolsShape.input[1]
+        ...
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    # Probe driverSource[]; if it has populated entries, prefer them.
+    indices = []
+    try:
+        indices = cmds.getAttr(shape + ".driverSource", multiIndices=True) or []
+    except Exception:
+        indices = []
+    sources = []
+    for d in indices:
+        node_plug = "{}.driverSource[{}].driverSource_node".format(shape, d)
+        srcs = cmds.listConnections(
+            node_plug, source=True, destination=False) or []
+        if not srcs:
+            continue
+        attrs_raw = cmds.getAttr(
+            "{}.driverSource[{}].driverSource_attrs".format(shape, d)) or []
+        weight = cmds.getAttr(
+            "{}.driverSource[{}].driverSource_weight".format(shape, d))
+        encoding = cmds.getAttr(
+            "{}.driverSource[{}].driverSource_encoding".format(shape, d))
+        try:
+            ds = DriverSource(
+                node=srcs[0],
+                attrs=tuple(attrs_raw),
+                weight=float(weight),
+                encoding=int(encoding))
+        except (ValueError, TypeError) as exc:
+            cmds.warning(
+                "RBFtools: skipping malformed driverSource[{}] on "
+                "'{}': {}".format(d, node, exc))
+            continue
+        sources.append(ds)
+    if sources:
+        return sources
+    # Legacy path — migrate (fail-soft) and synthesize one entry.
+    legacy_node, legacy_attrs = _migrate_legacy_single_driver(node)
+    if not legacy_node:
+        return []
+    return [DriverSource(
+        node=legacy_node, attrs=tuple(legacy_attrs),
+        weight=1.0, encoding=0)]
+
+
+def add_driver_source(node, driver_node, driver_attrs,
+                      weight=1.0, encoding=0):
+    """Append a new :class:`DriverSource` to driverSource[].
+
+    Returns the index of the newly-added entry. Forms the
+    driverSource_node message connection from ``driver_node.message``
+    and writes the attrs / weight / encoding fields.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        raise RuntimeError(
+            "add_driver_source: shape not found for {!r}".format(node))
+    # Validate via dataclass (enforces weight >= 0, encoding 0..4).
+    DriverSource(node=driver_node, attrs=tuple(driver_attrs),
+                 weight=float(weight), encoding=int(encoding))
+    # Find next free index.
+    indices = cmds.getAttr(shape + ".driverSource", multiIndices=True) or []
+    next_idx = (max(indices) + 1) if indices else 0
+    base = "{}.driverSource[{}]".format(shape, next_idx)
+    cmds.connectAttr(driver_node + ".message",
+                     base + ".driverSource_node", force=True)
+    cmds.setAttr(base + ".driverSource_attrs",
+                 len(driver_attrs), *driver_attrs, type="stringArray")
+    cmds.setAttr(base + ".driverSource_weight", float(weight))
+    cmds.setAttr(base + ".driverSource_encoding", int(encoding))
+    return next_idx
+
+
+def remove_driver_source(node, index):
+    """Disconnect + remove driverSource[index]. No-op if the index does
+    not exist."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    plug = "{}.driverSource[{}]".format(shape, index)
+    try:
+        cmds.removeMultiInstance(plug, b=True)
+    except Exception as exc:
+        cmds.warning(
+            "RBFtools: remove_driver_source({}, {}) failed: {}".format(
+                node, index, exc))
+
+
+def read_driver_info(node):
+    """DEPRECATED. Use :func:`read_driver_info_multi` for new code.
+
+    Legacy single-driver wrapper that returns the first driver's
+    (node_name, attrs) tuple. Triggers :class:`DeprecationWarning` on
+    every call. The implementation routes through
+    :func:`read_driver_info_multi`, which auto-migrates legacy nodes.
+
+    Returns
+    -------
+    (str, list[str])
+        ``(driver_node_name, [attr_1, attr_2, ...])``.
+        Returns ``("", [])`` if nothing is connected.
+    """
+    warnings.warn(
+        "read_driver_info is deprecated; use read_driver_info_multi",
+        DeprecationWarning, stacklevel=2)
+    sources = read_driver_info_multi(node)
+    if not sources:
+        return "", []
+    first = sources[0]
+    return first.node, list(first.attrs)
 
 
 def read_driven_info(node):
