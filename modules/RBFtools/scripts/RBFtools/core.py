@@ -930,6 +930,34 @@ def read_driver_info_multi(node):
         weight=1.0, encoding=0)]
 
 
+def _is_matrix_mode(shape):
+    """M_B24d: detect RBF Matrix mode (type=1 + rbfMode=1).
+
+    Generic mode  = type=1 + rbfMode=0 (input[i] flat scalar wiring).
+    Matrix mode   = type=1 + rbfMode=1 (driverList[d].driverInput
+                                         matrix wiring; DEFERRED to
+                                         M_B24d_matrix_followup).
+    Vector-Angle  = type=0 (input[i] flat scalar wiring).
+
+    Returns True only for the Matrix sub-mode."""
+    type_val = int(safe_get(shape + ".type", 0))
+    rbf_mode = int(safe_get(shape + ".rbfMode", 0))
+    return type_val == 1 and rbf_mode == 1
+
+
+def _count_existing_input_attrs(shape):
+    """M_B24d: count current `<shape>.input[]` populated indices.
+
+    Used as the base offset for appending new driver attrs in
+    add_driver_source (Generic mode). Returns 0 if input[] is empty
+    or if the multiIndices query fails."""
+    try:
+        indices = cmds.getAttr(shape + ".input", multiIndices=True) or []
+    except Exception:
+        indices = []
+    return (max(indices) + 1) if indices else 0
+
+
 def add_driver_source(node, driver_node, driver_attrs,
                       weight=1.0, encoding=0):
     """Append a new :class:`DriverSource` to driverSource[].
@@ -937,34 +965,142 @@ def add_driver_source(node, driver_node, driver_attrs,
     Returns the index of the newly-added entry. Forms the
     driverSource_node message connection from ``driver_node.message``
     and writes the attrs / weight / encoding fields.
+
+    M_B24d data path: in addition to the metadata write, this
+    function also creates the actual data connections so RBF
+    compute() sees the new driver. For Generic mode (type=1,
+    rbfMode=0) this means appending each ``driver_node.<attr>``
+    to ``shape.input[base+i]`` where base is the current input[]
+    count. Matrix mode (type=1, rbfMode=1) raises
+    NotImplementedError per addendum #M_B24d.matrix-mode-deferred
+    until v5.x post-final M_B24d_matrix_followup.
+
+    Atomic fail-soft (Hardening 1): metadata write happens first,
+    then data path. If any data-path connectAttr fails, the
+    metadata is rolled back via removeMultiInstance so the node
+    never holds a half-state driverSource[idx].
     """
     shape = get_shape(node)
     if not _exists(shape):
         raise RuntimeError(
             "add_driver_source: shape not found for {!r}".format(node))
+    # M_B24d (Hardening 2): Matrix mode wiring is DEFERRED. Raise
+    # explicitly so the TD sees the boundary instead of a silent
+    # "metadata only, compute() blind" half-state.
+    if _is_matrix_mode(shape):
+        raise NotImplementedError(
+            "M_B24d: Matrix mode driver wiring is deferred to v5.x "
+            "post-final M_B24d_matrix_followup. Current node {!r} is "
+            "in RBF Matrix mode (type=1 + rbfMode=1). Use Generic "
+            "mode (type=1 + rbfMode=0) or Vector-Angle mode (type=0) "
+            "for multi-source driver setup. See addendum "
+            "#M_B24d.matrix-mode-deferred.".format(node))
     # Validate via dataclass (enforces weight >= 0, encoding 0..4).
     DriverSource(node=driver_node, attrs=tuple(driver_attrs),
                  weight=float(weight), encoding=int(encoding))
     # Find next free index.
     indices = cmds.getAttr(shape + ".driverSource", multiIndices=True) or []
     next_idx = (max(indices) + 1) if indices else 0
-    base = "{}.driverSource[{}]".format(shape, next_idx)
+    base_plug = "{}.driverSource[{}]".format(shape, next_idx)
+    # ---- Step 1: write metadata (existing behavior) ----
     cmds.connectAttr(driver_node + ".message",
-                     base + ".driverSource_node", force=True)
-    cmds.setAttr(base + ".driverSource_attrs",
+                     base_plug + ".driverSource_node", force=True)
+    cmds.setAttr(base_plug + ".driverSource_attrs",
                  len(driver_attrs), *driver_attrs, type="stringArray")
-    cmds.setAttr(base + ".driverSource_weight", float(weight))
-    cmds.setAttr(base + ".driverSource_encoding", int(encoding))
+    cmds.setAttr(base_plug + ".driverSource_weight", float(weight))
+    cmds.setAttr(base_plug + ".driverSource_encoding", int(encoding))
+    # ---- Step 2: M_B24d data path (atomic fail-soft) ----
+    # Generic mode: append driver attrs to shape.input[base..base+n].
+    # base is the current count of populated input[] indices, so this
+    # respects existing single-driver wire_driver_inputs() output and
+    # any prior add_driver_source() appends.
+    input_base = _count_existing_input_attrs(shape)
+    connected = []
+    try:
+        for i, attr in enumerate(driver_attrs):
+            src = "{}.{}".format(driver_node, attr)
+            dst = "{}.input[{}]".format(shape, input_base + i)
+            cmds.connectAttr(src, dst, force=True)
+            connected.append((src, dst))
+    except Exception as exc:
+        # Hardening 1 atomic rollback: undo any partial input[]
+        # connections + remove the metadata entry. Inner try/except
+        # ensures rollback itself never raises.
+        for src, dst in connected:
+            try:
+                cmds.disconnectAttr(src, dst)
+            except Exception:
+                pass
+        try:
+            cmds.removeMultiInstance(base_plug, b=True)
+        except Exception:
+            pass
+        cmds.warning(
+            "add_driver_source: data path wiring failed for {!r} "
+            "({}); rolled back metadata + partial connections. "
+            "Error: {}".format(driver_node, driver_attrs, exc))
+        raise
     return next_idx
 
 
 def remove_driver_source(node, index):
     """Disconnect + remove driverSource[index]. No-op if the index does
-    not exist."""
+    not exist.
+
+    M_B24d data path: in addition to clearing the metadata via
+    removeMultiInstance, this function also disconnects the
+    corresponding ``shape.input[base..base+n]`` connections that
+    add_driver_source created. The base offset is recomputed by
+    summing attr counts of all driverSource[*] entries with logical
+    index < `index`.
+    """
     shape = get_shape(node)
     if not _exists(shape):
         return
     plug = "{}.driverSource[{}]".format(shape, index)
+    # M_B24d data path: also disconnect the input[base..base+n]
+    # connections that add_driver_source created. Compute base by
+    # summing attr counts of all driverSource[*] entries with
+    # logical index < `index`. Best-effort — failures warn but do
+    # not block the metadata removal below.
+    try:
+        all_indices = cmds.getAttr(
+            shape + ".driverSource", multiIndices=True) or []
+    except Exception:
+        all_indices = []
+    if index in all_indices:
+        base = 0
+        my_attrs = []
+        for prior in sorted(all_indices):
+            attrs_plug = "{}.driverSource[{}].driverSource_attrs".format(
+                shape, prior)
+            try:
+                attrs_raw = cmds.getAttr(attrs_plug) or []
+            except Exception:
+                attrs_raw = []
+            if prior < index:
+                base += len(attrs_raw)
+            elif prior == index:
+                my_attrs = list(attrs_raw)
+                break
+        # Read this source's driver node from the message connection.
+        try:
+            srcs = cmds.listConnections(
+                plug + ".driverSource_node",
+                source=True, destination=False) or []
+        except Exception:
+            srcs = []
+        drv_node = srcs[0] if srcs else ""
+        for i, attr in enumerate(my_attrs):
+            try:
+                src = "{}.{}".format(drv_node, attr)
+                dst = "{}.input[{}]".format(shape, base + i)
+                cmds.disconnectAttr(src, dst)
+            except Exception:
+                # disconnect failures are best-effort; leave any
+                # stale connection for the caller to clean up
+                # manually if needed.
+                pass
     try:
         cmds.removeMultiInstance(plug, b=True)
     except Exception as exc:

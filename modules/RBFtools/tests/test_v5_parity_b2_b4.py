@@ -79,6 +79,21 @@ class TestV5ParityB2Live(unittest.TestCase):
             "§M_B24b2.mirror-deferred-rationale (Hardening 2 "
             "machine-verifiable form)")
 
+    def test_e_add_driver_source_wires_input_data_path(self):
+        """M_B24d sub-check (e) extension: add_driver_source must
+        wire driver attrs into shape.input[base+i] (data path),
+        not just write driverSource[d] metadata. Source-scan the
+        function body for connectAttr-to-input."""
+        import inspect
+        from RBFtools.core import add_driver_source
+        body = inspect.getsource(add_driver_source)
+        self.assertIn(".input[", body,
+            "add_driver_source must wire data path to "
+            "shape.input[base+i] (M_B24d corrective).")
+        self.assertIn("connectAttr", body,
+            "add_driver_source must call connectAttr for "
+            "data-path wiring (M_B24d).")
+
 
 # ----------------------------------------------------------------------
 # T_V5_PARITY_B4_LIVE (#30) — 4 sub-checks
