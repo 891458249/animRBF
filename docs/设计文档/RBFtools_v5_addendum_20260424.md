@@ -4109,7 +4109,7 @@ in M4.1（处理 pre-M_B24 节点同时承受 driver schema + solverType schema
 | # | 铁律 | v5 设计评级 | 当前状态 | 实施 commit | 子任务归属 |
 |---|---|---|---|---|---|
 | **B1** | 六类 Solver | ❌ 致命 | **❌ 仅 RBF + Vector-Angle 二类** (`type` + `rbfMode` 双 enum 切 2 路径) | —— | **M4** (a/b/c/d) |
-| **B2** | 多源驱动异构 | ⚠️ 高 | **✅ complete (Generic + Matrix + UI + downstream)** *(Mirror DEFERRED to M_B24c; Matrix mode wired in M_B24d_matrix_followup; data-path correction in M_B24d)* | M_B24a1 `d73d6b9` + a2-1 `a43f0de` + a2-2 `1719056` + b1 `2da2059` + b2 `000d127` + d `62fa87c` + d_matrix_followup (this commit, Matrix mode wiring) | M_B24 (a1+a2+b+d+d_matrix_followup) |
+| **B2** | 多源驱动异构 | ⚠️ 高 | **✅ complete (Generic + Matrix + UI + downstream + Generic-mode multi-source mirror)** *(Matrix-mode multi-source mirror DEFERRED to M_B24c2)* | M_B24a1 `d73d6b9` + a2-1 `a43f0de` + a2-2 `1719056` + b1 `2da2059` + b2 `000d127` + d `62fa87c` + d_matrix_followup `c7fd289` + c (this commit, Generic-mode multi-source mirror) | M_B24 (a1+a2+b+d+d_matrix_followup+c) |
 | B3 | 输入编码枚举 5 档 | ❌ 致命 | **✅ 完整** | M2.1a (`8541d4d`-pre) / M2.1b | 已完成 |
 | **B4** | 输入 Quat / 输出 Euler 分离 | ❌ 高 | **✅ complete (full)** | M_B24a1 `d73d6b9` (schema) + a2-2 `1719056` (JSON versioned) + b1 `2da2059` (UI combo) + b2 (this commit, T_V5_PARITY_B4_LIVE #30) | M_B24 (a1+a2-2+b1+b2) |
 | B5 | Driver Clamp | ❌ 致命 | **✅ 完整** (`clampEnabled` + `clampInflation` + `poseMinVec/MaxVec`) | M1.3 | 已完成 |
@@ -4938,6 +4938,293 @@ remains honored.
 
 ---
 
+## §M_B24c — Mirror multi-source migration (Generic mode RESOLVED)
+
+> **STATUS** (2026-04-27): §M_PARITY_AUDIT.B2 row partially
+> cleaned — Generic-mode multi-source mirror complete; Matrix-
+> mode multi-source mirror DEFERRED to §M_B24c2-stub. Last
+> deferred caveat under B2 is now Matrix mirror only.
+>
+> verify-before-design 20th use, sustaining the
+> §M_B24d.lesson-learned PROJECT METHODOLOGY (read side / write
+> side / trace indirection). The double-grep on `read_driver_info`
+> callsites caught a planner enumeration error before any code
+> moved — see §M_B24c.planner-error-correction.
+
+### §M_B24c.scope
+
+| Layer | Change | LoC |
+|---|---|---|
+| `core.py:mirror_node` | Matrix-mode multi-source entry guard (Hardening 2 hard `NotImplementedError`); single `read_driver_info` -> `read_driver_info_multi`; per-source naming remap + F.1 fallback (no_match keeps original + `cmds.warning`); per-pose per-source `mirror_driver_inputs` slice loop; write side replaces `connect_node` with `wire_driven_outputs` + per-source `add_driver_source` (E.3 reuse) | ~155 |
+| `core.py:read_driver_info_multi` | Docstring RESOLVED stamp (preserves the `§M_B24b2.mirror-deferred-rationale` literal that #29 sub-check (d) asserts on; appends M_B24c2 + planner-error-correction anchors) | ~12 |
+| `controller.py:mirror_current_node` | Single `read_driver_info` -> `read_driver_info_multi`; per-source preview lines (`Driver[i]: src -> tgt (n attrs, encoding=e)`); dialog `action_id` `mirror_multi_source_warning` -> `mirror_multi_source_info` (G.1 rename); informational notice (D.3) | ~50 |
+| `ui/i18n.py` | EN + ZH `summary_mirror_multi_source` narrowed to "Generic-mode supported; Matrix-mode DEFERRED to M_B24c2 and blocked at engine entry. Continue?" | ~15 |
+| `tests/test_m_b24b2_downstream.py` | Updated `mirror_multi_source_warning` literal -> `mirror_multi_source_info` (G.1 follow-up; the only M_B24b2 test that asserted the old action_id literal) | ~6 |
+| `tests/test_m_b24c_mirror_multi.py` (new) | #33 T_MIRROR_MULTI_SOURCE_WIRED 4 sub-checks + per-source naming fallback source-scan + docstring RESOLVED stamp + Matrix-mode entry guard mock tests + controller `_info` action_id source-scan | ~260 |
+| `addendum_20260424.md` | §M_B24c (5 sub-sections) + §M_B24c2-stub + §M_PARITY_AUDIT.B2 row update + §M_B24b2.mirror-deferred-rationale RESOLVED stamp + read_driver_info_multi docstring anchor sync | ~210 |
+| **Total** | | **~708** |
+
+≤ 800 LoC hard limit honoured; single commit.
+
+### §M_B24c.planner-error-correction
+
+verify-before-design 范式自我修正第 2 次事件（首次：M_B24a2-1 F2
+`driverList` iteration 误判 → M_B24d data-path corrective）：
+
+**Planner 原批示** (M_B24c 现状核查指令 §F1)：
+"`controller.py` 5 mirror flow callsites（line 379/459/746/820/899）"
+
+**执行者 F1 双向 grep 实测**：planner-listed 5 行号**全部错指向**：
+
+- 379: `if len(_msrc) > 1:` — multi-source dialog 触发条件，非调用
+- 459: `prog.end()` — progress UI 收尾，非调用
+- 746: `regenerate_aliases_for_current_node` 函数体起头（M3.7 alias scope，非 mirror flow）
+- 820: `force_regenerate_aliases_for_current_node` 内 `read_driver_info` 调用 — 但属 M3.7 alias scope，非 mirror flow
+- 899: `_load_editor` 函数体起头（UI 加载 scope，非 mirror flow）
+
+**真实 mirror-flow callsites**（双向 grep 全仓 8 处 deprecated callsites
+中的 mirror 子集）:
+
+- `controller.py:397` (`mirror_current_node` — preview 构建)
+- `core.py:509` (`mirror_node` — 引擎本体)
+
+**Lesson for future planner batches**: when enumerating callsite line
+numbers across files, the planner must rely on actual `grep` output
+rather than memory or symmetry-driven guess; "5 line numbers" can
+sound plausibly symmetric without being correct. Only `grep` is
+authoritative.
+
+**纠正路径**: M_B24c 实施按 2 callsites 进行；其余 6 deprecated
+callsites（controller × 4 + core_json + core_neutral）维持
+zero-modification 锁（M_B24a2-1 backcompat 沿用）。
+
+PROJECT METHODOLOGY: this entry is a precedent record — not blame —
+so the next planner / executor pair has a documented reminder to
+double-grep before quoting line numbers.
+
+### §M_B24c.write-side-add-driver-source-reuse
+
+`mirror_node`'s pre-M_B24c write side called `connect_node`
+(`core.py:2670`), which internally calls
+`wire_driver_inputs(node, driver_node, driver_attrs)` — a legacy
+single-driver `for i, attr: connectAttr -> input[i]` loop with no
+base offset, no `driverSource[]` metadata write, and no atomic
+fail-soft. Re-using that path on a multi-source target would
+overwrite the multi-source state immediately (every additional
+source's appended `input[base+i]` would be clobbered).
+
+M_B24c (decision E.3) replaces the driver-side `connect_node`
+call with a per-source `add_driver_source(target, new_name,
+list(s.attrs), s.weight, s.encoding)` loop. Inheriting from
+M_B24d / M_B24d_matrix_followup this gives mirrored targets:
+
+- atomic fail-soft per source (M_B24d Hardening 1)
+- mode-exclusion semantic (M_B24d_matrix_followup Hardening 1)
+- correct base offset for `input[]` indices (Generic) or
+  next-free `driverList[]` index (Matrix-mode single-source
+  case still routed through this loop)
+- `worldMatrix[0]` wiring with post-connect verify (Matrix mode;
+  see §M_B24d_matrix_followup.matrix-vs-worldmatrix)
+- `driverSource[d]` metadata written so future
+  `read_driver_info_multi` round-trips correctly
+
+The driven side still calls `wire_driven_outputs` directly
+(driven is single-target; the legacy single path is correct).
+`connect_node` is now banned from `mirror_node` body by
+permanent guard #33 sub-check (c).
+
+### §M_B24c.per-source-naming-fallback
+
+Decision F.1 mirrors the existing single-source `mirror_node`
+behaviour (`core.py:523-527` pre-M_B24c — name-remap failure
+appends a warning + uses the original name without aborting)
+into the new per-source loop:
+
+```python
+for s in sources:
+    new_name, dr_status = core_mirror.apply_naming_rule(
+        s.node, naming_rule_index, custom_naming, naming_direction)
+    if dr_status not in ("ok", "both_match"):
+        warnings.append(
+            "Driver name remap failed for source {!r} ({}): using "
+            "original name".format(s.node, dr_status))
+        new_name = s.node
+    if dr_status == "both_match":
+        warnings.append(...)
+    remapped.append((s, new_name))
+```
+
+A common scenario this handles cleanly:
+
+```
+sources = [L_shoulder, L_elbow, pCube_helper]
+rule    = L_/R_
+
+remapped = [(L_shoulder, R_shoulder),     # ok
+            (L_elbow,    R_elbow),        # ok
+            (pCube_helper, pCube_helper)] # no_match -> kept + warning
+```
+
+The mirrored target still wires three sources; the helper rig's
+non-L/R-conforming source is honest about the missed rename so
+the TD can fix the asymmetric naming or accept the helper as
+shared between left and right sides.
+
+### §M_B24c.matrix-mode-still-deferred
+
+`mirror_node` is fundamentally Generic-mode shaped: it iterates
+`pose.inputs` (a flat `list[float]`) and routes the slice through
+`core_mirror.mirror_driver_inputs` (encoding-aware flat-list
+mirror). Matrix-mode pose data, however, lives at
+`shape.driverList[d].pose[p]` as `MMatrix` snapshots — a different
+storage shape requiring a different mirror primitive
+(`mirror_driver_pose_matrix`, not yet written).
+
+Closing that gap is M_B24c2's sub-task — see §M_B24c2-stub. To
+prevent silent miswiring before M_B24c2 lands, `mirror_node`
+hard-checks at entry:
+
+```python
+if _exists(source_shape) and _is_matrix_mode(source_shape):
+    _matrix_sources = read_driver_info_multi(source_node)
+    if len(_matrix_sources) > 1:
+        raise NotImplementedError(
+            "RBFtools: Matrix-mode multi-source mirror is DEFERRED "
+            "to v5.x post-final M_B24c2. ... See addendum "
+            "§M_B24c2-stub.".format(...))
+```
+
+The probe is wrapped in `try/except` so test fixtures that mock
+`safe_get` to non-int returns conservatively treat the node as
+non-Matrix (the Generic mirror path is the legacy default and
+mock fixtures predate the M_B24d Matrix mode probe). Single-source
+Matrix nodes pass the guard and run through the Generic-shaped
+mirror engine — pre-M_B24c behaviour preserved.
+
+The user-facing `controller.py` informational dialog (G.1 rename:
+`mirror_multi_source_info`) is purely advisory; the engine guard
+is the actual defense.
+
+### §M_B24c.permanent-guards
+
+Permanent guards: 32 → **33**.
+
+```
+T_MIRROR_MULTI_SOURCE_WIRED (#33) — 4 source-scan sub-checks on
+core.py:mirror_node body:
+
+  (a) body uses read_driver_info_multi (NOT bare read_driver_info()
+      on driver side; regex enforces negative lookahead)
+      Anchor: M_B24c (C.1 修订) — only mirror flow migrates;
+      other 6 deprecated callsites stay on the wrapper.
+
+  (b) body contains add_driver_source (write-side reuse, E.3)
+      Anchor: M_B24d / M_B24d_matrix_followup atomic + mode-
+      exclusion + worldMatrix wiring inheritance.
+
+  (c) body does NOT call connect_node (legacy single-driver
+      bundle); driven side wires via wire_driven_outputs.
+      Anchor: §M_B24c.write-side-add-driver-source-reuse.
+
+  (d) body contains _is_matrix_mode entry guard +
+      NotImplementedError + M_B24c2 reference.
+      Anchor: §M_B24c.matrix-mode-still-deferred (Hardening 2).
+```
+
+#29 T_V5_PARITY_B2_LIVE sub-check (d) literal `§M_B24b2.mirror-
+deferred-rationale` is **0-modified** — `read_driver_info_multi`
+docstring preserves the original anchor and appends the RESOLVED
+stamp (§M_B24c.matrix-mode-still-deferred mirroring the
+§M_B24d.matrix-mode-deferred RESOLVED block range).
+
+### §M_B24c.empirical-baseline (2026-04-27)
+
+| Env | Pre-c (post-d_matrix_followup) | Post-c |
+|---|---|---|
+| Pure-Python | 532 OK (skip 3) | **544 OK (skip 3)** |
+| mayapy 2025 | 532 ran 479 pass 53 skip | **544 ran 489 pass 55 skip** |
+
+mayapy delta accounting follows the forward-compat-corrected red
+line 13 — mock-only `@skipIf(_REAL_MAYA)` test methods accumulate
+in the skip pool naturally; no plugin-load skips added; M1.5.3
+PAUSED still honoured.
+
+### §M_B24c.scope-exclusions
+
+- 0 lines C++ / 0 .mll / 0 CMakeLists / 0 schema modifications
+- 0 lines `core_mirror.py` (decision B.2 — 0-touch invariant
+  preserved by per-source loop in `mirror_node` orchestration
+  layer)
+- 0 modifications to the 6 other deprecated `read_driver_info`
+  callsites (controller live-edit / alias × 2 / load-editor +
+  core_json + core_neutral)
+- 0 modifications to the 14 deprecated wrapper function itself
+  (the `read_driver_info` wrapper still exists; only mirror-flow
+  callers migrate)
+- 0 modifications to `add_driver_source` / `_wire_*` /
+  `_resolve_driver_rotate_order` / `_is_matrix_mode` /
+  `_count_existing_*` / `_has_*` (all M_B24d / matrix_followup
+  helpers locked, pure-call reuse only)
+- 0 modifications to hotfix 4 files (M_HOTFIX_PYSIDE6 `edf5367`)
+- 0 modifications to b1 widgets / 5 active downstream adapters
+- Mirror-multi-source for **Matrix mode** stays DEFERRED to
+  M_B24c2 (see §M_B24c2-stub)
+
+---
+
+## §M_B24c2-stub — Matrix-mode multi-source mirror (DEFERRED to v5.x post-final)
+
+> **STATUS**: DEFERRED to v5.x post-final (since 2026-04-27).
+>
+> M_B24c lands Generic-mode multi-source mirror; Matrix-mode
+> multi-source mirror is structurally distinct because Matrix-
+> mode pose data is stored at `driverList[d].pose[p]` as
+> `MMatrix` snapshots (not flat `input[i]` scalars).
+> `core_mirror.mirror_driver_inputs` operates on `list[float]`;
+> Matrix-mode requires a new `mirror_driver_pose_matrix`
+> dispatching by source.encoding + matrix decomposition.
+
+### Scope (when M_B24c2 lands)
+
+- New `core_mirror.mirror_driver_pose_matrix(matrix, axis,
+  encoding)` function that decomposes the per-pose driver
+  matrix, mirrors swing / twist / quaternion components per the
+  existing primitives, recomposes, and returns the mirrored
+  matrix.
+- `mirror_node` engine dispatch by `_is_matrix_mode(source_shape)`:
+  the existing Generic-mode body becomes the `else` branch; a new
+  Matrix-mode branch iterates `driverList[d].pose[p]` and calls
+  `mirror_driver_pose_matrix` per source per pose.
+- Per-source `add_driver_source` write side already supports
+  Matrix mode (M_B24d_matrix_followup); only the read side +
+  pose mirror primitive are missing.
+- §M_PARITY_AUDIT.B2 row reaches its final form: "complete
+  (Generic + Matrix + UI + downstream + multi-source mirror)".
+- T_MIRROR_MULTI_SOURCE_WIRED (#33) sub-check (d) extension to
+  validate the Matrix-mode dispatch presence (not just the
+  guard).
+
+### Restart trigger
+
+- M_B24c push complete + a TD reports a real-scene need for
+  Matrix-mode multi-source mirror, OR
+- M5 / M4.5 work touches `core_mirror.py` and the Matrix-mode
+  pose primitive becomes a natural co-deliverable.
+
+### Current behaviour (pre-M_B24c2)
+
+`mirror_node` raises `NotImplementedError` at entry when the
+source node is in Matrix mode AND has > 1 driver sources. The
+exception message lists three workarounds (reduce to 1 source,
+switch to Generic mode, wait for M_B24c2) and points the TD at
+this stub for the roadmap.
+
+Single-source Matrix nodes mirror through the existing engine
+(pre-M_B24c behaviour preserved — the guard's `len > 1` check
+exempts single-source).
+
+---
+
 ## §M_HOTFIX_PYSIDE6 — QActionGroup PySide6 migration shim
 
 > **STRUCTURAL LESSON** (2026-04-27):
@@ -5080,6 +5367,17 @@ atomicity precedent for their respective B-row activations.
 | `tests/test_v5_parity_b2_b4.py` (new) | T_V5_PARITY_B2_LIVE (#29) + T_V5_PARITY_B4_LIVE (#30) — 4 sub-checks each |
 
 ### §M_B24b2.mirror-deferred-rationale
+
+> **STATUS UPDATE** (M_B24c, commit following `c7fd289`): RESOLVED
+> for Generic-mode multi-source mirror; Matrix-mode multi-source
+> mirror remains DEFERRED to M_B24c2. The pre-M_B24c "5 mirror-
+> flow callsites" enumeration below is preserved verbatim for
+> audit-trail integrity but has been empirically corrected to
+> **2 mirror-flow callsites** (`controller.py:397` +
+> `core.py:509`) by the M_B24c F1 double-grep — see
+> §M_B24c.planner-error-correction for the verbatim correction.
+> The `core_mirror.py` 0-touch invariant is preserved by M_B24c
+> (decision B.2, controller / mirror_node layer per-source loop).
 
 `core_mirror.py` is 0-touch in M_B24b (transitively verified —
 0 `read_driver_info` calls in the file). Mirror semantics flow

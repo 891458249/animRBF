@@ -367,23 +367,6 @@ class MainController(QtCore.QObject):
             cmds.warning("mirror_current_node: empty target_name")
             return None
 
-        # M_B24b2: multi-source mirror is DEFERRED to v5.x post-final
-        # (M_B24c). When the source node has > 1 driverSource entries
-        # we surface a path A confirm dialog so the TD knows only the
-        # first source will be mirrored. See addendum
-        # §M_B24b2.mirror-deferred-rationale.
-        try:
-            _msrc = core.read_driver_info_multi(source)
-        except Exception:
-            _msrc = []
-        if len(_msrc) > 1:
-            proceed = self.ask_confirm(
-                action_id="mirror_multi_source_warning",
-                title=tr("title_mirror_multi_source"),
-                summary=tr("summary_mirror_multi_source"))
-            if not proceed:
-                return None
-
         target_exists = core._exists(target_name)
         # Build preview text per addendum §M3.2.Q8.
         axis = int(config.get("mirror_axis", core_mirror.AXIS_X))
@@ -394,14 +377,48 @@ class MainController(QtCore.QObject):
         else:
             rule_label = "naming_rule_custom"
 
-        src_driver, _dr_attrs = core.read_driver_info(source)
+        # M_B24c (G.1 + D.3): informational notice when the source
+        # node carries multiple Generic-mode driver sources. Matrix-
+        # mode multi-source mirror remains DEFERRED to M_B24c2 and is
+        # blocked by the engine-level hard guard in mirror_node, so
+        # this dialog is purely informational - no Matrix mode special
+        # case here. See addendum
+        # §M_B24c.write-side-add-driver-source-reuse.
+        try:
+            sources = core.read_driver_info_multi(source)
+        except Exception:
+            sources = []
+        if len(sources) > 1:
+            proceed = self.ask_confirm(
+                action_id="mirror_multi_source_info",
+                title=tr("title_mirror_multi_source"),
+                summary=tr("summary_mirror_multi_source"))
+            if not proceed:
+                return None
+
         src_driven, _dn_attrs = core.read_driven_info(source)
-        new_driver, _ = core_mirror.apply_naming_rule(
-            src_driver or "", rule_idx,
-            config.get("custom"), config.get("naming_direction", "auto"))
         new_driven, _ = core_mirror.apply_naming_rule(
             src_driven or "", rule_idx,
             config.get("custom"), config.get("naming_direction", "auto"))
+
+        # Per-source driver name remap preview (M_B24c (A.3)
+        # source-by-source semantic). For single-source nodes this
+        # collapses to the legacy one-line preview shape.
+        driver_preview_lines = []
+        for i, s in enumerate(sources):
+            new_name, _status = core_mirror.apply_naming_rule(
+                s.node or "", rule_idx,
+                config.get("custom"),
+                config.get("naming_direction", "auto"))
+            found = ("(found)" if (new_name and core._exists(new_name))
+                     else "(MISSING)")
+            driver_preview_lines.append(
+                "Driver[{}]: {!s:<22}  ->  {!s:<22} {}  "
+                "({} attrs, encoding={})".format(
+                    i, s.node or "(none)", new_name or "(none)",
+                    found, len(s.attrs), int(s.encoding)))
+        if not driver_preview_lines:
+            driver_preview_lines.append("Driver:   (none wired)")
 
         n_poses = len(core.read_all_poses(source))
 
@@ -414,12 +431,10 @@ class MainController(QtCore.QObject):
             "  Mirror Axis:    {}".format(axis_label),
             "  Naming Rule:    {}".format(rule_label),
             "",
-            "Driver:   {!s:<24}  ->  {!s:<24} {}".format(
-                src_driver or "(none)",
-                new_driver or "(none)",
-                "(found)" if (new_driver and core._exists(new_driver))
-                else "(MISSING)"),
-            "Driven:   {!s:<24}  ->  {!s:<24} {}".format(
+        ]
+        preview_lines.extend(driver_preview_lines)
+        preview_lines.extend([
+            "Driven:   {!s:<22}  ->  {!s:<22} {}".format(
                 src_driven or "(none)",
                 new_driven or "(none)",
                 "(found)" if (new_driven and core._exists(new_driven))
@@ -427,7 +442,7 @@ class MainController(QtCore.QObject):
             "",
             "Poses ({} total) will be mirrored across {}.".format(
                 n_poses, axis_label),
-        ]
+        ])
         preview = "\n".join(preview_lines)
 
         action_id = ("mirror_overwrite" if target_exists

@@ -177,15 +177,21 @@ class TestM_B24B2_MirrorDialogWiring(unittest.TestCase):
     gating call when the source has > 1 driver sources."""
 
     def test_controller_uses_mirror_multi_source_action_id(self):
+        """M_B24c (G.1): action_id renamed warning -> info to reflect
+        the dialog's new role as informational notice rather than
+        DEFERRED warning. M_B24b2's gating semantic is preserved -
+        the rename is accepted under G.1 decision (red line 10
+        forbids removal, allows rename)."""
         import os
         path = os.path.normpath(os.path.join(
             os.path.dirname(__file__), "..", "scripts", "RBFtools",
             "controller.py"))
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
-        self.assertIn('action_id="mirror_multi_source_warning"', src,
+        self.assertIn('action_id="mirror_multi_source_info"', src,
             "controller.mirror_current_node must use the "
-            "mirror_multi_source_warning action_id (Hardening 5)")
+            "mirror_multi_source_info action_id (M_B24c G.1; "
+            "renamed from mirror_multi_source_warning)")
         self.assertIn("read_driver_info_multi", src,
             "controller must probe driver source count before mirror")
 

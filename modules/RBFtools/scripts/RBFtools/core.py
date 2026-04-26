@@ -495,60 +495,118 @@ def mirror_node(source_node, target_name, mirror_axis,
     from RBFtools import core_mirror
 
     warnings = []
-    enc = safe_get(get_shape(source_node) + ".inputEncoding", 0) \
-        if _exists(get_shape(source_node)) else 0
-    twist_axis = safe_get(get_shape(source_node) + ".twistAxis", 0) \
-        if _exists(get_shape(source_node)) else 0
+    source_shape = get_shape(source_node)
+    enc = safe_get(source_shape + ".inputEncoding", 0) \
+        if _exists(source_shape) else 0
+    twist_axis = safe_get(source_shape + ".twistAxis", 0) \
+        if _exists(source_shape) else 0
+
+    # M_B24c (Hardening 2): Matrix-mode multi-source mirror is DEFERRED
+    # to v5.x post-final M_B24c2. Hard guard at the engine entry so we
+    # never depend on the controller-layer dialog being honoured. See
+    # addendum §M_B24c.matrix-mode-still-deferred + §M_B24c2-stub.
+    # Probe wrapped in try/except: when safe_get is mocked to return
+    # non-int values in test fixtures we conservatively treat the node
+    # as non-Matrix (the Generic-mode mirror path is the legacy default).
+    try:
+        _src_is_matrix = (
+            _exists(source_shape) and _is_matrix_mode(source_shape))
+    except Exception:
+        _src_is_matrix = False
+    if _src_is_matrix:
+        _matrix_sources = read_driver_info_multi(source_node)
+        if len(_matrix_sources) > 1:
+            raise NotImplementedError(
+                "RBFtools: Matrix-mode multi-source mirror is DEFERRED "
+                "to v5.x post-final M_B24c2. Source node {!r} is in "
+                "Matrix mode (type=1 + rbfMode=1) and has {} driver "
+                "sources. Either: (1) reduce to single source via "
+                "remove_driver_source(), (2) switch node to Generic "
+                "mode (rbfMode=0), or (3) wait for M_B24c2. See "
+                "addendum §M_B24c2-stub.".format(
+                    source_node, len(_matrix_sources)))
 
     # Read source node's current state up-front so we don't mutate it.
     source_settings = get_all_settings(source_node) or {}
     source_poses = read_all_poses(source_node)
     source_local_xforms = read_pose_local_transforms(source_node)
 
-    # Resolve driver / driven via name remap.
-    src_driver, src_driver_attrs = read_driver_info(source_node)
+    # Resolve multi-source driver list (M_B24c) + single driven via
+    # name remap. read_driver_info_multi returns >= 1 entries when the
+    # node has ANY wiring (legacy single-driver auto-migrates to a
+    # 1-source list via _migrate_legacy_single_driver).
+    sources = read_driver_info_multi(source_node)
     src_driven, src_driven_attrs = read_driven_info(source_node)
 
-    new_driver_name, dr_status = (
-        core_mirror.apply_naming_rule(
-            src_driver, naming_rule_index, custom_naming,
-            naming_direction)
-        if src_driver else (src_driver, "no_match"))
+    # Per-source naming remap with F.1 fallback (source keeps original
+    # name + warning; mirror does NOT abort).
+    remapped = []   # list of (DriverSource, new_name)
+    for s in sources:
+        if not s.node:
+            remapped.append((s, ""))
+            continue
+        new_name, dr_status = core_mirror.apply_naming_rule(
+            s.node, naming_rule_index, custom_naming, naming_direction)
+        if dr_status not in ("ok", "both_match"):
+            warnings.append(
+                "Driver name remap failed for source {!r} ({}): using "
+                "original name".format(s.node, dr_status))
+            new_name = s.node
+        if dr_status == "both_match":
+            warnings.append(
+                "Driver name {!r} matches BOTH directions — using "
+                "forward".format(s.node))
+        remapped.append((s, new_name))
+
     new_driven_name, dn_status = (
         core_mirror.apply_naming_rule(
             src_driven, naming_rule_index, custom_naming,
             naming_direction)
         if src_driven else (src_driven, "no_match"))
-
-    if src_driver and dr_status not in ("ok", "both_match"):
-        warnings.append(
-            "Driver name remap failed ({}): using source name {!r}".format(
-                dr_status, src_driver))
-        new_driver_name = src_driver
     if src_driven and dn_status not in ("ok", "both_match"):
         warnings.append(
             "Driven name remap failed ({}): using source name {!r}".format(
                 dn_status, src_driven))
         new_driven_name = src_driven
 
-    if dr_status == "both_match":
-        warnings.append(
-            "Driver name {!r} matches BOTH directions — using forward".format(
-                src_driver))
+    # Flat concat of all sources' attrs - matches the
+    # input[base+i]/poseInput[i] order produced by add_driver_source
+    # appends. Used by apply_poses for auto_alias_outputs slot
+    # alignment (single-source legacy case yields the same flat list).
+    flat_driver_attrs = []
+    for s in sources:
+        flat_driver_attrs.extend(s.attrs)
 
-    # Mirror each pose.
+    # Mirror each pose. For Generic mode multi-source we slice
+    # pose.inputs by each source's attr count and run
+    # mirror_driver_inputs per source so each source's encoding is
+    # honoured (M_B24c (A.3) source-by-source semantic).
     mirrored_poses = []
     for pose in source_poses:
-        new_inputs, in_status = core_mirror.mirror_driver_inputs(
-            list(pose.inputs), enc, mirror_axis,
-            driver_attrs=src_driver_attrs)
-        if in_status.get("unsupported_encoding"):
-            warnings.append(
-                "BendRoll inputEncoding: driver inputs NOT mirrored "
-                "(addendum §M3.2 (E)). User must verify pose data.")
-        for nm in in_status.get("unrecognized_attrs", []):
-            warnings.append("Unrecognized driver attr {!r} — passed "
-                            "through unchanged".format(nm))
+        new_inputs = []
+        cursor = 0
+        for s, _new_name in remapped:
+            n_slot = len(s.attrs)
+            slice_in = list(pose.inputs[cursor:cursor + n_slot])
+            slice_out, in_status = core_mirror.mirror_driver_inputs(
+                slice_in, int(s.encoding), mirror_axis,
+                driver_attrs=list(s.attrs))
+            new_inputs.extend(slice_out)
+            cursor += n_slot
+            if in_status.get("unsupported_encoding"):
+                warnings.append(
+                    "BendRoll inputEncoding on source {!r}: driver "
+                    "inputs NOT mirrored (addendum §M3.2 (E)). User "
+                    "must verify pose data.".format(s.node))
+            for nm in in_status.get("unrecognized_attrs", []):
+                warnings.append(
+                    "Unrecognized driver attr {!r} on source {!r} — "
+                    "passed through unchanged".format(nm, s.node))
+        # Tail beyond known sources (defensive: if pose.inputs is
+        # longer than the concat of source.attrs, preserve the tail
+        # untouched so we never silently lose data).
+        if cursor < len(pose.inputs):
+            new_inputs.extend(pose.inputs[cursor:])
         new_values, unrec = core_mirror.mirror_driven_values(
             list(pose.values), src_driven_attrs, mirror_axis)
         for nm in unrec:
@@ -590,15 +648,20 @@ def mirror_node(source_node, target_name, mirror_axis,
                 progress.step(2, 4, "Mirror: copying node settings")
             _copy_node_settings(source_settings, target)
 
-            # Step 4: write mirrored poses + connect target's
-            # driver/driven via apply_poses + connect_node.
+            # Step 4: write mirrored poses. Driver-side wiring is
+            # handled per-source via add_driver_source in Step 6
+            # (M_B24c (E.3) write-side reuse), so we pass an empty
+            # driver_node here. apply_poses still uses
+            # flat_driver_attrs for input[]/poseInput[i] slot
+            # alignment + auto_alias_outputs.
             if progress is not None:
                 progress.step(3, 4, "Mirror: writing poses")
-            new_dr_attrs = list(src_driver_attrs) if src_driver_attrs else []
-            new_dn_attrs = list(src_driven_attrs) if src_driven_attrs else []
+            new_dn_attrs = (
+                list(src_driven_attrs) if src_driven_attrs else [])
 
-            apply_poses(target, new_driver_name, new_driven_name,
-                        new_dr_attrs, new_dn_attrs, mirrored_poses)
+            apply_poses(target, "", new_driven_name,
+                        list(flat_driver_attrs), new_dn_attrs,
+                        mirrored_poses)
 
             # Step 5: write mirrored local-Transform snapshots
             # (apply_poses already calls capture_per_pose_local_transforms
@@ -614,15 +677,39 @@ def mirror_node(source_node, target_name, mirror_axis,
                 warnings.append(
                     "poseLocalTransform mirror write failed: {}".format(exc))
 
-            # Step 6: connect target driver/driven if they exist.
-            if (new_driver_name and _exists(new_driver_name) and
-                    new_driven_name and _exists(new_driven_name)):
-                connect_node(target, new_driver_name, new_driven_name,
-                             new_dr_attrs, new_dn_attrs)
+            # Step 6 (M_B24c (E.3)): wire driven side + iterate per-
+            # source add_driver_source on driver side. Reuses the
+            # M_B24d / M_B24d_matrix_followup atomic + mode-exclusion
+            # + worldMatrix wiring rather than re-implementing
+            # legacy connect_node single-driver path.
+            if new_driven_name and _exists(new_driven_name):
+                wire_driven_outputs(target, new_driven_name, new_dn_attrs)
             else:
                 warnings.append(
-                    "Target driver/driven not found in scene; "
-                    "node created without connections.")
+                    "Target driven {!r} not found in scene; "
+                    "node created without driven connections.".format(
+                        new_driven_name))
+            wired_any_driver = False
+            for s, new_name in remapped:
+                if not new_name:
+                    continue
+                if not _exists(new_name):
+                    warnings.append(
+                        "Target driver source {!r} not found in scene; "
+                        "skipped wiring.".format(new_name))
+                    continue
+                try:
+                    add_driver_source(target, new_name, list(s.attrs),
+                                      float(s.weight), int(s.encoding))
+                    wired_any_driver = True
+                except Exception as exc:
+                    warnings.append(
+                        "add_driver_source failed for {!r}: {}".format(
+                            new_name, exc))
+            if not wired_any_driver and remapped:
+                warnings.append(
+                    "No driver sources wired on target; node created "
+                    "without driver connections.")
 
             if progress is not None:
                 progress.step(4, 4, "Mirror: done")
@@ -884,6 +971,17 @@ def read_driver_info_multi(node):
     §M_B24b2.mirror-deferred-rationale for the controller-layer
     migration plan and the 14 deprecated read_driver_info call-sites
     (including 5 in mirror flow) preserved by M_B24a2-1 backcompat.
+
+    STATUS UPDATE (M_B24c): RESOLVED for Generic-mode multi-source
+    mirror; Matrix-mode multi-source mirror remains DEFERRED to
+    M_B24c2 (see addendum §M_B24c.matrix-mode-still-deferred +
+    §M_B24c2-stub). The pre-M_B24c "5 in mirror flow" callsite count
+    was empirically corrected to 2 (controller.py mirror_current_node
+    + core.py mirror_node) via verify-before-design 20th-use double-
+    grep; see §M_B24c.planner-error-correction. The 14-callsite
+    aggregate is unchanged - the other 12 (live-edit / alias / load-
+    editor / json / neutral / docs / tests) remain on the deprecated
+    wrapper per M_B24a2-1 backcompat.
     """
     shape = get_shape(node)
     if not _exists(shape):
