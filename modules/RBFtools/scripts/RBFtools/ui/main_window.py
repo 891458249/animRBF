@@ -45,7 +45,11 @@ from RBFtools.constants import WINDOW_OBJECT, WINDOW_TITLE, WINDOW_WIDTH, WINDOW
 
 from RBFtools.controller import MainController
 from RBFtools.ui.widgets.node_selector import NodeSelector
+from RBFtools.ui.widgets.driver_source_list_editor import (
+    DriverSourceListEditor,
+)
 from RBFtools.ui.widgets.general_section import GeneralSection
+from RBFtools.ui.widgets.output_encoding_combo import OutputEncodingCombo
 from RBFtools.ui.widgets.vector_angle_section import VectorAngleSection
 from RBFtools.ui.widgets.rbf_section import RBFSection
 from RBFtools.ui.widgets.collapsible import CollapsibleFrame
@@ -384,11 +388,25 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._general    = GeneralSection()
         self._va_section = VectorAngleSection()
         self._rbf_section = RBFSection()
+        # M_B24b1: multi-source driver section (B2 + B4 UI primary
+        # deliverable per user override 2026-04-26). Collapsible so the
+        # legacy single-driver pose-editor flow remains the default
+        # entry point until M_B24b2 lands the downstream consumers.
+        self._driver_sources_section = CollapsibleFrame(
+            tr("section_driver_sources"), collapsed=True)
+        self._driver_source_list = DriverSourceListEditor()
+        self._output_encoding_combo = OutputEncodingCombo()
+        self._driver_sources_section.add_widget(self._driver_source_list)
+        _oe_row = QtWidgets.QHBoxLayout()
+        _oe_row.addWidget(QtWidgets.QLabel(tr("output_encoding_label")))
+        _oe_row.addWidget(self._output_encoding_combo, 1)
+        self._driver_sources_section.add_layout(_oe_row)
         self._pose_editor = _PoseEditorPanel()
 
         self._sections.addWidget(self._general)
         self._sections.addWidget(self._va_section)
         self._sections.addWidget(self._rbf_section)
+        self._sections.addWidget(self._driver_sources_section)
         self._sections.addWidget(self._pose_editor)
         self._sections.addStretch()
 

@@ -193,6 +193,61 @@ class MainController(QtCore.QObject):
             pass
         return True
 
+    # ------------------------------------------------------------------
+    # M_B24b1 — multi-source driver path A wiring
+    # ------------------------------------------------------------------
+
+    def add_driver_source(self, driver_node, driver_attrs,
+                           weight=1.0, encoding=0):
+        """Path A entry-point for adding a driver source to the
+        current RBFtools node. No confirm dialog (additive op).
+        Routes through :func:`core.add_driver_source`."""
+        if not self._current_node:
+            cmds.warning("add_driver_source: no current node")
+            return None
+        try:
+            return core.add_driver_source(
+                self._current_node, driver_node, driver_attrs,
+                weight=weight, encoding=encoding)
+        except Exception as exc:
+            cmds.warning(
+                "add_driver_source failed: {}".format(exc))
+            return None
+
+    def remove_driver_source(self, index):
+        """Path A entry-point for removing a driver source. Walks
+        ask_confirm because removal is destructive (deletes the
+        Maya plug entry)."""
+        if not self._current_node:
+            cmds.warning("remove_driver_source: no current node")
+            return False
+        from RBFtools.ui.i18n import tr
+        proceed = self.ask_confirm(
+            action_id="remove_driver_source",
+            title=tr("title_remove_driver_source"),
+            summary=tr("summary_remove_driver_source"))
+        if not proceed:
+            return False
+        try:
+            core.remove_driver_source(self._current_node, index)
+            return True
+        except Exception as exc:
+            cmds.warning(
+                "remove_driver_source failed: {}".format(exc))
+            return False
+
+    def read_driver_sources(self):
+        """Read current node's driver sources (multi). Returns
+        list[DriverSource] or empty list."""
+        if not self._current_node:
+            return []
+        try:
+            return list(core.read_driver_info_multi(self._current_node))
+        except Exception as exc:
+            cmds.warning(
+                "read_driver_sources failed: {}".format(exc))
+            return []
+
     def reset_auto_neutral_default(self):
         """Edit menu reset entry — wipe the optionVar so the next
         node creation falls back to default-True. Mirrors the

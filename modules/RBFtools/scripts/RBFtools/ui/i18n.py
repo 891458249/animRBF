@@ -170,6 +170,26 @@ _EN = {
     "live_edit_warn_no_node":          "no current node — pick an RBF node first",
     "live_edit_warn_no_attrs":         "no driver attrs to listen on",
     "live_edit_warn_failed":           "Live Edit toggle failed",
+    # -- M_B24b1: multi-source driver section + outputEncoding --
+    "section_driver_sources":          "Multi-Source Drivers (preview)",
+    "driver_source_list_header":       "Driver Sources",
+    "driver_source_list_empty_hint":
+        "No driver sources. Use Add to register one or more drivers.",
+    "driver_source_node_tip":          "Driver node (read-only mirror).",
+    "driver_source_attrs_tip":         "Driver attrs (comma-joined).",
+    "driver_source_weight_tip":
+        "Per-source weight; reserved for M_B24b downstream consumption.",
+    "driver_source_encoding_tip":
+        "Per-source input encoding (0=Raw, 1=Quat, 2=BendRoll, 3=ExpMap, 4=SwingTwist).",
+    "output_encoding_label":           "Output encoding:",
+    "output_encoding_combo_tip":
+        "Node-level output encoding (forward-compat; M_B24b business consumption deferred).",
+    "output_encoding_euler":           "Euler",
+    "output_encoding_quaternion":      "Quaternion",
+    "output_encoding_expmap":          "ExpMap",
+    "title_remove_driver_source":      "Remove Driver Source",
+    "summary_remove_driver_source":
+        "Remove this driver source entry from the current node?",
     # -- M3.5: Pose Profiler + ToolsSection (spillover §3) --
     "section_tools":                   "Tools",
     "menu_profile_to_se":              "Profile to Script Editor",
@@ -389,6 +409,26 @@ _ZH = {
     "live_edit_warn_no_node":          u"\u672a\u9009\u4e2d\u8282\u70b9 \u2014 \u8bf7\u5148\u9009\u4e2d\u4e00\u4e2a RBF \u8282\u70b9",
     "live_edit_warn_no_attrs":         u"\u65e0 driver \u5c5e\u6027\u53ef\u76d1\u542c",
     "live_edit_warn_failed":           u"\u5b9e\u65f6\u7f16\u8f91\u5f00\u542f\u5931\u8d25",
+    # -- M_B24b1 multi-source driver section --
+    "section_driver_sources":          u"\u591a\u6e90\u9a71\u52a8 (\u9884\u89c8)",
+    "driver_source_list_header":       u"\u9a71\u52a8\u6e90",
+    "driver_source_list_empty_hint":
+        u"\u672a\u914d\u7f6e\u9a71\u52a8\u6e90\u3002\u70b9\u51fb Add \u6dfb\u52a0\u3002",
+    "driver_source_node_tip":          u"\u9a71\u52a8\u8282\u70b9 (\u53ea\u8bfb)\u3002",
+    "driver_source_attrs_tip":         u"\u9a71\u52a8\u5c5e\u6027 (\u9017\u53f7\u8fde\u63a5)\u3002",
+    "driver_source_weight_tip":
+        u"\u6bcf\u6e90\u6743\u91cd\uff1bM_B24b \u4e0b\u6e38\u6d88\u8d39\u4fdd\u7559\u3002",
+    "driver_source_encoding_tip":
+        u"\u6bcf\u6e90\u8f93\u5165\u7f16\u7801\u679a\u4e3e (0..4)\u3002",
+    "output_encoding_label":           u"\u8f93\u51fa\u7f16\u7801\uff1a",
+    "output_encoding_combo_tip":
+        u"\u8282\u70b9\u7ea7\u8f93\u51fa\u7f16\u7801 (forward-compat)\u3002",
+    "output_encoding_euler":           u"Euler",
+    "output_encoding_quaternion":      u"Quaternion",
+    "output_encoding_expmap":          u"ExpMap",
+    "title_remove_driver_source":      u"\u79fb\u9664\u9a71\u52a8\u6e90",
+    "summary_remove_driver_source":
+        u"\u4ece\u5f53\u524d\u8282\u70b9\u79fb\u9664\u8be5\u9a71\u52a8\u6e90\uff1f",
     # -- M3.5 --
     "section_tools":                   u"\u5de5\u5177",
     "menu_profile_to_se":              u"\u8f93\u51fa Profile \u5230\u811a\u672c\u7f16\u8f91\u5668",
