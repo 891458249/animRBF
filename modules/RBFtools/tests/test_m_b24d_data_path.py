@@ -7,14 +7,20 @@ so RBF compute() never saw multi-source driver data. M_B24d is
 the corrective sub-task.
 
 Hardening 6 - 4 sub-checks (source-scan core.py):
-  (a) add_driver_source body contains connectAttr to input[
+  (a) add_driver_source body wires data path to input[ (Generic
+      mode) OR driverList[ (Matrix mode, M_B24d_matrix_followup) -
+      either is valid; both routes flow real data into
+      RBFtools.cpp compute()
   (b) _count_existing_input_attrs (or equivalent base helper)
       defined
   (c) removeMultiInstance rollback path present
   (d) _is_matrix_mode (or equivalent mode probe) defined
 
-Plus mock-pattern tests for atomic fail-soft + Matrix mode
-NotImplementedError + Generic mode append + remove disconnect.
+Plus mock-pattern tests for atomic fail-soft + Generic mode append
++ remove disconnect. The original Matrix mode NotImplementedError
+test was removed when M_B24d_matrix_followup wired the Matrix
+data path; see tests/test_m_b24d_matrix_followup.py for the
+replacement coverage.
 """
 
 from __future__ import absolute_import
@@ -58,13 +64,17 @@ class TestM_B24D_DataPathWired(unittest.TestCase):
             cls._src, re.M | re.S)
         cls._add_body = m.group("body") if m else ""
 
-    def test_a_connectattr_to_input_present(self):
-        self.assertIsNotNone(
-            re.search(r"connectAttr\([^)]*\.input\[", self._add_body)
-            or re.search(r'"\.input\[', self._add_body)
-            or ".input[" in self._add_body,
-            "add_driver_source must connect driver attrs to "
-            "shape.input[base+i] (M_B24d data path)")
+    def test_a_connectattr_to_data_path_present(self):
+        """M_B24d_matrix_followup: data path can flow through
+        input[] (Generic mode) OR driverList[] (Matrix mode). Either
+        route satisfies the #32 contract."""
+        has_generic = ".input[" in self._add_body
+        has_matrix = ".driverList[" in self._add_body
+        self.assertTrue(
+            has_generic or has_matrix,
+            "add_driver_source must wire data path to input[] "
+            "(Generic) or driverList[] (Matrix) - M_B24d Generic + "
+            "M_B24d_matrix_followup Matrix")
 
     def test_b_base_helper_present(self):
         self.assertIn("_count_existing_input_attrs", self._src,
@@ -83,34 +93,13 @@ class TestM_B24D_DataPathWired(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------
-# Mock-pattern: Matrix mode NotImplementedError (Hardening 2)
+# (Removed) Matrix mode NotImplementedError test
 # ----------------------------------------------------------------------
-
-
-@unittest.skipIf(conftest._REAL_MAYA,
-    "mock-dependent (cmds.reset_mock / mock.patch on cmds.*)")
-class TestM_B24D_MatrixModeDeferred(unittest.TestCase):
-
-    def test_matrix_mode_raises_not_implemented(self):
-        from RBFtools import core
-        import maya.cmds as cmds
-        cmds.reset_mock()
-        cmds.objExists.return_value = True
-        cmds.listRelatives.return_value = ["RBF1Shape"]
-        # Matrix mode: type=1 + rbfMode=1
-        def safe_get_matrix(path, default=0):
-            if path.endswith(".type"):    return 1
-            if path.endswith(".rbfMode"): return 1
-            return default
-        with mock.patch("RBFtools.core.safe_get",
-                        side_effect=safe_get_matrix):
-            with self.assertRaises(NotImplementedError) as ctx:
-                core.add_driver_source(
-                    "RBF1", "drv1", ["translateX"])
-        # Error message must reference the deferred sub-task by name.
-        self.assertIn("M_B24d_matrix_followup", str(ctx.exception))
-        self.assertIn("matrix-mode-deferred",
-                       str(ctx.exception).lower())
+# Original `TestM_B24D_MatrixModeDeferred.test_matrix_mode_raises_not_
+# implemented` was obsoleted by M_B24d_matrix_followup, which wires the
+# Matrix mode data path (driver.worldMatrix[0] -> driverList[idx].
+# driverInput). Replacement coverage lives in
+# tests/test_m_b24d_matrix_followup.py.
 
 
 # ----------------------------------------------------------------------

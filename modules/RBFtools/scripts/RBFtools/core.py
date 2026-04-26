@@ -958,6 +958,121 @@ def _count_existing_input_attrs(shape):
     return (max(indices) + 1) if indices else 0
 
 
+def _count_existing_driver_list(shape):
+    """M_B24d_matrix_followup: next free `<shape>.driverList[]` index.
+
+    Matrix mode appends one driverList entry per add_driver_source
+    call (each entry holds one driver's worldMatrix). Returns 0 if
+    driverList[] is empty or if the multiIndices query fails."""
+    try:
+        indices = cmds.getAttr(shape + ".driverList", multiIndices=True) or []
+    except Exception:
+        indices = []
+    return (max(indices) + 1) if indices else 0
+
+
+def _has_generic_wiring(shape):
+    """M_B24d_matrix_followup: detect populated input[] indices on shape.
+
+    Used by add_driver_source mode-exclusion semantic to surface a
+    user-facing RuntimeError when the caller would mix Generic and
+    Matrix mode wiring on the same node. See addendum
+    §M_B24d_matrix_followup.mode-exclusion-semantic."""
+    try:
+        indices = cmds.getAttr(shape + ".input", multiIndices=True) or []
+    except Exception:
+        indices = []
+    return bool(indices)
+
+
+def _has_matrix_wiring(shape):
+    """M_B24d_matrix_followup: detect any driverList[d].driverInput
+    incoming connection on shape.
+
+    Counterpart to :func:`_has_generic_wiring`. Probes every
+    populated driverList[] index for an actual incoming connection
+    (legacy single-driver Matrix node has driverList[0] connected
+    too, so any populated index counts)."""
+    try:
+        dl_indices = cmds.getAttr(
+            shape + ".driverList", multiIndices=True) or []
+    except Exception:
+        dl_indices = []
+    for d in dl_indices:
+        plug = "{}.driverList[{}].driverInput".format(shape, d)
+        try:
+            conns = cmds.listConnections(
+                plug, source=True, destination=False) or []
+        except Exception:
+            conns = []
+        if conns:
+            return True
+    return False
+
+
+def _resolve_driver_rotate_order(shape, driver_node, idx):
+    """M_B24d_matrix_followup (Hardening 3): connect
+    driver_node.rotateOrder -> shape.driverInputRotateOrder[idx]
+    if the driver node carries a rotateOrder attribute. Standard
+    transform / joint nodes always do; falls back to the Maya
+    default xyz=0 for exotic node types lacking the attribute
+    (no setAttr needed since 0 is the array slot default)."""
+    plug = "{}.driverInputRotateOrder[{}]".format(shape, idx)
+    if cmds.attributeQuery("rotateOrder", node=driver_node, exists=True):
+        cmds.connectAttr(driver_node + ".rotateOrder", plug, force=True)
+
+
+def _wire_matrix_mode_data_path(shape, driver_node, idx):
+    """M_B24d_matrix_followup (Hardening 2): connect
+    driver_node.worldMatrix[0] -> shape.driverList[idx].driverInput.
+
+    worldMatrix[0] (NOT .matrix / local) is required by the C++
+    compute() math chain at RBFtools.cpp:2113:
+
+        transMatDriver = driverMat * driverParentMatInv * jointOrientMatInv
+
+    The driverParentMatInv step is mathematically meaningful only
+    when driverMat is a world-space matrix; connecting the local
+    .matrix would make the parentInverse step a no-op-ish error.
+    See addendum §M_B24d_matrix_followup.matrix-vs-worldmatrix
+    for the verbatim derivation.
+
+    Post-connect verification is mandatory: cpp:2087-2093 has an
+    early-return guard on unconnected driverInput, so a silently
+    failed connectAttr would blind the entire RBF compute()."""
+    target = "{}.driverList[{}].driverInput".format(shape, idx)
+    cmds.connectAttr(driver_node + ".worldMatrix[0]", target, force=True)
+    incoming = cmds.listConnections(
+        target, source=True, destination=False) or []
+    if not incoming:
+        raise RuntimeError(
+            "RBFtools: driverList[{}].driverInput connectAttr appeared "
+            "to succeed but listConnections returned empty. C++ "
+            "compute() early-returns on unconnected driverInput "
+            "(RBFtools.cpp:2087-2093) - this would silently fail the "
+            "entire RBF compute. Aborting.".format(idx))
+
+
+def _unwire_matrix_mode_data_path(shape, driver_node, idx):
+    """M_B24d_matrix_followup: symmetric disconnect for
+    :func:`_wire_matrix_mode_data_path`. Best-effort - any failure
+    is swallowed since this runs from rollback / remove paths and
+    must never re-raise."""
+    target = "{}.driverList[{}].driverInput".format(shape, idx)
+    if driver_node:
+        try:
+            cmds.disconnectAttr(driver_node + ".worldMatrix[0]", target)
+        except Exception:
+            pass
+        rot_plug = "{}.driverInputRotateOrder[{}]".format(shape, idx)
+        try:
+            if cmds.attributeQuery(
+                    "rotateOrder", node=driver_node, exists=True):
+                cmds.disconnectAttr(driver_node + ".rotateOrder", rot_plug)
+        except Exception:
+            pass
+
+
 def add_driver_source(node, driver_node, driver_attrs,
                       weight=1.0, encoding=0):
     """Append a new :class:`DriverSource` to driverSource[].
@@ -971,9 +1086,19 @@ def add_driver_source(node, driver_node, driver_attrs,
     compute() sees the new driver. For Generic mode (type=1,
     rbfMode=0) this means appending each ``driver_node.<attr>``
     to ``shape.input[base+i]`` where base is the current input[]
-    count. Matrix mode (type=1, rbfMode=1) raises
-    NotImplementedError per addendum #M_B24d.matrix-mode-deferred
-    until v5.x post-final M_B24d_matrix_followup.
+    count. Matrix mode (type=1, rbfMode=1) wires
+    ``driver_node.worldMatrix[0]`` to
+    ``shape.driverList[idx].driverInput`` plus an optional
+    ``driver_node.rotateOrder`` -> ``driverInputRotateOrder[idx]``
+    sync (M_B24d_matrix_followup; see addendum
+    §M_B24d_matrix_followup.matrix-vs-worldmatrix for the math
+    chain that mandates worldMatrix over .matrix).
+
+    M_B24d_matrix_followup mode-exclusion semantic: callers must
+    not mix Generic and Matrix wiring on the same shape. If the
+    shape currently carries wiring of one kind and the caller
+    targets the other, a RuntimeError is raised with a user-facing
+    instruction (remove all driver sources first, then re-add).
 
     Atomic fail-soft (Hardening 1): metadata write happens first,
     then data path. If any data-path connectAttr fails, the
@@ -984,17 +1109,29 @@ def add_driver_source(node, driver_node, driver_attrs,
     if not _exists(shape):
         raise RuntimeError(
             "add_driver_source: shape not found for {!r}".format(node))
-    # M_B24d (Hardening 2): Matrix mode wiring is DEFERRED. Raise
-    # explicitly so the TD sees the boundary instead of a silent
-    # "metadata only, compute() blind" half-state.
-    if _is_matrix_mode(shape):
-        raise NotImplementedError(
-            "M_B24d: Matrix mode driver wiring is deferred to v5.x "
-            "post-final M_B24d_matrix_followup. Current node {!r} is "
-            "in RBF Matrix mode (type=1 + rbfMode=1). Use Generic "
-            "mode (type=1 + rbfMode=0) or Vector-Angle mode (type=0) "
-            "for multi-source driver setup. See addendum "
-            "#M_B24d.matrix-mode-deferred.".format(node))
+    # M_B24d_matrix_followup (Hardening 1): mode-exclusion semantic.
+    # Detect existing wiring topology and reject the mismatched
+    # branch before any state is written. See addendum
+    # §M_B24d_matrix_followup.mode-exclusion-semantic.
+    is_matrix = _is_matrix_mode(shape)
+    if is_matrix and _has_generic_wiring(shape):
+        raise RuntimeError(
+            "RBFtools: cannot mix Matrix mode and Generic mode driver "
+            "sources on the same node. Existing sources are in Generic "
+            "mode (shape.input[] populated); current node is in Matrix "
+            "mode (type=1 + rbfMode=1). Remove all driver sources "
+            "first via remove_driver_source(), then re-add. See "
+            "addendum "
+            "§M_B24d_matrix_followup.mode-exclusion-semantic.")
+    if (not is_matrix) and _has_matrix_wiring(shape):
+        raise RuntimeError(
+            "RBFtools: cannot mix Matrix mode and Generic mode driver "
+            "sources on the same node. Existing sources are in Matrix "
+            "mode (shape.driverList[].driverInput connected); current "
+            "node is in Generic mode (type=1 + rbfMode=0 or type=0). "
+            "Remove all driver sources first via "
+            "remove_driver_source(), then re-add. See addendum "
+            "§M_B24d_matrix_followup.mode-exclusion-semantic.")
     # Validate via dataclass (enforces weight >= 0, encoding 0..4).
     DriverSource(node=driver_node, attrs=tuple(driver_attrs),
                  weight=float(weight), encoding=int(encoding))
@@ -1009,7 +1146,33 @@ def add_driver_source(node, driver_node, driver_attrs,
                  len(driver_attrs), *driver_attrs, type="stringArray")
     cmds.setAttr(base_plug + ".driverSource_weight", float(weight))
     cmds.setAttr(base_plug + ".driverSource_encoding", int(encoding))
-    # ---- Step 2: M_B24d data path (atomic fail-soft) ----
+    # ---- Step 2: data path (atomic fail-soft) ----
+    if is_matrix:
+        # Matrix mode (M_B24d_matrix_followup): append one
+        # driverList[matrix_idx] entry per add_driver_source call.
+        # driver_attrs is metadata-only here (forward-compat M5+;
+        # decision D.2). Atomic try/except mirrors Generic branch.
+        matrix_idx = _count_existing_driver_list(shape)
+        wired_matrix = False
+        try:
+            _wire_matrix_mode_data_path(shape, driver_node, matrix_idx)
+            wired_matrix = True
+            _resolve_driver_rotate_order(shape, driver_node, matrix_idx)
+        except Exception as exc:
+            if wired_matrix:
+                _unwire_matrix_mode_data_path(
+                    shape, driver_node, matrix_idx)
+            try:
+                cmds.removeMultiInstance(base_plug, b=True)
+            except Exception:
+                pass
+            cmds.warning(
+                "add_driver_source: Matrix mode data path wiring "
+                "failed for {!r} ({}); rolled back metadata + "
+                "partial connections. Error: {}".format(
+                    driver_node, driver_attrs, exc))
+            raise
+        return next_idx
     # Generic mode: append driver attrs to shape.input[base..base+n].
     # base is the current count of populated input[] indices, so this
     # respects existing single-driver wire_driver_inputs() output and
@@ -1069,21 +1232,8 @@ def remove_driver_source(node, index):
     except Exception:
         all_indices = []
     if index in all_indices:
-        base = 0
-        my_attrs = []
-        for prior in sorted(all_indices):
-            attrs_plug = "{}.driverSource[{}].driverSource_attrs".format(
-                shape, prior)
-            try:
-                attrs_raw = cmds.getAttr(attrs_plug) or []
-            except Exception:
-                attrs_raw = []
-            if prior < index:
-                base += len(attrs_raw)
-            elif prior == index:
-                my_attrs = list(attrs_raw)
-                break
-        # Read this source's driver node from the message connection.
+        # Read this source's driver node from the message connection
+        # (shared by Generic + Matrix branches below).
         try:
             srcs = cmds.listConnections(
                 plug + ".driverSource_node",
@@ -1091,16 +1241,41 @@ def remove_driver_source(node, index):
         except Exception:
             srcs = []
         drv_node = srcs[0] if srcs else ""
-        for i, attr in enumerate(my_attrs):
-            try:
-                src = "{}.{}".format(drv_node, attr)
-                dst = "{}.input[{}]".format(shape, base + i)
-                cmds.disconnectAttr(src, dst)
-            except Exception:
-                # disconnect failures are best-effort; leave any
-                # stale connection for the caller to clean up
-                # manually if needed.
-                pass
+        if _is_matrix_mode(shape):
+            # M_B24d_matrix_followup: Matrix mode appended one
+            # driverList[] entry per add_driver_source call. The
+            # logical position of `index` within the sorted
+            # driverSource[] indices yields the matching driverList
+            # offset (entries are appended in lockstep).
+            ordered = sorted(all_indices)
+            matrix_idx = ordered.index(index)
+            _unwire_matrix_mode_data_path(shape, drv_node, matrix_idx)
+        else:
+            base = 0
+            my_attrs = []
+            for prior in sorted(all_indices):
+                attrs_plug = (
+                    "{}.driverSource[{}].driverSource_attrs".format(
+                        shape, prior))
+                try:
+                    attrs_raw = cmds.getAttr(attrs_plug) or []
+                except Exception:
+                    attrs_raw = []
+                if prior < index:
+                    base += len(attrs_raw)
+                elif prior == index:
+                    my_attrs = list(attrs_raw)
+                    break
+            for i, attr in enumerate(my_attrs):
+                try:
+                    src = "{}.{}".format(drv_node, attr)
+                    dst = "{}.input[{}]".format(shape, base + i)
+                    cmds.disconnectAttr(src, dst)
+                except Exception:
+                    # disconnect failures are best-effort; leave any
+                    # stale connection for the caller to clean up
+                    # manually if needed.
+                    pass
     try:
         cmds.removeMultiInstance(plug, b=True)
     except Exception as exc:

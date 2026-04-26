@@ -4109,7 +4109,7 @@ in M4.1（处理 pre-M_B24 节点同时承受 driver schema + solverType schema
 | # | 铁律 | v5 设计评级 | 当前状态 | 实施 commit | 子任务归属 |
 |---|---|---|---|---|---|
 | **B1** | 六类 Solver | ❌ 致命 | **❌ 仅 RBF + Vector-Angle 二类** (`type` + `rbfMode` 双 enum 切 2 路径) | —— | **M4** (a/b/c/d) |
-| **B2** | 多源驱动异构 | ⚠️ 高 | **✅ complete (Generic mode + UI + downstream)** *(Mirror DEFERRED to M_B24c; Matrix mode DEFERRED to M_B24d_matrix_followup; data-path correction in M_B24d)* | M_B24a1 `d73d6b9` + a2-1 `a43f0de` + a2-2 `1719056` + b1 `2da2059` + b2 `000d127` + d (this commit, data-path correction) | M_B24 (a1+a2+b+d) |
+| **B2** | 多源驱动异构 | ⚠️ 高 | **✅ complete (Generic + Matrix + UI + downstream)** *(Mirror DEFERRED to M_B24c; Matrix mode wired in M_B24d_matrix_followup; data-path correction in M_B24d)* | M_B24a1 `d73d6b9` + a2-1 `a43f0de` + a2-2 `1719056` + b1 `2da2059` + b2 `000d127` + d `62fa87c` + d_matrix_followup (this commit, Matrix mode wiring) | M_B24 (a1+a2+b+d+d_matrix_followup) |
 | B3 | 输入编码枚举 5 档 | ❌ 致命 | **✅ 完整** | M2.1a (`8541d4d`-pre) / M2.1b | 已完成 |
 | **B4** | 输入 Quat / 输出 Euler 分离 | ❌ 高 | **✅ complete (full)** | M_B24a1 `d73d6b9` (schema) + a2-2 `1719056` (JSON versioned) + b1 `2da2059` (UI combo) + b2 (this commit, T_V5_PARITY_B4_LIVE #30) | M_B24 (a1+a2-2+b1+b2) |
 | B5 | Driver Clamp | ❌ 致命 | **✅ 完整** (`clampEnabled` + `clampInflation` + `poseMinVec/MaxVec`) | M1.3 | 已完成 |
@@ -4681,6 +4681,13 @@ but `input[]` is partially wired.
 
 ### §M_B24d.matrix-mode-deferred
 
+> **STATUS UPDATE**: RESOLVED by §M_B24d_matrix_followup (commit
+> following `62fa87c`). The 0-hits gap below is now closed —
+> `_wire_matrix_mode_data_path` in core.py establishes the
+> `driver.worldMatrix[0] -> shape.driverList[d].driverInput`
+> connection inside `add_driver_source` Matrix branch. Original
+> rationale preserved verbatim for audit-trail integrity.
+
 Per F2 of M_B24d 现状核查: `grep -rn "connectAttr.*driverList\[" modules/RBFtools/scripts/RBFtools/` returns **0 hits**. The Python codebase has never connected `driverList[d].driverInput` (the matrix-mode driver path); only `wire_driver_inputs` (Generic mode `input[i]` flat scalar) exists.
 
 `add_driver_source` therefore:
@@ -4769,6 +4776,165 @@ was `wire_driver_inputs` to `input[i]` (Generic), not
   4. only then call the surface "fully wired"
 
 Step 2 is the M_B24d-driven addition.
+
+---
+
+## §M_B24d_matrix_followup — Matrix mode driverList wiring
+
+> **PROJECT-CONSTITUTIONAL-EVENT** (2026-04-27):
+>
+> First Python-side implementation of `driverList[d].driverInput`
+> wiring in the project's history. Pre-v5 Matrix mode required
+> users to manually `connectAttr` the driver matrix in MEL; this
+> commit promotes the operation to a first-class
+> `add_driver_source` code path with atomic fail-soft + post-
+> connect verification + mode-exclusion semantic.
+>
+> verify-before-design 19th use, sustaining the
+> §M_B24d.lesson-learned PROJECT METHODOLOGY: read side math
+> chain (cpp:2113) dictates write side choice
+> (`worldMatrix[0]` not `.matrix`).
+
+### §M_B24d_matrix_followup.scope
+
+| Layer | Change | LoC |
+|---|---|---|
+| `core.py` | `_count_existing_driver_list` + `_has_generic_wiring` + `_has_matrix_wiring` + `_resolve_driver_rotate_order` + `_wire_matrix_mode_data_path` + `_unwire_matrix_mode_data_path` 六 helper + `add_driver_source` Matrix branch (replaces NotImplementedError) + mode-exclusion RuntimeError + `remove_driver_source` Matrix unwire branch | ~165 |
+| `tests/test_m_b24d_matrix_followup.py` (new) | 5 source-scan + 4 add-wire + 1 verify-guard + 1 atomic rollback + 2 mode-exclusion + 1 remove-unwire = **13 tests** | ~330 |
+| `tests/test_m_b24d_data_path.py` (modified) | #32 sub-check (a) extension (Generic OR Matrix wiring valid) + obsolete `TestM_B24D_MatrixModeDeferred` class removed | ~30 |
+| `addendum_20260424.md` | this section + §M_B24d.matrix-mode-deferred RESOLVED stamp + §M_PARITY_AUDIT.B2 row update | ~140 |
+
+### §M_B24d_matrix_followup.matrix-vs-worldmatrix
+
+> **(A.3 → A.2) PIVOT** (planner override 2026-04-27): the
+> original M_B24d_matrix_followup design (A.3) defaulted to
+> `driver.matrix` (local). The verify-before-design read-side
+> grep refutes this.
+
+The C++ compute() math chain at [RBFtools.cpp:2113](source/RBFtools.cpp:2113):
+
+```cpp
+MTransformationMatrix transMatDriver =
+    driverMat * driverParentMatInv * jointOrientMatInv;
+```
+
+`driverParentMatInv = dagPath.exclusiveMatrixInverse()` is the
+inverse of the driver's parent worldMatrix. The product
+`worldMatrix * parentInverseMatrix = localMatrix` holds **only
+when `driverMat` is the world-space matrix**. If `driverMat` is
+already the local `.matrix`, the multiplication by
+`parentInverseMatrix` cancels nothing — it injects an error term
+proportional to the parent's world transform, silently corrupting
+every RBF pose.
+
+Therefore `_wire_matrix_mode_data_path` connects
+`driver.worldMatrix[0]` (NOT `.matrix`). Red line 5 source-scan
+guards this in `tests/test_m_b24d_matrix_followup.py::
+TestM_B24D_MatrixFollowup_Source.test_uses_worldmatrix_not_local_matrix`.
+
+**PROJECT METHODOLOGY**: when picking a write-side connection,
+trace the read-side consumer's math chain to determine the
+correct space (local / world / parent-relative). The (A.3) ->
+(A.2) pivot is the verify-before-design 19th-use proof point.
+
+### §M_B24d_matrix_followup.mode-exclusion-semantic
+
+A single RBF shape cannot mix Generic mode wiring (`shape.input[]`
+flat scalars) and Matrix mode wiring
+(`shape.driverList[d].driverInput` matrix). The two read paths
+are mutually exclusive in `RBFtools.cpp` compute(). Allowing
+mixed wiring would either:
+
+- silently strand half the data (compute() reads only the active
+  branch), or
+- explode at the next solve when the driver vector geometry is
+  inconsistent with the pose vector geometry.
+
+`add_driver_source` therefore probes both wiring topologies via
+`_has_generic_wiring` + `_has_matrix_wiring` before any state is
+written. On mismatch it raises a `RuntimeError` with the
+hardcoded user-facing message:
+
+> RBFtools: cannot mix Matrix mode and Generic mode driver
+> sources on the same node. Existing sources are in {old} mode
+> ...; current node is in {new} mode .... Remove all driver
+> sources first via `remove_driver_source()`, then re-add. See
+> addendum §M_B24d_matrix_followup.mode-exclusion-semantic.
+
+**Recovery workflow**: walk every `driverSource[d]` returned by
+`read_driver_info_multi(node)`, call `remove_driver_source(node,
+d)`, flip `<shape>.rbfMode`, then re-add the desired sources.
+
+### §M_B24d_matrix_followup.first-implementation
+
+Pre-M_B24d_matrix_followup grep:
+
+```bash
+$ grep -rE "connectAttr.*driverList\[" \
+       modules/RBFtools/scripts/ source/ MEL/
+（empty）
+```
+
+The C++ side has consumed `driverList[d].driverInput` since the
+project's earliest commits, but the *write* side was always
+manual MEL: TDs ran `connectAttr -f drv.worldMatrix[0]
+RBF1Shape.driverList[0].driverInput` in the script editor before
+poses would solve. M_B24d_matrix_followup is the **first**
+commit to wire this connection from Python — substantial UX +
+correctness improvement, not just multi-source unlock.
+
+A side benefit is the automatic `rotateOrder` sync via
+`_resolve_driver_rotate_order`: standard transform / joint
+drivers now propagate their rotateOrder to
+`shape.driverInputRotateOrder[idx]`, eliminating one historical
+"why are my poses rotated wrong?" support ticket category.
+
+### §M_B24d_matrix_followup.permanent-guards
+
+Permanent guards: 32 unchanged.
+
+- **#32 T_M_B24D_DATA_PATH_WIRED sub-check (a) extension**:
+  the original literal `.input[` requirement is widened to
+  `.input[` OR `.driverList[`, since both the Generic and Matrix
+  wiring routes flow real data into `RBFtools.cpp` compute().
+  Sub-checks (b)/(c)/(d) — base helper, removeMultiInstance
+  rollback, mode probe — unchanged.
+
+The new `tests/test_m_b24d_matrix_followup.py` adds 13 mock-only
+tests but registers no new permanent guard number; coverage of
+the worldMatrix-vs-matrix invariant + post-connect verification +
+mode-exclusion semantic is enforced via the file's own
+source-scan class
+(`TestM_B24D_MatrixFollowup_Source`) and the mode-exclusion
+mock tests, all of which run on every full sweep.
+
+### §M_B24d_matrix_followup.empirical-baseline (2026-04-27)
+
+| Env | Pre-followup (post-M_B24d) | Post-followup |
+|---|---|---|
+| Pure-Python | 519 OK (skip 3) | 532 OK (skip 3) |
+| mayapy 2025 | 519 ran 474 pass 45 skip | 532 ran 479 pass 53 skip |
+
+mayapy delta: +13 tests = +5 pass (5 source-scan tests in
+`TestM_B24D_MatrixFollowup_Source`) + +8 skip (8 mock-only
+`@skipIf(_REAL_MAYA)` test methods). Per the forward-compat-
+corrected red line 13, mock-pattern legitimate skip naturally
+accumulates; **no plugin-load skips added** and M1.5.3 PAUSED
+remains honored.
+
+### §M_B24d_matrix_followup.scope-exclusions
+
+- 0 lines C++ / 0 .mll / 0 CMakeLists / 0 schema modifications
+- 0 lines Mirror code (M_B24c scope, untouched)
+- 0 lines hotfix 4 files (`compat.py` / `conftest.py` /
+  `test_pyside6_compat.py` / addendum hotfix section —
+  M_HOTFIX_PYSIDE6 `edf5367` unchanged)
+- 0 changes to the 14 deprecated `read_driver_info` call-sites
+- 0 changes to the 5 active downstream adapters
+- 0 changes to the 6 PERMANENT dual-version guards
+- `driver_attrs` parameter retained as metadata-only in the
+  Matrix branch (decision D.2; forward-compat for M5+ per-attr
+  Matrix overrides)
 
 ---
 
