@@ -4262,6 +4262,42 @@ explicitly).
 任何"UI 复杂导致超限"必须停下报告再批 (拆 M_B24b 为
 M_B24b1/b2 等), 不允许放宽上限.
 
+#### B2 EMPIRICAL CORRECTION (2026-04-26, M_B24a1 F2 verify-before-design)
+
+**Original §M_PARITY_AUDIT.B2 status above states**: "C++ `driverList`
+exists but UI/core single-driver". This phrasing implies BOTH layers
+are single-driver. F2 in M_B24a1 现状核查 (verify-before-design 13th
+use) empirically refutes the C++ side:
+
+[RBFtools.cpp:1967-2000](source/RBFtools.cpp:1967) compute() contains
+a real multi-driver iteration:
+
+```cpp
+unsigned driverCount = driverListHandle.elementCount();
+for (d = 0; d < driverCount; d++) {
+    driverListHandle.jumpToArrayElement(d);
+    MDataHandle driverInputHandle = driverListIdHandle.child(driverInput);
+    ...
+}
+```
+
+**Corrected semantics**: "C++ multi-driver loop ALREADY iterates
+`driverList[*]`; the bottleneck is Python `read_driver_info()`
+returning a single tuple + 14 callers (controller.py × 5,
+core.py × 3, core_json.py / core_neutral.py / core_profile.py /
+core_prune.py × 2 / live_edit_widget.py × 2) all making single-
+driver assumptions."
+
+**Implication for M_B24**: backend work augments `driverList` with a
+companion `driverSource[*]` compound carrying per-driver metadata
+(weight, encoding) — NO compute() iteration rewrite needed. The
+"~30 LoC chained backcompat" (H.2 user override) cost remains; the
+C++ surface is smaller than originally feared.
+
+This correction is the M_B24a1 verify-before-design highest-value
+finding: it cut the M_B24a backend C++ scope estimate from ~300-400
+LoC down to ~130 LoC without changing functional outcome.
+
 ---
 
 ### §M_PARITY_AUDIT.B4 — 输出编码（**高**, 合并入 M_B24）
@@ -4570,7 +4606,183 @@ schema 演进链. 上游 schema 字段任何后续改动 (v5.x post-final) 必�
 
 ---
 
+## §M_B24a1 — driverSource compound + outputEncoding schema (backend, B2+B4 partial)
 
+> **STATUS: LANDED 2026-04-26 — schema + read path + DG dirty live;
+> semantic consumption deferred to M_B24b/business**
+
+First sub-task on the v5.0 final path (H.2 LOCKED order). Adds the
+driverSource compound (multi) + 4 child fields + node-level
+outputEncoding enum. Pure schema + read-path + DG dirty validation;
+no metadata semantic consumption (weight scaling / encoding inverse)
+— that lands in M_B24b once the UI exposes the fields to TDs.
+
+### §M_B24a1.scope
+
+| Layer | Change |
+|---|---|
+| C++ schema | 6 new MObject (driverSource compound + 4 children + outputEncoding) |
+| C++ compute() | readDriverSourceMetadata helper (defensive); placeholder calls in driverList for-loop + setOutputValues |
+| C++ attributeAffects | 5 new edges (4 driverSource children + outputEncoding -> output) |
+| .mll | Re-built; SHA256 below |
+| Python | **0** (M_B24a2 territory) |
+| Build config | 1 #include added (MFnStringArrayData.h) per K.1-3 pre-approval |
+
+### §M_B24a1.K1-deep-dive — verbatim record
+
+K.1 sub-deep-dive (per planner's "首次 ≥100 行 C++ 子任务" pre-review
+gate) locked the following insertion points before any code was
+written:
+
+- `RBFtools.h:347` after `poseSigma` decl: 6 MObject member declarations
+- `RBFtools.h:152` after `decomposeSwingTwist`: helper static decl
+- `RBFtools.cpp:93` after `MObject RBFtools::poseSigma;`: 6 globals
+- `RBFtools.cpp:286` after `inputEncoding` eAttr block: outputEncoding
+  eAttr block (~7 lines)
+- `RBFtools.cpp:736` after `driverList` cAttr block: driverSource cAttr
+  block with 4 `{}`-scoped child creations (M2.5 cache pattern)
+- `RBFtools.cpp:809` after `addAttribute(driverList)`: 5 addAttributes
+- `RBFtools.cpp:844` after `addAttribute(inputEncoding)`: outputEncoding
+- `RBFtools.cpp:891` after `attributeAffects(inputEncoding, output)`:
+  outputEncoding edge
+- `RBFtools.cpp:899` after `attributeAffects(driverInput, output)`:
+  4 driverSource_* edges
+- `RBFtools.cpp:1991` inside compute() driverList for-loop, after
+  `driverInputHandle` access: helper invocation + (void) sink
+- `RBFtools.cpp:3920` inside `setOutputValues()`, before output build
+  loop: outputEncoding plug read + thread_local sink (加固 K.1-2
+  防 MSVC O2 dead-read elimination)
+- `RBFtools.cpp:3168` after `decomposeSwingTwist` definition:
+  readDriverSourceMetadata helper definition
+
+### §M_B24a1.compile-error-recovery — UTF-8 cp936 incident
+
+First build attempt failed with `error C2039: 'driverSource' is not
+a member of 'RBFtools'` despite the declarations being clearly
+present in RBFtools.h. Root cause: my added comment block (lines
+348-360 of RBFtools.h) contained Chinese characters in 3-byte UTF-8
+sequences. Existing M2.3/M2.5 comments used only Latin-1 chars
+(em-dash U+2014 = 3-byte UTF-8 but stable in cp936; § U+00A7 = 2-byte
+UTF-8). MSVC running in cp936 codepage mode (warning C4819 emitted)
+mis-parsed certain UTF-8 multi-byte sequences and silently consumed
+the trailing newline of the preceding line, effectively merging
+comment + class-member-decl line into a single broken-comment
+line — hiding the static MObject declarations from the parser.
+
+Fix: rewrote my added comments to pure ASCII (English-only, matching
+the rest of the file's convention). Build then succeeded. Lesson:
+when modifying RBFtools.h/cpp, NEW comments must be ASCII-only;
+existing Chinese comments in cpp body (RBFtools.cpp:568, etc.) are
+grandfathered and have been validated through repeated builds.
+
+### §M_B24a1.J3-baseline (mayapy probe, 2026-04-26)
+
+Probe script NOT committed (one-shot per A.3 范式). Verbatim output:
+
+```
+=== loadPlugin ===
+loaded: True
+version: 4.0.1
+
+=== createNode ===
+node: RBFtoolsShape1
+
+=== M2.5 schema introspection (regression check) ===
+poseSwingTwistCache: exists=True
+poseSwingQuat:       exists=True
+poseTwistAngle:      exists=True
+poseSwingWeight:     exists=True
+poseTwistWeight:     exists=True
+poseSigma:           exists=True
+
+=== M_B24a1 schema introspection ===
+driverSource:           exists=True  longName=driverSource           shortName=drs
+driverSource_node:      exists=True  longName=driverSource_node      shortName=dsn
+driverSource_attrs:     exists=True  longName=driverSource_attrs     shortName=dsa
+driverSource_weight:    exists=True  longName=driverSource_weight    shortName=dsw
+driverSource_encoding:  exists=True  longName=driverSource_encoding  shortName=dse
+outputEncoding:         exists=True  longName=outputEncoding         shortName=oenc
+
+=== listAttr count ===
+total attrs: 280   (was 274 pre-M_B24a1; +6)
+
+=== DG dirty propagation probe ===
+output[0] before: 0.0
+setAttr driverSource[0].driverSource_weight = 5.0
+output[0] after:  0.0   (no exception — compute rerun OK)
+setAttr outputEncoding = 1
+output[0] after:  0.0   (no exception — outputEncoding edge live)
+
+=== unloadPlugin ===
+unloaded ok
+```
+
+### §M_B24a1.SHA256-baseline
+
+```
+72de19403d5190e3c04736be7e6b9575a85df033bbe7d55c8fa5442e580d4bc8 *modules/RBFtools/plug-ins/win64/2025/RBFtools.mll
+```
+
+Build env: VS 2022 17.14 / MSVC 19.44.35223 (v143) / Win SDK 10.0.26100.0 /
+Release / Maya 2025 devkit / 2026-04-26. Size: 171008 bytes (was 166912
+in M1.5.1b SHA256-baseline; +4096 bytes). M1.5.1b SHA256
+`2725287715b9...` retained at §M1.5.1b.SHA256-baseline as historical
+anchor; current production .mll uses this M_B24a1 hash.
+
+### §M_B24a1.permanent-guards — #23 + #24 LANDED
+
+```
+T_DRIVER_SOURCE_AGGREGATION (#23):
+  source-scan RBFtools.cpp contains:
+    - inputArrayValue(driverSource, ...)
+    - driverSource_weight read
+    - driverSource_encoding read
+    - readDriverSourceMetadata helper definition
+    - readDriverSourceMetadata invocation from compute()
+
+T_OUTPUT_ENCODING_DECLARED (#24):
+  source-scan RBFtools.h contains: static MObject outputEncoding;
+  source-scan RBFtools.cpp contains:
+    - addAttribute(outputEncoding)
+    - attributeAffects(RBFtools::outputEncoding, RBFtools::output)
+    - s_outEncSink (placeholder thread_local sink — 加固 K.1-2)
+```
+
+Plus class-level `@skipIf(not _REAL_MAYA)` acceptance test
+`TestM_B24A1_DirtyPropagationRealMaya` (2 methods) which loads .mll,
+sets driverSource_weight / outputEncoding, asserts compute reruns
+without exception. NOT a permanent guard (acceptance only); covers
+the dead-read elimination scenario 加固 K.1-2 was designed against.
+
+### §M_B24a1.empirical-baseline (2026-04-26)
+
+| Env | Pre-M_B24a1 | Post-M_B24a1 | Delta |
+|---|---|---|---|
+| Pure-Python | 454 / 454 OK | **462 / 462 OK (skipped=2)** | +8 (#23 × 3 methods + #24 × 3 methods + dirty × 2 skipif) |
+| mayapy 2025 | 454 ran 417 pass 37 skip | **462 ran 425 pass 37 skip** | +8 ran / +8 pass / **+0 skip** (dirty methods run real, schema-scan methods run cross-env) |
+
+Permanent guards: 22 -> 24 (#23 + #24).
+
+### §M_B24a1.M_B24a2-handoff
+
+M_B24a2 (next) will:
+- Add Python `add_driver_source` / `remove_driver_source` /
+  `read_driver_info_multi` core API
+- Add JSON versioned schema (`schema_version: "v5.0-M_B24"`) +
+  drivers array + outputEncoding field
+- Add `_migrate_legacy_single_driver` lazy migration with
+  `cmds.warning` per-session (T_M_B2_MIGRATION_BACKCOMPAT, 加固 2)
+- Commit minimal legacy `.ma` fixture for migration regression
+- Update T_M3_3_SCHEMA_FIELDS to version-aware (legacy + new)
+- 0 C++ changes (M_B24a1 schema is the entire C++ surface for
+  M_B24)
+
+M_B24b (after a2) will be the UI primary deliverable per H.2 user
+override.
+
+---
+
+### M2.1a.9 — 签名演化（面向后续 milestone 的 API 记录）
 
 ```
 // 之前

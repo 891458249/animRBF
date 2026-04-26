@@ -91,6 +91,13 @@ MObject RBFtools::poseTwistAngle;
 MObject RBFtools::poseSwingWeight;
 MObject RBFtools::poseTwistWeight;
 MObject RBFtools::poseSigma;
+// M_B24a1: driverSource compound (multi) + 4 子字段 + node-level outputEncoding.
+MObject RBFtools::driverSource;
+MObject RBFtools::driverSource_node;
+MObject RBFtools::driverSource_attrs;
+MObject RBFtools::driverSource_weight;
+MObject RBFtools::driverSource_encoding;
+MObject RBFtools::outputEncoding;
 MObject RBFtools::restInput;
 // controls
 MObject RBFtools::allowNegative;
@@ -274,6 +281,16 @@ MStatus RBFtools::initialize()
     eAttr.addField("ExpMap",     3);
     eAttr.addField("SwingTwist", 4);
     eAttr.setKeyable(true);
+    eAttr.setStorable(true);
+
+    // M_B24a1: node-level outputEncoding enum (Euler/Quaternion/ExpMap).
+    // a1 forward-compat: schema declared + read path + DG dirty live;
+    // actual inverse transform deferred to M_B24b business consumption.
+    outputEncoding = eAttr.create("outputEncoding", "oenc", 0);
+    eAttr.addField("Euler",      0);
+    eAttr.addField("Quaternion", 1);
+    eAttr.addField("ExpMap",     2);
+    eAttr.setKeyable(false);
     eAttr.setStorable(true);
 
     // M2.1a: per-driver-group rotate order. Multi enum aligned to Maya's
@@ -727,6 +744,54 @@ MStatus RBFtools::initialize()
     cAttr.addChild(controlNode);
     cAttr.addChild(pose);
 
+    // M_B24a1: driverSource compound (multi). Per-driver companion
+    // metadata for driverList[d] - same index binding. Build the 4
+    // child fields in {} scopes so MFn local instances do not shadow
+    // the surrounding cAttr/eAttr/nAttr/tAttr/mAttr (M2.5 cache
+    // pattern). The compound parent setReadable(false) prevents
+    // accidental cycle warnings (input-only).
+    {
+        MFnMessageAttribute mAttr_;
+        driverSource_node = mAttr_.create("driverSource_node", "dsn");
+        mAttr_.setStorable(true);
+        mAttr_.setHidden(true);   // 加固 K.1-4: forward-compat, not user-facing
+    }
+    {
+        MFnTypedAttribute tAttr_;
+        MFnStringArrayData saData_;
+        MObject defaultStrings_ = saData_.create(MStringArray());
+        driverSource_attrs = tAttr_.create("driverSource_attrs", "dsa",
+                                           MFnData::kStringArray, defaultStrings_);
+        tAttr_.setStorable(true);
+    }
+    {
+        MFnNumericAttribute nAttr_;
+        driverSource_weight = nAttr_.create("driverSource_weight", "dsw",
+                                             MFnNumericData::kDouble, 1.0);
+        nAttr_.setStorable(true);
+        nAttr_.setKeyable(true);
+    }
+    {
+        MFnEnumAttribute eAttr_;
+        driverSource_encoding = eAttr_.create("driverSource_encoding", "dse", 0);
+        eAttr_.addField("Raw",        0);
+        eAttr_.addField("Quaternion", 1);
+        eAttr_.addField("BendRoll",   2);
+        eAttr_.addField("ExpMap",     3);
+        eAttr_.addField("SwingTwist", 4);
+        eAttr_.setStorable(true);
+    }
+    driverSource = cAttr.create("driverSource", "drs");
+    cAttr.setStorable(true);
+    cAttr.setArray(true);
+    cAttr.setUsesArrayDataBuilder(true);
+    cAttr.setReadable(false);   // 加固 K.1-5: input-only, prevent cycle warnings
+    cAttr.setWritable(true);
+    cAttr.addChild(driverSource_node);
+    cAttr.addChild(driverSource_attrs);
+    cAttr.addChild(driverSource_weight);
+    cAttr.addChild(driverSource_encoding);
+
     // M2.3: build the poseLocalTransform compound BEFORE nesting it
     // into poses[p], so the child registration order on the `poses`
     // compound is: poseInput, poseValue, poseLocalTransform. The
@@ -799,6 +864,13 @@ MStatus RBFtools::initialize()
     addAttribute(readerMatrix);
     addAttribute(driverMatrix);
     addAttribute(driverList);
+    // M_B24a1: driverSource compound + 4 children. children must be
+    // added BEFORE the compound (Maya schema order constraint).
+    addAttribute(driverSource_node);
+    addAttribute(driverSource_attrs);
+    addAttribute(driverSource_weight);
+    addAttribute(driverSource_encoding);
+    addAttribute(driverSource);
     addAttribute(driverInput);
     addAttribute(pose);
     addAttribute(poseMatrix);
@@ -834,6 +906,7 @@ MStatus RBFtools::initialize()
     addAttribute(regularization);
     addAttribute(solverMethod);
     addAttribute(inputEncoding);
+    addAttribute(outputEncoding);   // M_B24a1
     addAttribute(driverInputRotateOrder);
     addAttribute(outputQuaternionGroupStart);
     addAttribute(poseMode);
@@ -881,6 +954,7 @@ MStatus RBFtools::initialize()
     attributeAffects(RBFtools::regularization, RBFtools::output);
     attributeAffects(RBFtools::solverMethod, RBFtools::output);
     attributeAffects(RBFtools::inputEncoding, RBFtools::output);
+    attributeAffects(RBFtools::outputEncoding, RBFtools::output);   // M_B24a1
     attributeAffects(RBFtools::driverInputRotateOrder, RBFtools::output);
     attributeAffects(RBFtools::outputQuaternionGroupStart, RBFtools::output);
     attributeAffects(RBFtools::radius, RBFtools::output);
@@ -890,6 +964,13 @@ MStatus RBFtools::initialize()
     attributeAffects(RBFtools::distanceType, RBFtools::output);
     attributeAffects(RBFtools::driverIndex, RBFtools::output);
     attributeAffects(RBFtools::driverInput, RBFtools::output);
+    // M_B24a1: driverSource compound 4 children -> output. compound
+    // parent itself is NOT connected; child dirty propagates to
+    // parent (same pattern as driverList: parent not in attrAffects).
+    attributeAffects(RBFtools::driverSource_node,     RBFtools::output);
+    attributeAffects(RBFtools::driverSource_attrs,    RBFtools::output);
+    attributeAffects(RBFtools::driverSource_weight,   RBFtools::output);
+    attributeAffects(RBFtools::driverSource_encoding, RBFtools::output);
     attributeAffects(RBFtools::driverMatrix, RBFtools::output);
     attributeAffects(RBFtools::evaluate, RBFtools::output);
     attributeAffects(RBFtools::grow, RBFtools::output);
@@ -1978,6 +2059,18 @@ MStatus RBFtools::getPoseVectors(MDataBlock &data,
 
         MDataHandle driverInputHandle = driverListIdHandle.child(driverInput);
         MMatrix driverMat = driverInputHandle.asMatrix();
+
+        // M_B24a1: read driverSource[d] companion metadata. Read path
+        // verified + DG dirty kept alive; metadata semantic consumption
+        // deferred to M_B24b business logic.
+        // M_B24a1 placeholder: read path verified, metadata semantic
+        // consumption deferred to M_B24b business logic. DO NOT remove
+        // these reads — they keep DG dirty propagation alive even
+        // before M_B24b lands.
+        double srcWeight = 1.0;
+        short  srcEncoding = 0;
+        readDriverSourceMetadata(data, currentId, srcWeight, srcEncoding);
+        (void)srcWeight; (void)srcEncoding;
 
         MDataHandle poseHandle = driverListIdHandle.child(pose);
         MArrayDataHandle poseArrayHandle(poseHandle, &status);
@@ -3078,6 +3171,30 @@ void RBFtools::decomposeSwingTwist(double qx, double qy, double qz, double qw,
 
 
 //
+// M_B24a1 — read companion metadata for driverList[d]. Defensive:
+// returns default (weight=1.0, encoding=0) when driverSource[d] does
+// not yet exist (legacy v5-pre-M_B24 nodes before Python lazy
+// migration writes driverSource[]). a1 caller does NOT consume the
+// returned values (forward-compat placeholder); read keeps the DG
+// dirty edge alive for setAttr → compute() propagation.
+//
+void RBFtools::readDriverSourceMetadata(MDataBlock &data, unsigned d,
+                                        double &weight, short &encoding)
+{
+    weight = 1.0;
+    encoding = 0;
+    MStatus status;
+    MArrayDataHandle srcHandle = data.inputArrayValue(driverSource, &status);
+    if (!status) return;
+    status = srcHandle.jumpToArrayElement(d);
+    if (!status) return;   // index does not exist — defensive fallback
+    MDataHandle srcIdHandle = srcHandle.inputValue();
+    weight   = srcIdHandle.child(driverSource_weight).asDouble();
+    encoding = srcIdHandle.child(driverSource_encoding).asShort();
+}
+
+
+//
 // M2.1b — BendRoll encoding. Stereographic projection of the swing
 // quaternion to ℝ² in the plane perpendicular to the twist axis, plus
 // the scalar twist. Layout: (roll, bendH, bendV) per group.
@@ -3815,6 +3932,22 @@ void RBFtools::setOutputValues(MDoubleArray weightsArray, MDataBlock data, bool 
     {
         count = poseMatrixIds.length();
         ids = poseMatrixIds;
+    }
+
+    // M_B24a1: read outputEncoding plug. a1 forward-compat — schema +
+    // read path + DG dirty live; actual inverse transform deferred to
+    // M_B24b. The thread_local sink (加固 K.1-2) prevents MSVC O2 dead-
+    // read elimination from removing the read, which would otherwise
+    // let the attributeAffects(outputEncoding, output) edge appear
+    // dead under DG dirty propagation analysis.
+    MPlug outEncPlug(thisNode, RBFtools::outputEncoding);
+    short outEncVal = outEncPlug.asShort();
+    if (outEncVal != 0) {
+        // Forward-compat placeholder — see addendum §M_B24a1.
+        // Touch outEncVal in a way the optimizer cannot elide.
+        static thread_local short s_outEncSink = 0;
+        s_outEncSink = outEncVal;
+        (void)s_outEncSink;
     }
 
     MArrayDataHandle outputHandle = data.outputArrayValue(output);

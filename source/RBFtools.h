@@ -25,6 +25,7 @@
 #include <maya/MFnMatrixAttribute.h>
 #include <maya/MFnMessageAttribute.h>
 #include <maya/MFnTypedAttribute.h>
+#include <maya/MFnStringArrayData.h>   // M_B24a1: driverSource_attrs default value
 #include <maya/MRampAttribute.h>
 
 #include <maya/MArrayDataBuilder.h>
@@ -150,6 +151,11 @@ public:
                                     unsigned twistAxis,
                                     double &sx, double &sy, double &sz,
                                     double &sw, double &twistAngle);
+    // M_B24a1: read companion metadata for driverList[d]. Defensive —
+    // returns default (weight=1.0, encoding=0) if driverSource[d] does
+    // not exist (e.g. legacy v5-pre-M_B24 node not yet migrated).
+    static void readDriverSourceMetadata(MDataBlock &data, unsigned d,
+                                         double &weight, short &encoding);
     // M2.1b: Euler → BendRoll 3-tuple (roll, bendH, bendV).
     // See v5 PART G.3 (swing-twist) + G.4 (stereographic). bend_H/V
     // use a denominator clamp max(1+s_w, ε) with ε = 1e-4 (addendum
@@ -339,6 +345,21 @@ public:
     static MObject poseSwingWeight;      // double,  default 1.0
     static MObject poseTwistWeight;      // double,  default 1.0
     static MObject poseSigma;            // double,  default -1.0 (sentinel)
+    // M_B24a1: per-driver companion metadata for driverList[d].
+    // driverSource[i] is bound by index to driverList[i]. compute()
+    // reads metadata (weight, encoding) inside the existing
+    // driverList for-loop without rewriting that iteration logic
+    // (B.1: coexist, do not replace).
+    // a1 forward-compat: schema + read path + DG dirty validation;
+    // actual semantic consumption (weight scaling / encoding inverse
+    // transform) is deferred to M_B24b business logic.
+    static MObject driverSource;            // compound, multi
+    static MObject driverSource_node;       // MMessage - target node ref
+    static MObject driverSource_attrs;      // MString,multi - attr names
+    static MObject driverSource_weight;     // double, default 1.0
+    static MObject driverSource_encoding;   // enum, default 0=Raw
+    // M_B24a1: node-level outputEncoding (Euler/Quaternion/ExpMap)
+    static MObject outputEncoding;          // enum, default 0=Euler
     static MObject rbfMode;
     static MObject restInput;
     static MObject scale;
