@@ -418,6 +418,26 @@ _EN = {
     "msg_no_attrs_selected":
         "Please select at least one attribute in the list before "
         "clicking Connect.",
+    # -- M_TABBED_ADD_GUARD (2026-04-27): Add Driver/Driven dedup
+    #    pre-flight checks. --
+    "title_driver_already_added":      "Driver Already Added",
+    "msg_driver_all_already_added":
+        "Every selected transform is already registered as a "
+        "driver source on this RBF node:\n  {nodes}\n\n"
+        "Nothing to add.",
+    "msg_driver_some_already_added":
+        "Some selected transforms are already driver sources on "
+        "this RBF node and were skipped:\n  {skipped}\n\n"
+        "Adding the remaining new sources:\n  {added}",
+    "title_driven_already_added":      "Driven Target Already Added",
+    "msg_driven_all_already_added":
+        "Every selected transform is already registered as a "
+        "driven target on this RBF node:\n  {nodes}\n\n"
+        "Nothing to add.",
+    "msg_driven_some_already_added":
+        "Some selected transforms are already driven targets on "
+        "this RBF node and were skipped:\n  {skipped}\n\n"
+        "Adding the remaining new targets:\n  {added}",
 }
 
 _ZH = {
@@ -777,6 +797,21 @@ _ZH = {
     "title_no_attrs_selected":         u"\u672a\u9009\u62e9\u5c5e\u6027",
     "msg_no_attrs_selected":
         u"\u8bf7\u5148\u5728\u5c5e\u6027\u5217\u8868\u4e2d\u81f3\u5c11\u9009\u62e9\u4e00\u9879\u518d\u70b9\u51fb\"\u8fde\u63a5\"\u3002",
+    # M_TABBED_ADD_GUARD \u91cd\u590d\u6dfb\u52a0\u68c0\u67e5
+    "title_driver_already_added":      u"\u9a71\u52a8\u6e90\u5df2\u5b58\u5728",
+    "msg_driver_all_already_added":
+        u"\u4ee5\u4e0b\u9009\u4e2d\u7684 transform \u5df2\u6ce8\u518c\u4e3a\u8be5 RBF \u8282\u70b9\u7684\u9a71\u52a8\u6e90\uff1a\n"
+        u"  {nodes}\n\n\u65e0\u53ef\u6dfb\u52a0\u9879\u3002",
+    "msg_driver_some_already_added":
+        u"\u4ee5\u4e0b\u9009\u4e2d\u7684 transform \u5df2\u662f\u8be5 RBF \u8282\u70b9\u7684\u9a71\u52a8\u6e90\uff0c\u5df2\u8df3\u8fc7\uff1a\n"
+        u"  {skipped}\n\n\u7ee7\u7eed\u6dfb\u52a0\u5176\u4f59\u65b0\u6e90\uff1a\n  {added}",
+    "title_driven_already_added":      u"\u88ab\u9a71\u52a8\u76ee\u6807\u5df2\u5b58\u5728",
+    "msg_driven_all_already_added":
+        u"\u4ee5\u4e0b\u9009\u4e2d\u7684 transform \u5df2\u6ce8\u518c\u4e3a\u8be5 RBF \u8282\u70b9\u7684\u88ab\u9a71\u52a8\u76ee\u6807\uff1a\n"
+        u"  {nodes}\n\n\u65e0\u53ef\u6dfb\u52a0\u9879\u3002",
+    "msg_driven_some_already_added":
+        u"\u4ee5\u4e0b\u9009\u4e2d\u7684 transform \u5df2\u662f\u8be5 RBF \u8282\u70b9\u7684\u88ab\u9a71\u52a8\u76ee\u6807\uff0c\u5df2\u8df3\u8fc7\uff1a\n"
+        u"  {skipped}\n\n\u7ee7\u7eed\u6dfb\u52a0\u5176\u4f59\u65b0\u76ee\u6807\uff1a\n  {added}",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

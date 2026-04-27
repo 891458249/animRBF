@@ -1097,13 +1097,22 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
     # =================================================================
 
     def _on_driver_source_add_requested(self):
-        """M_UIRECONCILE (decision A.2 + Hardening 3): batch-add
-        every transform in the current Maya selection as a
-        driverSource entry on the active node. Driver attrs are
-        left empty - the TD configures them per-row via the
-        widget once the row is materialised by the post-mutation
-        reload. The current RBFtools shape is filtered out so a
-        node never wires itself as its own driver."""
+        """M_UIRECONCILE (decision A.2 + Hardening 3) +
+        M_TABBED_ADD_GUARD (2026-04-27): batch-add every transform
+        in the current Maya selection as a driverSource entry on
+        the active node, **dedup-filtered against existing
+        driverSource[]**. The current RBFtools shape is filtered
+        out so a node never wires itself as its own driver. Driver
+        attrs are left empty - the TD configures them per-tab via
+        Connect once the tab is materialised by the post-mutation
+        reload.
+
+        Pre-flight check (M_TABBED_ADD_GUARD): selected transforms
+        that are already in the active node's driverSource[] are
+        skipped + surfaced in a notice dialog. If every selected
+        transform is already a source, the operation short-
+        circuits with the all-duplicate notice.
+        """
         sel = cmds.ls(selection=True, type="transform") or []
         if not sel:
             cmds.warning(tr("warning_driver_source_no_selection"))
@@ -1121,12 +1130,13 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         if not sel_filtered:
             cmds.warning(tr("warning_driver_source_self_excluded"))
             return
-        for node in sel_filtered:
+        new_nodes = self._guard_add_dedup(
+            "driver", sel_filtered)
+        if not new_nodes:
+            return
+        for node in new_nodes:
             self._ctrl.add_driver_source(
                 node, [], weight=1.0, encoding=0)
-        # The controller emits driverSourcesChanged inside each
-        # add_driver_source call - the reload slot fires
-        # automatically; no explicit call needed here.
 
     def _on_driver_source_remove_requested(self, index):
         """M_UIRECONCILE: forward the row index to controller's
@@ -1138,10 +1148,11 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
     # =================================================================
 
     def _on_driven_source_add_requested(self):
-        """M_DRIVEN_MULTI: batch-add every transform in the current
-        Maya selection as a drivenSource entry on the active node.
-        Driven attrs left empty - the TD picks them per-row via the
-        Attrs... button."""
+        """M_DRIVEN_MULTI + M_TABBED_ADD_GUARD: batch-add every
+        transform in the current Maya selection as a drivenSource
+        entry, dedup-filtered against existing drivenSource[].
+        Driven attrs left empty - the TD picks them per-tab via
+        Connect."""
         sel = cmds.ls(selection=True, type="transform") or []
         if not sel:
             cmds.warning(tr("warning_driven_source_no_selection"))
@@ -1159,8 +1170,55 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         if not sel_filtered:
             cmds.warning(tr("warning_driver_source_self_excluded"))
             return
-        for node in sel_filtered:
+        new_nodes = self._guard_add_dedup(
+            "driven", sel_filtered)
+        if not new_nodes:
+            return
+        for node in new_nodes:
             self._ctrl.add_driven_source(node, [])
+
+    def _guard_add_dedup(self, role, candidates):
+        """M_TABBED_ADD_GUARD shared helper. Returns the subset of
+        *candidates* that are NOT already in the active node's
+        {driver,driven}Source[] list. If ALL candidates are already
+        sources, surfaces an all-duplicate notice and returns []
+        (caller short-circuits). If only some are duplicates,
+        surfaces a some-skipped notice and returns the new ones.
+        If none are duplicates, returns the candidates unchanged
+        (no dialog)."""
+        try:
+            existing = (self._ctrl.read_driver_sources()
+                        if role == "driver"
+                        else self._ctrl.read_driven_sources())
+        except Exception:
+            existing = []
+        existing_nodes = {s.node for s in existing}
+        already = [n for n in candidates if n in existing_nodes]
+        new_nodes = [n for n in candidates if n not in existing_nodes]
+        if not already:
+            return new_nodes
+        title_key = ("title_driver_already_added"
+                     if role == "driver"
+                     else "title_driven_already_added")
+        if not new_nodes:
+            msg_key = ("msg_driver_all_already_added"
+                       if role == "driver"
+                       else "msg_driven_all_already_added")
+            QtWidgets.QMessageBox.information(
+                self,
+                tr(title_key),
+                tr(msg_key).format(nodes=", ".join(already)))
+            return []
+        msg_key = ("msg_driver_some_already_added"
+                   if role == "driver"
+                   else "msg_driven_some_already_added")
+        QtWidgets.QMessageBox.information(
+            self,
+            tr(title_key),
+            tr(msg_key).format(
+                skipped=", ".join(already),
+                added=", ".join(new_nodes)))
+        return new_nodes
 
     def _on_driven_source_remove_requested(self, index):
         self._ctrl.remove_driven_source(int(index))

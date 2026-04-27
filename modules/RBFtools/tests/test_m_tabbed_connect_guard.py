@@ -195,5 +195,117 @@ class TestM_TABBED_CONNECT_GUARD_Lifecycle(unittest.TestCase):
         win._ctrl.set_driven_source_attrs.assert_not_called()
 
 
+# ----------------------------------------------------------------------
+# M_TABBED_ADD_GUARD - Add Driver/Driven dedup pre-flight check
+# ----------------------------------------------------------------------
+
+
+class TestM_TABBED_ADD_GUARD_SourceScan(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls._main = _read(_MAIN_WINDOW)
+
+    def test_helper_present(self):
+        self.assertIn("def _guard_add_dedup", self._main)
+
+    def test_add_slots_call_dedup_guard(self):
+        for slot in ("def _on_driver_source_add_requested",
+                     "def _on_driven_source_add_requested"):
+            self.assertIn(slot, self._main)
+        # Both add slots must call the dedup guard.
+        self.assertGreaterEqual(
+            self._main.count("self._guard_add_dedup("), 2,
+            "both driver + driven add slots must call "
+            "_guard_add_dedup")
+
+    def test_i18n_keys_present(self):
+        from RBFtools.ui import i18n
+        for k in ("title_driver_already_added",
+                  "msg_driver_all_already_added",
+                  "msg_driver_some_already_added",
+                  "title_driven_already_added",
+                  "msg_driven_all_already_added",
+                  "msg_driven_some_already_added"):
+            self.assertIn(k, i18n._EN, "missing EN key {}".format(k))
+            self.assertIn(k, i18n._ZH, "missing ZH key {}".format(k))
+
+
+@unittest.skipIf(conftest._REAL_MAYA,
+    "mock-dependent (mock.patch on QtWidgets.QMessageBox)")
+class TestM_TABBED_ADD_GUARD_Lifecycle(unittest.TestCase):
+
+    def _make_window(self, driver_sources=None, driven_sources=None):
+        from RBFtools.ui.main_window import RBFToolsWindow
+        win = RBFToolsWindow.__new__(RBFToolsWindow)
+        win._ctrl = mock.MagicMock()
+        win._ctrl.read_driver_sources.return_value = (
+            driver_sources or [])
+        win._ctrl.read_driven_sources.return_value = (
+            driven_sources or [])
+        return win
+
+    def _drv(self, node):
+        from RBFtools.core import DriverSource
+        return DriverSource(node=node, attrs=tuple(),
+                            weight=1.0, encoding=0)
+
+    def _dvn(self, node):
+        from RBFtools.core import DrivenSource
+        return DrivenSource(node=node, attrs=tuple())
+
+    # ----- Driver -----------------------------------------------
+
+    def test_driver_dedup_returns_all_when_no_overlap(self):
+        from RBFtools.ui.main_window import RBFToolsWindow
+        win = self._make_window(
+            driver_sources=[self._drv("alreadyA")])
+        with mock.patch(
+                "RBFtools.ui.main_window.QtWidgets.QMessageBox"
+        ) as mb:
+            new_nodes = RBFToolsWindow._guard_add_dedup(
+                win, "driver", ["newA", "newB"])
+        self.assertEqual(new_nodes, ["newA", "newB"])
+        mb.information.assert_not_called()
+
+    def test_driver_dedup_skips_duplicates_and_notifies(self):
+        from RBFtools.ui.main_window import RBFToolsWindow
+        win = self._make_window(
+            driver_sources=[self._drv("dupA"), self._drv("dupB")])
+        with mock.patch(
+                "RBFtools.ui.main_window.QtWidgets.QMessageBox"
+        ) as mb:
+            new_nodes = RBFToolsWindow._guard_add_dedup(
+                win, "driver", ["dupA", "newA", "dupB", "newB"])
+        self.assertEqual(new_nodes, ["newA", "newB"])
+        mb.information.assert_called_once()
+
+    def test_driver_dedup_blocks_when_all_duplicates(self):
+        from RBFtools.ui.main_window import RBFToolsWindow
+        win = self._make_window(
+            driver_sources=[self._drv("a"), self._drv("b")])
+        with mock.patch(
+                "RBFtools.ui.main_window.QtWidgets.QMessageBox"
+        ) as mb:
+            new_nodes = RBFToolsWindow._guard_add_dedup(
+                win, "driver", ["a", "b"])
+        self.assertEqual(new_nodes, [])
+        mb.information.assert_called_once()
+
+    # ----- Driven (mirrors) -------------------------------------
+
+    def test_driven_dedup_blocks_when_all_duplicates(self):
+        from RBFtools.ui.main_window import RBFToolsWindow
+        win = self._make_window(
+            driven_sources=[self._dvn("dvnA")])
+        with mock.patch(
+                "RBFtools.ui.main_window.QtWidgets.QMessageBox"
+        ) as mb:
+            new_nodes = RBFToolsWindow._guard_add_dedup(
+                win, "driven", ["dvnA"])
+        self.assertEqual(new_nodes, [])
+        mb.information.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
