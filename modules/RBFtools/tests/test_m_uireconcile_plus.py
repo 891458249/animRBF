@@ -80,23 +80,34 @@ class TestM_UIRECONCILE_PLUS_SourceScan(unittest.TestCase):
         self.assertIn("def _forward_attrs_request", self._editor)
 
     def test_main_window_picker_dialog_present(self):
+        # The legacy _DriverAttrPickerDialog class remains in
+        # main_window for backcompat (M_UIRECONCILE_PLUS dialog
+        # surface); M_TABBED_EDITOR (2026-04-27) replaces the
+        # invocation site with the tabbed editor's per-tab Connect
+        # button + a slot pair (_attrs_apply / _attrs_clear). The
+        # test now accepts either the legacy
+        # _on_driver_source_attrs_requested slot OR the new
+        # tabbed _on_driver_source_attrs_apply slot.
         self.assertIn(
             "class _DriverAttrPickerDialog", self._main,
             "main_window must define the modal picker dialog "
-            "(Item 4b)")
-        self.assertIn(
-            "_on_driver_source_attrs_requested", self._main,
-            "main_window must wire the editor signal to a slot "
-            "(Item 4b)")
+            "(Item 4b backcompat - kept for the M_UIRECONCILE_PLUS "
+            "API surface)")
+        legacy_slot = "_on_driver_source_attrs_requested" in self._main
+        tabbed_slot = "_on_driver_source_attrs_apply" in self._main
+        self.assertTrue(legacy_slot or tabbed_slot,
+            "main_window must wire either the legacy "
+            "_on_driver_source_attrs_requested slot or the "
+            "M_TABBED_EDITOR _on_driver_source_attrs_apply slot")
         self.assertIn(
             "set_driver_source_attrs", self._main,
             "main_window slot must call "
             "controller.set_driver_source_attrs (Item 4b)")
         self.assertIn(
             "cmds.listAttr(", self._main,
-            "main_window slot must use cmds.listAttr to seed the "
-            "picker dialog (MVC red line - widget cannot import "
-            "cmds)")
+            "main_window must use cmds.listAttr somewhere - either "
+            "to seed the picker dialog (M_UIRECONCILE_PLUS) or to "
+            "pre-resolve per-tab available attrs (M_TABBED_EDITOR)")
 
 
 # ----------------------------------------------------------------------

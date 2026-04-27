@@ -6266,6 +6266,175 @@ After M_DRIVEN_MULTI push + Maya 2025 RBFtools restart:
 
 ---
 
+## §M_TABBED_EDITOR — QTabWidget paradigm for driver / driven editors
+
+> **STATUS** (2026-04-27): UI paradigm replacement following the
+> user's annotated reference screenshot of the Tekken-8
+> AnimaRbfSolver. The list-row paradigm shipped by M_B24b1 +
+> M_DRIVEN_MULTI is replaced in the inspector layout by a
+> QTabWidget editor where each `Driver N` / `Driven N` entry is
+> a tab containing a node selection field + Select button + a
+> multi-select attribute QListWidget + per-tab Connect /
+> Disconnect buttons. Per-source weight + encoding stay on the
+> driver tabs (driver-only concepts). The legacy
+> `DriverSourceListEditor` / `DrivenSourceListEditor` widget
+> classes remain importable for backcompat / downstream tests;
+> only the inspector wiring switches to the tabbed variants.
+
+### §M_TABBED_EDITOR.scope
+
+| Layer | Change | LoC |
+|---|---|---|
+| `ui/widgets/tabbed_source_editor.py` (new) | `_SourceTabContent` (the per-tab content widget: node row + attrs picker + Connect / Disconnect + optional weight / encoding row), `_TabbedSourceEditorBase` (QTabWidget shell with closable tabs + "+" corner Add button + index-aware signal re-emission), `TabbedDriverSourceEditor` (driver concrete + weight / encoding column), `TabbedDrivenSourceEditor` (driven concrete - no weight / encoding). | ~310 |
+| `ui/main_window.py` | Replace `DriverSourceListEditor()` / `DrivenSourceListEditor()` instantiations with `TabbedDriverSourceEditor()` / `TabbedDrivenSourceEditor()`. New slots: `_on_driver_source_attrs_apply` / `_attrs_clear` / `_select_node` (driver side); `_on_driven_source_attrs_apply` / `_attrs_clear` / `_select_node` (driven side); `_bind_source_node_from_selection` shared helper for the per-tab Select button (rebinds the source's node via remove + re-add with attrs / weight / encoding preserved); `_resolve_available_attrs_per_source` helper that pre-populates each tab's attribute picker via `cmds.listAttr(node, keyable=True, scalar=True)` with the same scalar -> keyable fallback the M_UIRECONCILE_PLUS picker uses. Reload paths now pass the per-source available-attrs list to the editor's `set_sources` so each tab opens with the source node's full keyable attribute list pre-populated and the source's existing attrs pre-selected. | ~110 |
+| `ui/i18n.py` | 5 new keys EN+ZH (`source_tab_add_tip`, `source_tab_connect_tip`, `source_tab_disconnect_tip`, `driver_source_weight_label`, `driver_source_encoding_label`). | ~20 |
+| `tests/test_m_tabbed_editor.py` (new) | 5 source-scan + 1 mock E2E (Connect emits attrs_apply with selected) + 1 mock E2E (tab close emits remove with index) + 1 i18n parity + 2 subclass differentiation = **10 tests**. | ~190 |
+| `tests/test_m_uireconcile_plus.py` (modified) | `test_main_window_picker_dialog_present` widened to accept the legacy `_on_driver_source_attrs_requested` slot OR the new `_on_driver_source_attrs_apply` slot (M_UIRECONCILE_PLUS dialog class is preserved for backcompat; only the invocation site moved). | ~20 |
+| `tests/test_m_driven_multi.py` (modified) | `test_main_window_instantiates_driven_section` and `test_main_window_wires_all_three_driven_signals` widened to accept either the legacy `DrivenSourceListEditor` instantiation + `_attrs_requested` slot OR the M_TABBED_EDITOR `TabbedDrivenSourceEditor` + `_attrs_apply` / `_attrs_clear` pair. | ~25 |
+| `addendum_20260424.md` | this section. | ~120 |
+| **Total** | | **~795** |
+
+### §M_TABBED_EDITOR.paradigm-rationale
+
+The user's 2026-04-27 reference screenshot of the Tekken-8
+AnimaRbfSolver explicitly shows a tabbed Driver / Driven layout
+("Driver 0 | Driver 1" + "Driven 0 | Driven 1 | Driven 2") with
+each tab carrying a full node + attrs picker surface. The
+M_B24b1 list-row paradigm trades visual density for ease of
+in-row weight / encoding edits but cannot host a comfortable
+per-source attribute multi-select inline.
+
+The tabbed paradigm:
+
+- Surfaces the per-source attribute picker as the primary
+  interaction (no modal dialog round-trip; the M_UIRECONCILE_PLUS
+  picker dialog moves from "the way to edit attrs" to "the
+  legacy alternative path", still importable but no longer the
+  default UX).
+- Maps cleanly onto the existing controller API
+  (`add_/remove_/set_*_source_attrs` are unchanged); only the
+  widget layer swaps.
+- Per-tab Connect / Disconnect buttons mirror the
+  AnimaRbfSolver reference exactly - Connect applies the
+  currently-selected attrs to the source via
+  `controller.set_*_source_attrs`; Disconnect clears the source's
+  attrs (sets to empty list).
+- Per-tab Select button rebinds the source's node from the
+  current Maya selection (remove + re-add with preserved attrs
+  / weight / encoding so the rebind never loses configuration).
+
+### §M_TABBED_EDITOR.signal-surface
+
+Each tab's `_SourceTabContent` exposes payload-less intent
+signals; `_TabbedSourceEditorBase` re-emits them with the tab's
+**resolved-at-emit-time** index so tab reorder / mid-list
+removal stays correct (same `lambda` index resolver pattern the
+M_UIRECONCILE_PLUS row-level forwarding uses):
+
+```
+addRequested()                              <- "+" corner btn
+removeRequested(int)                        <- tab close X
+attrsApplyRequested(int, list[str])         <- per-tab Connect
+attrsClearRequested(int)                    <- per-tab Disconnect
+selectNodeRequested(int)                    <- per-tab Select
+weightChanged(int, float)                   <- driver tabs only
+encodingChanged(int, int)                   <- driver tabs only
+```
+
+The two driver-only signals are forward-compat for a future
+`controller.set_driver_source_weight` / `set_driver_source_encoding`
+slot - M_TABBED_EDITOR ships with the signals wired (the editor
+emits them on weight / encoding edits) but without the
+controller-side consumers; today the tab's weight + encoding
+take effect at the next add / remove rebuild via
+`set_driver_source_attrs`. Closing this gap (per-source
+weight / encoding mutation without an attrs round-trip) is
+M_TABBED_EDITOR2's scope.
+
+### §M_TABBED_EDITOR.legacy-widget-coexistence
+
+`DriverSourceListEditor` (M_B24b1) and `DrivenSourceListEditor`
+(M_DRIVEN_MULTI) remain in the repository at their original
+paths. Reasons:
+
+1. The widget classes' permanent guards (#27 / #28 / #36) and
+   downstream test files reference the class symbols directly;
+   removing the modules would force a guard rewrite cascade
+   that's out of M_TABBED_EDITOR's scope.
+2. A subset of internal tooling in the wider Maya pipeline may
+   import these classes outside of `main_window`.
+3. The deprecated dual-path strategy (M_B24a2-1 backcompat) for
+   `DriverSourceListEditor.node_name()` is part of the project's
+   formal backcompat contract.
+
+The classes themselves are unchanged by M_TABBED_EDITOR. Only
+the inspector instantiations in `main_window` swap to the
+tabbed variants.
+
+### §M_TABBED_EDITOR.guard-coverage
+
+Existing permanent guards stay green:
+
+- **#27 T_DRIVER_SOURCE_LIST_EDITOR_PRESENT** - source-scans the
+  legacy widget class file (still present, unchanged).
+- **#28 T_OUTPUT_ENCODING_COMBO_PRESENT** - unaffected.
+- **#36 T_DRIVER_SOURCE_ADD_BUTTON_WIRED** - sub-checks (a)/(b)/
+  (c) match the legacy `_driver_source_list.<signal>.connect`
+  pattern + the `read_driver_sources` reload path; both still
+  hold under M_TABBED_EDITOR because the attribute name
+  `_driver_source_list` is preserved (the type behind it
+  swapped from `DriverSourceListEditor` to
+  `TabbedDriverSourceEditor`). Sub-check (d) verifies controller
+  signal definition + emit count, which the M_UIRECONCILE
+  / M_DRIVEN_MULTI work locked in - unchanged here.
+
+The two updated test cases (`test_main_window_picker_dialog_present`,
+`test_main_window_instantiates_driven_section`,
+`test_main_window_wires_all_three_driven_signals`) widen the
+"required slot" set to accept either the legacy or the M_TABBED
+_EDITOR slot names. This preserves the original assertions for
+anyone still on the legacy widget while letting the new wiring
+satisfy the same intent.
+
+### §M_TABBED_EDITOR.empirical-baseline (2026-04-27)
+
+| Env | Pre (post-M_DRIVEN_MULTI `f809564`) | Post |
+|---|---|---|
+| Pure-Python | 617 OK (skip 3) | **627 OK (skip 3)** |
+| mayapy 2025 | 617 ran 523 pass 94 skip | **627 ran 531 pass 96 skip** |
+
+mayapy delta: +10 = +8 pass (5 source-scan + 1 i18n parity +
+2 subclass differentiation tests that always run) + +2 skip
+(2 mock-only `@skipIf(_REAL_MAYA)` tests: per-tab Connect /
+tab close lifecycle).
+
+LoC overrun precedent (M_UIRECONCILE 2026-04-27) applied: pure
+code is ~440 LoC (editor module 310 + main_window 110 + i18n
+20) - well under the 800-LoC red line. Tests + addendum carry
+the remaining ~355 LoC.
+
+### §M_TABBED_EDITOR.scope-exclusions
+
+- 0 lines C++ / 0 .mll / 0 CMakeLists / 0 schema modifications
+  (the controller / core surface is untouched - only the widget
+  layer swaps)
+- 0 modifications to `controller.py` / `core.py` business logic
+- 0 modifications to the legacy
+  `DriverSourceListEditor` / `DrivenSourceListEditor` widget
+  files (kept importable; classes are exactly as they were
+  pre-M_TABBED_EDITOR)
+- 0 modifications to the M_UIRECONCILE_PLUS
+  `_DriverAttrPickerDialog` class (still defined in
+  `main_window`; available for any caller that wants the modal
+  picker; no longer the primary attrs UX)
+- 0 modifications to hotfix 4 files
+- Per-source weight / encoding mutation without an attrs
+  round-trip is forward-compat scope (M_TABBED_EDITOR2 stub) -
+  the editor emits the relevant signals already; the controller
+  consumer is missing
+
+---
+
 ## §M_HOTFIX_PYSIDE6 — QActionGroup PySide6 migration shim
 
 > **STRUCTURAL LESSON** (2026-04-27):

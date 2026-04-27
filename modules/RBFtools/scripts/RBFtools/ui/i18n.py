@@ -377,6 +377,22 @@ _EN = {
     "warning_driven_source_no_node_for_attrs":
         "Driven Targets: this target has no node assigned yet; "
         "remove it and add a fresh one from a scene selection.",
+    # -- M_TABBED_EDITOR (2026-04-27): tabbed Driver/Driven editor
+    #    UX matching the Tekken-8 AnimaRbfSolver paradigm. Replaces
+    #    the M_B24b1 / M_DRIVEN_MULTI list-row editors. --
+    "source_tab_add_tip":
+        "Add a new tab from the current Maya selection (transform "
+        "nodes only).",
+    "source_tab_connect_tip":
+        "Apply the selected attributes to this source. The plugin "
+        "re-wires input[]/output[] indices across all sources to "
+        "stay contiguous.",
+    "source_tab_disconnect_tip":
+        "Clear this source's attribute list. The plugin removes the "
+        "source's wiring from input[]/output[] and shifts later "
+        "sources up.",
+    "driver_source_weight_label":      "Weight:",
+    "driver_source_encoding_label":    "Encoding:",
 }
 
 _ZH = {
@@ -709,6 +725,17 @@ _ZH = {
     "warning_driven_source_no_node_for_attrs":
         u"\u88ab\u9a71\u52a8\u76ee\u6807: \u8be5\u76ee\u6807\u5c1a\u672a\u6307\u5b9a\u8282\u70b9\uff1b\u8bf7\u5148\u79fb\u9664\u5b83\uff0c"
         u"\u7136\u540e\u5728\u573a\u666f\u4e2d\u9009\u62e9\u8282\u70b9\u91cd\u65b0\u6dfb\u52a0\u3002",
+    # M_TABBED_EDITOR \u5b50\u5206\u9875\u8303\u5f0f
+    "source_tab_add_tip":
+        u"\u4ece\u5f53\u524d Maya \u9009\u62e9\u65b0\u5efa\u6807\u7b7e\uff08\u4ec5 transform \u8282\u70b9\uff09\u3002",
+    "source_tab_connect_tip":
+        u"\u5c06\u5f53\u524d\u9009\u4e2d\u7684\u5c5e\u6027\u5e94\u7528\u5230\u8be5\u6e90\u3002"
+        u"\u63d2\u4ef6\u4f1a\u8de8\u6240\u6709\u6e90\u91cd\u6392 input[]/output[] \u7d22\u5f15\u4fdd\u6301\u8fde\u7eed\u3002",
+    "source_tab_disconnect_tip":
+        u"\u6e05\u7a7a\u8be5\u6e90\u7684\u5c5e\u6027\u5217\u8868\u3002"
+        u"\u63d2\u4ef6\u4f1a\u4ece input[]/output[] \u4e2d\u79fb\u9664\u8be5\u6e90\u7684\u8fde\u63a5\u5e76\u4e0a\u79fb\u540e\u7eed\u6e90\u3002",
+    "driver_source_weight_label":      u"\u6743\u91cd\uff1a",
+    "driver_source_encoding_label":    u"\u7f16\u7801\uff1a",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

@@ -48,6 +48,14 @@ from RBFtools.ui.widgets.node_selector import NodeSelector
 from RBFtools.ui.widgets.driver_source_list_editor import (
     DriverSourceListEditor,
 )
+# M_TABBED_EDITOR (2026-04-27): tabbed Driver/Driven editor matching
+# the Tekken-8 AnimaRbfSolver paradigm. Replaces the M_B24b1 /
+# M_DRIVEN_MULTI list-row editors in the inspector layout (the legacy
+# widget classes remain importable for backcompat / tests).
+from RBFtools.ui.widgets.tabbed_source_editor import (
+    TabbedDriverSourceEditor,
+    TabbedDrivenSourceEditor,
+)
 from RBFtools.ui.widgets.general_section import GeneralSection
 from RBFtools.ui.widgets.output_encoding_combo import OutputEncodingCombo
 from RBFtools.ui.widgets.vector_angle_section import VectorAngleSection
@@ -463,7 +471,12 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # qualifier in the i18n dictionary.
         self._driver_sources_section = CollapsibleFrame(
             tr("section_driver_sources"), collapsed=False)
-        self._driver_source_list = DriverSourceListEditor()
+        # M_TABBED_EDITOR (2026-04-27): switch to the QTabWidget
+        # paradigm. The legacy DriverSourceListEditor / DrivenSource
+        # ListEditor remain available as importable widget classes
+        # so existing tests + downstream consumers stay green; only
+        # the inspector layout swaps to the tabbed variants here.
+        self._driver_source_list = TabbedDriverSourceEditor()
         self._output_encoding_combo = OutputEncodingCombo()
         self._driver_sources_section.add_widget(self._driver_source_list)
         _oe_row = QtWidgets.QHBoxLayout()
@@ -475,11 +488,9 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # the pose editor. The legacy pose_editor.driver_list /
         # driven_list AttributeList widgets stay in place per red
         # line 14 backcompat parity for the single-source workflow.
-        from RBFtools.ui.widgets.driven_source_list_editor import (
-            DrivenSourceListEditor)
         self._driven_sources_section = CollapsibleFrame(
             tr("section_driven_sources"), collapsed=False)
-        self._driven_source_list = DrivenSourceListEditor()
+        self._driven_source_list = TabbedDrivenSourceEditor()
         self._driven_sources_section.add_widget(self._driven_source_list)
         self._pose_editor = _PoseEditorPanel()
 
@@ -921,25 +932,36 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # delegates to controller.add_driver_source /
         # remove_driver_source, then reloads via the controller's
         # driverSourcesChanged signal (decision F.1, MVC clean).
+        # ---- M_TABBED_EDITOR: Driver tabbed editor wiring ----------
+        # Each tab carries its own signal surface; the editor re-emits
+        # with the tab's resolved index so reorder operations stay
+        # correct.
         self._driver_source_list.addRequested.connect(
             self._on_driver_source_add_requested)
         self._driver_source_list.removeRequested.connect(
             self._on_driver_source_remove_requested)
-        # M_UIRECONCILE_PLUS Item 4b: per-row Attrs... picker.
-        self._driver_source_list.attrsRequested.connect(
-            self._on_driver_source_attrs_requested)
+        self._driver_source_list.attrsApplyRequested.connect(
+            self._on_driver_source_attrs_apply)
+        self._driver_source_list.attrsClearRequested.connect(
+            self._on_driver_source_attrs_clear)
+        self._driver_source_list.selectNodeRequested.connect(
+            self._on_driver_source_select_node)
         ctrl.driverSourcesChanged.connect(self._reload_driver_sources)
         ctrl.editorLoaded.connect(self._reload_driver_sources)
         ctrl.nodesRefreshed.connect(
             lambda _names: self._reload_driver_sources())
 
-        # ---- M_DRIVEN_MULTI: DrivenSourceListEditor wiring ---------
+        # ---- M_TABBED_EDITOR: Driven tabbed editor wiring ----------
         self._driven_source_list.addRequested.connect(
             self._on_driven_source_add_requested)
         self._driven_source_list.removeRequested.connect(
             self._on_driven_source_remove_requested)
-        self._driven_source_list.attrsRequested.connect(
-            self._on_driven_source_attrs_requested)
+        self._driven_source_list.attrsApplyRequested.connect(
+            self._on_driven_source_attrs_apply)
+        self._driven_source_list.attrsClearRequested.connect(
+            self._on_driven_source_attrs_clear)
+        self._driven_source_list.selectNodeRequested.connect(
+            self._on_driven_source_select_node)
         ctrl.drivenSourcesChanged.connect(self._reload_driven_sources)
         ctrl.editorLoaded.connect(self._reload_driven_sources)
         ctrl.nodesRefreshed.connect(
@@ -1113,86 +1135,143 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
     def _on_driven_source_remove_requested(self, index):
         self._ctrl.remove_driven_source(int(index))
 
-    def _on_driven_source_attrs_requested(self, index, node, current_attrs):
-        """Open the attribute picker for a driven row + forward
-        the result to controller.set_driven_source_attrs."""
-        if not node:
-            cmds.warning(
-                tr("warning_driven_source_no_node_for_attrs"))
-            return
-        try:
-            available = cmds.listAttr(
-                node, keyable=True, scalar=True) or []
-        except Exception:
-            available = []
-        if not available:
-            try:
-                available = cmds.listAttr(node, keyable=True) or []
-            except Exception:
-                available = []
-        # Reuse the driver-side picker dialog with a driven-titled
-        # variant by overriding the title/summary at runtime.
-        chosen = _DriverAttrPickerDialog.pick(
-            self, node, available, list(current_attrs))
-        if chosen is None:
-            return
-        self._ctrl.set_driven_source_attrs(int(index), list(chosen))
+    def _on_driven_source_attrs_apply(self, index, attrs):
+        """M_TABBED_EDITOR: Connect button on a driven tab."""
+        self._ctrl.set_driven_source_attrs(int(index), list(attrs))
+
+    def _on_driven_source_attrs_clear(self, index):
+        """M_TABBED_EDITOR: Disconnect button on a driven tab."""
+        self._ctrl.set_driven_source_attrs(int(index), [])
+
+    def _on_driven_source_select_node(self, index):
+        """M_TABBED_EDITOR: Select button on a driven tab. Rebinds
+        the source's node to the first transform in the current
+        Maya selection."""
+        self._bind_source_node_from_selection("driven", int(index))
 
     def _reload_driven_sources(self):
-        """M_DRIVEN_MULTI: reload DrivenSourceListEditor from the
-        controller's current driven_sources state."""
+        """M_DRIVEN_MULTI / M_TABBED_EDITOR: reload the tabbed driven
+        editor from the controller's current driven_sources state +
+        pre-resolve each source's available attrs via cmds.listAttr."""
         try:
             sources = list(self._ctrl.read_driven_sources())
         except Exception:
             sources = []
+        available_per_source = self._resolve_available_attrs_per_source(
+            sources)
         try:
-            self._driven_source_list.set_sources(sources)
+            self._driven_source_list.set_sources(
+                sources, available_attrs_per_source=available_per_source)
         except AttributeError:
             pass
 
-    def _on_driver_source_attrs_requested(self, index, node, current_attrs):
-        """M_UIRECONCILE_PLUS Item 4b: open the attribute picker
-        dialog for an existing driver source row + forward the
-        result to controller.set_driver_source_attrs.
-
-        MVC-clean: this slot owns the cmds.listAttr call and the
-        QDialog lifecycle; the controller never sees Qt and the
-        widget never imports cmds."""
-        if not node:
-            cmds.warning(
-                tr("warning_driver_source_no_node_for_attrs"))
-            return
-        # Resolve keyable attrs on the source node + open a multi-
-        # select dialog seeded with the current selection.
-        try:
-            available = cmds.listAttr(
-                node, keyable=True, scalar=True) or []
-        except Exception:
-            available = []
-        # If listAttr lost a scalar=True hit, fall back to a plain
-        # listAttr keyable so the TD still gets a populated picker.
-        if not available:
+    def _resolve_available_attrs_per_source(self, sources):
+        """M_TABBED_EDITOR helper: for each source's node, resolve
+        the keyable attribute list via cmds.listAttr (with the same
+        scalar-then-keyable fallback used by the M_UIRECONCILE_PLUS
+        picker). Returns a parallel list of attr-name lists."""
+        out = []
+        for src in sources or []:
+            node = getattr(src, "node", "") or ""
+            if not node:
+                out.append([])
+                continue
             try:
-                available = cmds.listAttr(node, keyable=True) or []
+                attrs = cmds.listAttr(
+                    node, keyable=True, scalar=True) or []
             except Exception:
-                available = []
-        chosen = _DriverAttrPickerDialog.pick(
-            self, node, available, list(current_attrs))
-        if chosen is None:
-            return   # user cancelled
-        self._ctrl.set_driver_source_attrs(int(index), list(chosen))
+                attrs = []
+            if not attrs:
+                try:
+                    attrs = cmds.listAttr(node, keyable=True) or []
+                except Exception:
+                    attrs = []
+            out.append(list(attrs))
+        return out
+
+    def _on_driver_source_attrs_apply(self, index, attrs):
+        """M_TABBED_EDITOR: Connect button on a driver tab. Apply the
+        currently-selected attrs to the source via
+        controller.set_driver_source_attrs."""
+        self._ctrl.set_driver_source_attrs(int(index), list(attrs))
+
+    def _on_driver_source_attrs_clear(self, index):
+        """M_TABBED_EDITOR: Disconnect button on a driver tab.
+        Clears the source's attr list."""
+        self._ctrl.set_driver_source_attrs(int(index), [])
+
+    def _on_driver_source_select_node(self, index):
+        """M_TABBED_EDITOR: Select button on a driver tab. Picks
+        the first transform from the current Maya selection,
+        binds it to the source, and refreshes the tab's
+        available-attrs list via cmds.listAttr."""
+        self._bind_source_node_from_selection("driver", int(index))
+
+    def _bind_source_node_from_selection(self, role, index):
+        """M_TABBED_EDITOR shared helper: resolve cmds.ls(selection)
+        -> first transform + rebind it onto the source at *index*
+        on either side. Source attrs / weight / encoding (driver
+        only) are preserved across the rebind."""
+        sel = cmds.ls(selection=True, type="transform") or []
+        if not sel:
+            warn_key = ("warning_driver_source_no_selection"
+                        if role == "driver"
+                        else "warning_driven_source_no_selection")
+            cmds.warning(tr(warn_key))
+            return
+        current = self._ctrl.current_node or ""
+        current_shape = ""
+        if current:
+            try:
+                from RBFtools import core as _core
+                current_shape = _core.get_shape(current) or ""
+            except Exception:
+                current_shape = ""
+        sel_filtered = [
+            n for n in sel if n != current and n != current_shape]
+        if not sel_filtered:
+            cmds.warning(tr("warning_driver_source_self_excluded"))
+            return
+        new_node = sel_filtered[0]
+        # Read the source's current state so we don't lose it on
+        # the node rebind.
+        if role == "driver":
+            sources = self._ctrl.read_driver_sources()
+        else:
+            sources = self._ctrl.read_driven_sources()
+        if not (0 <= index < len(sources)):
+            return
+        existing_attrs = list(sources[index].attrs)
+        if role == "driver":
+            weight   = float(getattr(sources[index], "weight", 1.0))
+            encoding = int(getattr(sources[index], "encoding", 0))
+            self._ctrl.remove_driver_source(int(index))
+            self._ctrl.add_driver_source(
+                new_node, existing_attrs,
+                weight=weight, encoding=encoding)
+        else:
+            self._ctrl.remove_driven_source(int(index))
+            self._ctrl.add_driven_source(new_node, existing_attrs)
 
     def _reload_driver_sources(self):
-        """M_UIRECONCILE: reload DriverSourceListEditor + maintain
-        the pose-editor multi-source banner (decision C.1 +
-        Hardening 2 - banner gated on len(sources) > 1, single
-        source keeps the legacy AttributeList workflow visually
-        unchanged per red line 14 backcompat parity)."""
+        """M_UIRECONCILE / M_TABBED_EDITOR: reload the tabbed driver
+        editor + maintain the pose-editor multi-source banner
+        (decision C.1 + Hardening 2 - banner gated on len(sources)
+        > 1, single source keeps the legacy AttributeList workflow
+        visually unchanged per red line 14 backcompat parity).
+
+        Per-source available attrs are pre-resolved via
+        cmds.listAttr so each tab shows the source node's full
+        keyable attribute list with the source's existing attrs
+        pre-selected."""
         try:
             sources = list(self._ctrl.read_driver_sources())
         except Exception:
             sources = []
-        self._driver_source_list.set_sources(sources)
+        available_per_source = self._resolve_available_attrs_per_source(
+            sources)
+        self._driver_source_list.set_sources(
+            sources, available_attrs_per_source=available_per_source)
         try:
             if len(sources) > 1:
                 self._pose_editor.show_multi_source_banner(

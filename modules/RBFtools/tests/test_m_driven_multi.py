@@ -126,18 +126,40 @@ class TestM_DRIVEN_MULTI_SourceScan(unittest.TestCase):
     def test_main_window_instantiates_driven_section(self):
         self.assertIn("_driven_sources_section", self._main)
         self.assertIn("_driven_source_list", self._main)
-        self.assertIn(
-            "DrivenSourceListEditor()", self._main)
+        # M_TABBED_EDITOR (2026-04-27): main_window now instantiates
+        # the tabbed editor (TabbedDrivenSourceEditor); the legacy
+        # DrivenSourceListEditor class file remains importable.
+        self.assertTrue(
+            "DrivenSourceListEditor()" in self._main
+            or "TabbedDrivenSourceEditor()" in self._main,
+            "main_window must instantiate either the legacy "
+            "DrivenSourceListEditor or the new tabbed variant")
 
     def test_main_window_wires_all_three_driven_signals(self):
-        for slot in ("_on_driven_source_add_requested",
-                     "_on_driven_source_remove_requested",
-                     "_on_driven_source_attrs_requested",
-                     "_reload_driven_sources"):
+        # M_TABBED_EDITOR: required slot list expanded to cover the
+        # tabbed signal surface (attrs_apply / attrs_clear /
+        # select_node) while keeping the legacy add / remove /
+        # reload slots in scope.
+        required_legacy = (
+            "_on_driven_source_add_requested",
+            "_on_driven_source_remove_requested",
+            "_reload_driven_sources",
+        )
+        for slot in required_legacy:
             self.assertIn(slot, self._main,
                 "main_window missing slot {}".format(slot))
-        # The drivenSourcesChanged signal is wired into the reload
-        # path (controller signal -> main_window slot).
+        # Either the legacy attrs picker slot OR the new tabbed
+        # attrs apply/clear pair must be present.
+        legacy_attrs = "_on_driven_source_attrs_requested" in self._main
+        tabbed_attrs = (
+            "_on_driven_source_attrs_apply" in self._main
+            and "_on_driven_source_attrs_clear" in self._main)
+        self.assertTrue(
+            legacy_attrs or tabbed_attrs,
+            "main_window must expose either the legacy "
+            "_on_driven_source_attrs_requested slot or the M_TABBED"
+            "_EDITOR _on_driven_source_attrs_apply + _attrs_clear "
+            "pair")
         self.assertIn(
             "drivenSourcesChanged.connect", self._main,
             "main_window must subscribe controller."
