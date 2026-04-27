@@ -71,9 +71,11 @@ class TestM_BREAK_REBUILD_SourceScan(unittest.TestCase):
         self.assertIn("_subscript_of_existing_output(shape, dst)",
                       body)
         self.assertIn("_occupied_output_subscripts(shape)", body)
-        # The break step must call cmds.disconnectAttr explicitly
-        # before the rebuild connectAttr fires.
-        self.assertIn("cmds.disconnectAttr", body)
+        # M_UNITCONV_PURGE: the break step now routes through
+        # _disconnect_or_purge (which deletes any intermediate
+        # unitConversion node) rather than a bare cmds.disconnectAttr.
+        self.assertIn("_disconnect_or_purge(shape, \"input\"", body)
+        self.assertIn("_disconnect_or_purge(shape, \"output\"", body)
         # And next-free-slot must be queried fresh AFTER the break.
         self.assertIn("_next_free_subscript(occupied)", body)
 

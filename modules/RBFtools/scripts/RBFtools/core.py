@@ -3538,12 +3538,21 @@ def _next_free_subscript(occupied):
 
 def _subscript_of_existing_input(bone_plug, shape):
     """If ``bone_plug`` is already connected to some
-    ``shape.input[i]``, return ``i``; else None. Only the FIRST
-    matching subscript is returned — break-then-rebuild guarantees
-    only one wire per source anyway."""
+    ``shape.input[i]``, return ``i``; else None.
+
+    M_UNITCONV_PURGE (2026-04-28): ``skipConversionNodes=True`` is
+    REQUIRED here. Maya silently inserts a ``unitConversion`` node
+    between rotation/dimensionless plug pairs (e.g. ``bone.rotateX``
+    in degrees -> ``input[i]`` in radians). Without skipConv,
+    ``listConnections`` returns the conversion node's input plug
+    instead of ``shape.input[i]`` — the prefix match misses, the
+    function falsely reports "not connected", and connect_routed
+    appends a NEW slot leaving a ghost wire at the old subscript.
+    Setting skipConv=True asks Maya to look THROUGH the conversion
+    node and surface the real downstream destination."""
     conns = cmds.listConnections(
         bone_plug, source=False, destination=True,
-        plugs=True) or []
+        plugs=True, skipConversionNodes=True) or []
     prefix = "{}.input[".format(shape)
     for plug in conns:
         if plug.startswith(prefix):
@@ -3555,10 +3564,11 @@ def _subscript_of_existing_input(bone_plug, shape):
 
 def _subscript_of_existing_output(shape, dst_plug):
     """Twin: if ``dst_plug`` is driven by some ``shape.output[i]``,
-    return ``i``; else None."""
+    return ``i``; else None. Same skipConversionNodes contract as
+    :func:`_subscript_of_existing_input`."""
     conns = cmds.listConnections(
         dst_plug, source=True, destination=False,
-        plugs=True) or []
+        plugs=True, skipConversionNodes=True) or []
     prefix = "{}.output[".format(shape)
     for plug in conns:
         if plug.startswith(prefix):
@@ -3566,6 +3576,102 @@ def _subscript_of_existing_output(shape, dst_plug):
             if m:
                 return int(m.group(1))
     return None
+
+
+def _direct_node_at_subscript(shape, side, idx):
+    """Return the immediate (non-skipConv) connected node name at
+    ``shape.<side>[idx]`` — i.e. what is PHYSICALLY wired to that
+    multi slot, which may be a unitConversion node that the
+    skipConv-flavoured queries hide. Returns None when nothing is
+    connected (or on query failure)."""
+    plug = "{}.{}[{}]".format(shape, side, idx)
+    if side == "input":
+        nodes = cmds.listConnections(
+            plug, source=True, destination=False,
+            plugs=False, connections=False) or []
+    else:
+        nodes = cmds.listConnections(
+            plug, source=False, destination=True,
+            plugs=False, connections=False) or []
+    return nodes[0] if nodes else None
+
+
+def _disconnect_or_purge(shape, side, idx, other_plug):
+    """斩草除根 — sever the wire at ``shape.<side>[idx]``.
+
+    If a ``unitConversion`` node sits between the bone and the RBF
+    multi (Maya's silent rotation-channel insertion), DELETE that
+    conversion node so the orphan does not pollute future
+    skipConv-based queries. Otherwise issue a plain
+    ``cmds.disconnectAttr`` on the direct (bone <-> shape) pair.
+
+    Returns True iff the wire was successfully torn down (either
+    via delete or disconnectAttr).
+    """
+    direct = _direct_node_at_subscript(shape, side, idx)
+    if direct is not None:
+        try:
+            ntype = cmds.nodeType(direct)
+        except Exception:
+            ntype = ""
+        if ntype == "unitConversion":
+            cmds.warning(
+                "disconnect: deleting unitConversion {!r} at "
+                "{}.{}[{}]".format(direct, shape, side, idx))
+            try:
+                cmds.delete(direct)
+                return True
+            except Exception as exc:
+                cmds.warning(
+                    "disconnect: failed to delete unitConversion "
+                    "{!r}: {}".format(direct, exc))
+                # Fall through to plain disconnect attempt below.
+    # Direct wire — straightforward disconnect.
+    if side == "input":
+        src_plug = other_plug
+        dst_plug = "{}.input[{}]".format(shape, idx)
+    else:
+        src_plug = "{}.output[{}]".format(shape, idx)
+        dst_plug = other_plug
+    cmds.warning(
+        "disconnect: trying {} -> {}".format(src_plug, dst_plug))
+    try:
+        cmds.disconnectAttr(src_plug, dst_plug)
+        return True
+    except Exception as exc:
+        cmds.warning(
+            "disconnect: {} -> {} FAILED: {}".format(
+                src_plug, dst_plug, exc))
+        return False
+
+
+def _resolved_pairs_at(shape, side):
+    """For Scene-B "clear all wires for this bone": return
+    ``[(idx, other_node, other_plug), ...]`` for every occupied
+    subscript on ``shape.<side>[]``. ``skipConversionNodes=True``
+    so ``other_node`` is the actual driver/driven bone (not the
+    intermediate conversion node)."""
+    plug = "{}.{}".format(shape, side)
+    if side == "input":
+        conns = cmds.listConnections(
+            plug, source=True, destination=False,
+            plugs=True, connections=True,
+            skipConversionNodes=True) or []
+    else:
+        conns = cmds.listConnections(
+            plug, source=False, destination=True,
+            plugs=True, connections=True,
+            skipConversionNodes=True) or []
+    out = []
+    for k in range(0, len(conns), 2):
+        shape_plug = conns[k]
+        other_plug = conns[k + 1]
+        m = _RBF_SUBSCRIPT_RE.search(shape_plug)
+        if m:
+            idx = int(m.group(1))
+            other_node = other_plug.split(".")[0]
+            out.append((idx, other_node, other_plug))
+    return out
 
 
 def _src_already_drives_node(src_plug, target_node):
@@ -3721,16 +3827,12 @@ def connect_routed(node, driver_targets, driven_targets):
             if existing is not None:
                 cmds.warning(
                     "connect_routed: {} already at {}.input[{}]; "
-                    "resetting...".format(src, shape, existing))
-                try:
-                    cmds.disconnectAttr(
-                        src,
-                        "{}.input[{}]".format(shape, existing))
-                except Exception as exc:
-                    cmds.warning(
-                        "connect_routed: pre-reset disconnect "
-                        "failed at input[{}]: {}".format(
-                            existing, exc))
+                    "resetting (root-and-branch).".format(
+                        src, shape, existing))
+                # M_UNITCONV_PURGE: route the break through
+                # _disconnect_or_purge so any unitConversion is
+                # deleted, not left dangling.
+                _disconnect_or_purge(shape, "input", existing, src)
             occupied = _occupied_input_subscripts(shape)
             free_idx = _next_free_subscript(occupied)
             dst = "{}.input[{}]".format(shape, free_idx)
@@ -3746,17 +3848,9 @@ def connect_routed(node, driver_targets, driven_targets):
             if existing is not None:
                 cmds.warning(
                     "connect_routed: {} already driven by "
-                    "{}.output[{}]; resetting...".format(
-                        dst, shape, existing))
-                try:
-                    cmds.disconnectAttr(
-                        "{}.output[{}]".format(shape, existing),
-                        dst)
-                except Exception as exc:
-                    cmds.warning(
-                        "connect_routed: pre-reset disconnect "
-                        "failed at output[{}]: {}".format(
-                            existing, exc))
+                    "{}.output[{}]; resetting (root-and-branch)."
+                    .format(dst, shape, existing))
+                _disconnect_or_purge(shape, "output", existing, dst)
             occupied = _occupied_output_subscripts(shape)
             free_idx = _next_free_subscript(occupied)
             src = "{}.output[{}]".format(shape, free_idx)
@@ -3780,9 +3874,15 @@ def connect_routed(node, driver_targets, driven_targets):
 
 
 def _disconnect_bone_specific(shape, bone, attr, side):
-    """Disconnect ``bone.attr`` from ``shape.<side>[]`` if such a wire
-    exists. ``side`` is ``"input"`` (driver-side) or ``"output"``
-    (driven-side). Returns the count of edges actually broken."""
+    """Scene-A precision disconnect of ``bone.attr`` from
+    ``shape.<side>[]``. Returns the count of edges actually broken
+    (0 or 1).
+
+    M_UNITCONV_PURGE (2026-04-28): subscript lookup uses
+    skipConversionNodes=True so a unitConversion-mediated rotation
+    channel is correctly identified; the actual sever runs through
+    :func:`_disconnect_or_purge` which DELETES the unitConversion
+    node when present (root-and-branch cleanup)."""
     if not _exists(bone):
         cmds.warning(
             "disconnect: bone {!r} missing; skipping".format(bone))
@@ -3794,78 +3894,33 @@ def _disconnect_bone_specific(shape, bone, attr, side):
         return 0
     bone_plug = "{}.{}".format(bone, attr)
     if side == "input":
-        conns = cmds.listConnections(
-            bone_plug, source=False, destination=True,
-            plugs=True, connections=True) or []
-        prefix = "{}.input[".format(shape)
+        idx = _subscript_of_existing_input(bone_plug, shape)
     else:
-        conns = cmds.listConnections(
-            bone_plug, source=True, destination=False,
-            plugs=True, connections=True) or []
-        prefix = "{}.output[".format(shape)
-    count = 0
-    for k in range(0, len(conns), 2):
-        a, b = conns[k], conns[k + 1]
-        if side == "input":
-            src_plug, dst_plug = a, b
-            if not dst_plug.startswith(prefix):
-                continue
-        else:
-            dst_plug, src_plug = a, b
-            if not src_plug.startswith(prefix):
-                continue
-        cmds.warning(
-            "disconnect: trying {} -> {}".format(
-                src_plug, dst_plug))
-        try:
-            cmds.disconnectAttr(src_plug, dst_plug)
-            count += 1
-        except Exception as exc:
-            cmds.warning(
-                "disconnect: {} -> {} FAILED: {}".format(
-                    src_plug, dst_plug, exc))
-    return count
+        idx = _subscript_of_existing_output(shape, bone_plug)
+    if idx is None:
+        return 0
+    return 1 if _disconnect_or_purge(shape, side, idx, bone_plug) else 0
 
 
 def _disconnect_bone_all(shape, bone, side):
-    """Disconnect EVERY wire between ``bone`` and ``shape.<side>[]``
-    — implements the empty-blueprint "clear this bone" Scene B.
-    Returns the count of edges actually broken."""
+    """Scene-B: disconnect EVERY wire between ``bone`` and
+    ``shape.<side>[]``. Returns the count of edges actually broken.
+
+    M_UNITCONV_PURGE: walks ``_resolved_pairs_at`` (skipConversion
+    on) so each (idx, bone, plug) triple identifies the REAL bone
+    behind any unitConversion. Each matching idx is severed via
+    :func:`_disconnect_or_purge`, deleting orphan unitConversion
+    nodes along the way."""
     if not _exists(bone):
         cmds.warning(
             "disconnect: bone {!r} missing; skipping".format(bone))
         return 0
-    if side == "input":
-        # Walk shape.input multi connections, keep pairs whose
-        # OTHER end lives on this bone.
-        conns = cmds.listConnections(
-            shape + ".input", source=True, destination=False,
-            plugs=True, connections=True) or []
-    else:
-        conns = cmds.listConnections(
-            shape + ".output", source=False, destination=True,
-            plugs=True, connections=True) or []
     count = 0
-    for k in range(0, len(conns), 2):
-        shape_plug = conns[k]
-        other_plug = conns[k + 1]
-        other_node = other_plug.split(".")[0]
+    for idx, other_node, other_plug in _resolved_pairs_at(shape, side):
         if other_node != bone:
             continue
-        if side == "input":
-            src_plug, dst_plug = other_plug, shape_plug
-        else:
-            src_plug, dst_plug = shape_plug, other_plug
-        cmds.warning(
-            "disconnect: trying {} -> {}".format(
-                src_plug, dst_plug))
-        try:
-            cmds.disconnectAttr(src_plug, dst_plug)
+        if _disconnect_or_purge(shape, side, idx, other_plug):
             count += 1
-        except Exception as exc:
-            cmds.warning(
-                "disconnect: {} -> {} FAILED: {}".format(
-                    src_plug, dst_plug, exc))
     return count
 
 

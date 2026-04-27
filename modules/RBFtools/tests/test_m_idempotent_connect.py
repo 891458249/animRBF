@@ -56,11 +56,13 @@ class TestM_IDEMPOTENT_SourceScan(unittest.TestCase):
         self.assertIn("_subscript_of_existing_input", body)
         self.assertIn("_subscript_of_existing_output", body)
         self.assertIn("_next_free_subscript", body)
-        self.assertIn("cmds.disconnectAttr", body,
-            "connect_routed must explicitly break the prior wire "
-            "before re-binding to the next free slot — break-then-"
-            "rebuild is the ONLY safe path against multi-array "
-            "stacking.")
+        # M_UNITCONV_PURGE: break step routes through
+        # _disconnect_or_purge (deletes any unitConversion node
+        # in the chain) rather than a bare cmds.disconnectAttr.
+        self.assertIn("_disconnect_or_purge", body,
+            "connect_routed must route the break step through "
+            "_disconnect_or_purge so unitConversion ghosts are "
+            "purged root-and-branch.")
 
     def test_dedup_walks_listConnections(self):
         body = self._core.split(
