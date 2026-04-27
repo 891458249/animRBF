@@ -6006,6 +6006,89 @@ commits to keep each one small and reviewable:
 
 ---
 
+## §M_UIRECONCILE_PLUS — Per-driver-source attribute picker (Item 4b)
+
+> **STATUS** (2026-04-27): closes the M_UIRECONCILE half-completion
+> gap. M_UIRECONCILE wired the `+` button to
+> `controller.add_driver_source(node, [], 1.0, 0)` - the entry was
+> created but with **empty attrs**, so the source had no driver
+> input vector to feed. Item 4b adds an in-row "Attrs..." button
+> + multi-select dialog so the TD can pick the keyable attributes
+> for each source.
+
+### §M_UIRECONCILE_PLUS.scope
+
+| Layer | Change | LoC |
+|---|---|---|
+| `core.py` | New `set_driver_source_attrs(node, index, new_attrs)` orchestrator. Reads the full source list, mutates index'th entry's attrs, then sweeps `remove_driver_source` (high-to-low) followed by `add_driver_source` in original order. Preserves driverSource[*] index ordering + input[]/driverList[] wiring consistency. | ~70 |
+| `controller.py` | `set_driver_source_attrs(index, attrs)` wrapper that emits `driverSourcesChanged` on success. | ~20 |
+| `ui/widgets/driver_source_list_editor.py` | `_DriverSourceRow` gains an `attrsRequested(node, current_attrs)` signal + an "Attrs..." button that emits it; `DriverSourceListEditor` exposes `attrsRequested(int, str, tuple)` editor-level signal + `_forward_attrs_request` helper that resolves the row's current QListWidget index at emit time (so reorder operations stay correct). | ~50 |
+| `ui/main_window.py` | New `_DriverAttrPickerDialog` (modal QDialog with multi-select QListWidget seeded from the row's existing attrs); `_on_driver_source_attrs_requested` slot owns the `cmds.listAttr(node, keyable=True, scalar=True)` call (MVC red line - widget cannot import cmds) + opens the dialog + forwards the result to `controller.set_driver_source_attrs`. | ~95 |
+| `ui/i18n.py` | 6 new keys EN+ZH (`driver_source_attrs_btn` + tooltip + dialog title/summary + `btn_ok` + `warning_driver_source_no_node_for_attrs`). | ~30 |
+| `tests/test_m_uireconcile_plus.py` (new) | 4 source-scan + 3 core orchestrator + 3 controller signal parity + 1 row signal forwarding = **11 tests**. | ~210 |
+| `addendum_20260424.md` | this section. | ~70 |
+| **Total** | | **~545** |
+
+### §M_UIRECONCILE_PLUS.orchestrator-design
+
+`set_driver_source_attrs` could in principle update the
+`driverSource_attrs` MStringArray in-place + re-wire only that
+source's `input[base..base+n_new]` slice, but that requires
+recomputing the base offset for every later source whenever
+`n_new != n_old`. The simpler "remove all + re-add all in order
+with the requested mutation" approach reuses the M_B24d / M_B24c
+atomic add/remove primitives without writing a third wiring path,
+and the cost is negligible at the typical 4-10-source scale.
+Trade-off: any `driverSourcesChanged` subscriber will see the
+list briefly transition through 0 sources mid-sweep; this is
+fine because emit is signalled only on the final
+`add_driver_source` call (each individual remove also emits, but
+the editor's reload simply rebuilds rows from the current state
+- no flicker because the QListWidget is rebuilt synchronously).
+
+### §M_UIRECONCILE_PLUS.dialog-pattern
+
+`_DriverAttrPickerDialog` follows the path-A (modal confirm)
+shape established by Mirror / Import / Prune dialogs but adds a
+multi-select QListWidget seeded from the source's currently
+selected attrs - the TD opens the dialog, sees the existing
+selection highlighted, adds / removes attributes, and confirms.
+Cancel returns the source unchanged (the slot short-circuits on
+`pick() -> None`).
+
+The `cmds.listAttr(node, keyable=True, scalar=True)` call falls
+back to `cmds.listAttr(node, keyable=True)` if the first call
+returns nothing (some node types report no scalar attrs even
+though they have keyable rotateX/Y/Z etc.). MVC red line: the
+widget never imports cmds; the slot in `RBFToolsWindow` owns the
+attribute-resolution call and passes the result list into the
+dialog constructor.
+
+### §M_UIRECONCILE_PLUS.empirical-baseline (2026-04-27)
+
+| Env | Pre (post-M_QUICKWINS `da41d24`) | Post |
+|---|---|---|
+| Pure-Python | 585 OK (skip 3) | **596 OK (skip 3)** |
+| mayapy 2025 | 585 ran 511 pass 74 skip | **596 ran 515 pass 81 skip** |
+
+mayapy delta: +11 = +4 pass (4 source-scan tests that always
+run) + +7 skip (7 mock-only tests: 3 core orchestrator + 3
+controller signal parity + 1 row signal forwarding -
+`@skipIf(_REAL_MAYA)` on all). Per the forward-compat-corrected
+red line 13 mock-pattern legitimate skip naturally accumulates.
+
+### §M_UIRECONCILE_PLUS.scope-exclusions
+
+- 0 lines C++ / 0 .mll / 0 CMakeLists / 0 schema modifications
+- 0 modifications to the M_UIRECONCILE / M_QUICKWINS / M_UIPOLISH
+  / M_B24 series locked surfaces
+- 0 modifications to hotfix 4 files
+- The Tekken-paradigm tabbed Driver/Driven layout + multi-driven
+  backend still belong to M_DRIVEN_MULTI (Items 1 + 4c, the next
+  commit) - this commit only addresses Item 4b
+
+---
+
 ## §M_HOTFIX_PYSIDE6 — QActionGroup PySide6 migration shim
 
 > **STRUCTURAL LESSON** (2026-04-27):

@@ -249,6 +249,25 @@ class MainController(QtCore.QObject):
         self.driverSourcesChanged.emit()
         return True
 
+    def set_driver_source_attrs(self, index, new_attrs):
+        """M_UIRECONCILE_PLUS (Item 4b): replace the attrs list of
+        an existing driverSource[index] entry on the active node.
+        Routes through :func:`core.set_driver_source_attrs` and
+        emits :attr:`driverSourcesChanged` so the editor reloads."""
+        if not self._current_node:
+            cmds.warning("set_driver_source_attrs: no current node")
+            return False
+        try:
+            ok = core.set_driver_source_attrs(
+                self._current_node, int(index), list(new_attrs))
+        except Exception as exc:
+            cmds.warning(
+                "set_driver_source_attrs failed: {}".format(exc))
+            return False
+        if ok:
+            self.driverSourcesChanged.emit()
+        return ok
+
     def read_driver_sources(self):
         """Read current node's driver sources (multi). Returns
         list[DriverSource] or empty list."""

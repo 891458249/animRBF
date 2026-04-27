@@ -1382,6 +1382,75 @@ def remove_driver_source(node, index):
                 node, index, exc))
 
 
+def set_driver_source_attrs(node, index, new_attrs):
+    """M_UIRECONCILE_PLUS (Item 4b): replace the attrs list of an
+    existing driverSource[index] entry.
+
+    Implementation: read the full source list, replace index'th
+    entry's attrs, then remove + re-add every source in order. This
+    keeps the driverSource[*] indices stable and the input[] /
+    driverList[] wiring consistent with the rest of the multi-
+    source pipeline; performance is fine for the typical 4-10
+    source workload.
+
+    Returns True on success, False if the index is out of range or
+    the underlying mutation raised. Failures emit cmds.warning so
+    the controller layer surfaces them to the TD via the script
+    editor.
+    """
+    sources = read_driver_info_multi(node)
+    if not sources:
+        cmds.warning(
+            "set_driver_source_attrs: no driver sources on {!r}".format(
+                node))
+        return False
+    if index < 0 or index >= len(sources):
+        cmds.warning(
+            "set_driver_source_attrs: index {} out of range "
+            "(0..{})".format(index, len(sources) - 1))
+        return False
+    # Build the rebuilt source list (in-memory copy + mutation at
+    # the requested index).
+    rebuilt = []
+    for i, src in enumerate(sources):
+        if i == index:
+            rebuilt.append(DriverSource(
+                node=src.node,
+                attrs=tuple(new_attrs),
+                weight=float(src.weight),
+                encoding=int(src.encoding)))
+        else:
+            rebuilt.append(src)
+    # Remove every existing source (high-to-low index so logical
+    # indices stay valid as we go).
+    try:
+        existing_indices = sorted(cmds.getAttr(
+            get_shape(node) + ".driverSource",
+            multiIndices=True) or [], reverse=True)
+    except Exception:
+        existing_indices = list(range(len(sources) - 1, -1, -1))
+    for d in existing_indices:
+        try:
+            remove_driver_source(node, d)
+        except Exception as exc:
+            cmds.warning(
+                "set_driver_source_attrs: remove sweep failed at "
+                "index {}: {}".format(d, exc))
+            return False
+    # Re-add the rebuilt list.
+    for src in rebuilt:
+        try:
+            add_driver_source(node, src.node, list(src.attrs),
+                              weight=float(src.weight),
+                              encoding=int(src.encoding))
+        except Exception as exc:
+            cmds.warning(
+                "set_driver_source_attrs: re-add failed for {!r}: "
+                "{}".format(src.node, exc))
+            return False
+    return True
+
+
 def read_driver_info(node):
     """DEPRECATED. Use :func:`read_driver_info_multi` for new code.
 

@@ -56,11 +56,14 @@ class _DriverSourceRow(QtWidgets.QWidget):
     """Composite row widget. Emits ``rowChanged`` whenever any of the
     four fields mutates so the parent base can re-emit ``listChanged``.
 
-    Read-only "node" / "attrs" mirror — the rich editing happens via
-    controller path A (Hardening C.2), not in-row. The row exposes
-    plain Q widgets that reflect the current DriverSource dataclass."""
+    M_UIRECONCILE_PLUS (Item 4b): adds an in-row "Attrs..." button +
+    ``attrsRequested`` signal so the TD can pick the source's
+    attribute list per-row. The button payload carries the source's
+    current node name + current attrs so the parent's slot can
+    pre-populate the picker dialog."""
 
-    rowChanged = QtCore.Signal()
+    rowChanged    = QtCore.Signal()
+    attrsRequested = QtCore.Signal(str, tuple)   # (node, current_attrs)
 
     def __init__(self, source, parent=None):
         super(_DriverSourceRow, self).__init__(parent)
@@ -79,12 +82,20 @@ class _DriverSourceRow(QtWidgets.QWidget):
         self._lbl_node.setToolTip(tr("driver_source_node_tip"))
         lay.addWidget(self._lbl_node, 1)
 
-        # Attrs joined preview (read-only).
+        # Attrs joined preview (read-only label - editing is via
+        # the Attrs... button below).
         attrs_text = ", ".join(self._source.attrs) if self._source.attrs else ""
         self._lbl_attrs = QtWidgets.QLabel(attrs_text)
         self._lbl_attrs.setMinimumWidth(160)
         self._lbl_attrs.setToolTip(tr("driver_source_attrs_tip"))
         lay.addWidget(self._lbl_attrs, 2)
+
+        # M_UIRECONCILE_PLUS Item 4b: in-row Attrs picker button.
+        self._btn_attrs = QtWidgets.QPushButton(tr("driver_source_attrs_btn"))
+        self._btn_attrs.setToolTip(tr("driver_source_attrs_btn_tip"))
+        self._btn_attrs.setMaximumWidth(70)
+        self._btn_attrs.clicked.connect(self._on_attrs_clicked)
+        lay.addWidget(self._btn_attrs)
 
         # Weight (editable).
         self._spin_weight = QtWidgets.QDoubleSpinBox()
@@ -107,6 +118,13 @@ class _DriverSourceRow(QtWidgets.QWidget):
 
     def _on_changed(self, *args, **kwargs):
         self.rowChanged.emit()
+
+    def _on_attrs_clicked(self):
+        """M_UIRECONCILE_PLUS Item 4b: emit a request for the parent
+        slot to open the attribute picker dialog for this source.
+        The slot owns the cmds.* call (MVC red line)."""
+        self.attrsRequested.emit(
+            self._source.node or "", tuple(self._source.attrs))
 
     def value(self):
         """Read the current widget state as a DriverSource dataclass."""
@@ -142,6 +160,11 @@ class DriverSourceListEditor(_OrderedListEditorBase):
     # the widget stays free of `import maya.cmds` (MVC red line).
     addRequested    = QtCore.Signal()
     removeRequested = QtCore.Signal(int)
+    # M_UIRECONCILE_PLUS Item 4b: per-row Attrs... button. Payload =
+    # (row index, source node name, current attrs tuple). The
+    # attribute picker dialog lives in main_window which owns the
+    # cmds.listAttr call.
+    attrsRequested  = QtCore.Signal(int, str, tuple)
 
     def __init__(self, parent=None):
         super(DriverSourceListEditor, self).__init__(parent)
@@ -172,7 +195,22 @@ class DriverSourceListEditor(_OrderedListEditorBase):
     def _create_row_widget(self, initial_value):
         row = _DriverSourceRow(initial_value)
         row.rowChanged.connect(self._on_any_row_changed)
+        # M_UIRECONCILE_PLUS Item 4b: bridge per-row attrs request
+        # to the editor-level signal. The QListWidget row index is
+        # resolved at emit time so reorder operations stay correct.
+        row.attrsRequested.connect(
+            lambda node, attrs, _row=row: self._forward_attrs_request(
+                _row, node, attrs))
         return row
+
+    def _forward_attrs_request(self, row_widget, node, current_attrs):
+        """Look up the row's current QListWidget index + re-emit
+        upstream as ``attrsRequested(idx, node, current_attrs)``."""
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if self._list.itemWidget(item) is row_widget:
+                self.attrsRequested.emit(i, node, tuple(current_attrs))
+                return
 
     def _read_row_value(self, widget):
         # widget is a _DriverSourceRow; return the dataclass.

@@ -332,6 +332,23 @@ _EN = {
         "Multi-source driver detected on this node. Use the "
         "Driver Sources editor above; the single-driver picker "
         "below shows the first source only.",
+    # -- M_UIRECONCILE_PLUS Item 4b: per-driver-source attribute
+    #    picker button + dialog --
+    "driver_source_attrs_btn":
+        "Attrs...",
+    "driver_source_attrs_btn_tip":
+        "Pick the keyable attributes that drive the RBF for this "
+        "source. Updating the list shuffles input[] indices; the "
+        "node is removed and re-added in order under the hood.",
+    "title_pick_driver_attrs":
+        "Pick Driver Attributes",
+    "summary_pick_driver_attrs":
+        "Select the attributes on '{node}' that should feed the "
+        "RBF input vector for this driver source.",
+    "btn_ok":              "OK",
+    "warning_driver_source_no_node_for_attrs":
+        "Driver Sources: this source has no node assigned yet; "
+        "remove it and add a fresh source from a scene selection.",
 }
 
 _ZH = {
@@ -625,6 +642,21 @@ _ZH = {
     "banner_multi_source_detected":
         u"\u8be5\u8282\u70b9\u5df2\u914d\u7f6e\u591a\u6e90\u9a71\u52a8\u3002\u8bf7\u4f7f\u7528\u4e0a\u65b9 Driver Sources \u7f16\u8f91\u5668\uff1b"
         u"\u4e0b\u65b9\u5355\u9a71\u52a8\u9009\u62e9\u5668\u4ec5\u663e\u793a\u7b2c\u4e00\u4e2a\u6e90\u3002",
+    # M_UIRECONCILE_PLUS Item 4b \u5c5e\u6027\u9009\u62e9
+    "driver_source_attrs_btn":
+        u"\u5c5e\u6027\u2026",
+    "driver_source_attrs_btn_tip":
+        u"\u4e3a\u8be5\u9a71\u52a8\u6e90\u9009\u62e9\u53c2\u4e0e RBF \u8ba1\u7b97\u7684\u53ef\u952e\u5c5e\u6027\u3002"
+        u"\u4fee\u6539\u5c5e\u6027\u5217\u8868\u4f1a\u91cd\u6392 input[] \u7d22\u5f15\uff08\u5185\u90e8\u6309\u987a\u5e8f"
+        u"\u79fb\u9664\u5e76\u91cd\u65b0\u6dfb\u52a0\uff09\u3002",
+    "title_pick_driver_attrs":
+        u"\u9009\u62e9\u9a71\u52a8\u5c5e\u6027",
+    "summary_pick_driver_attrs":
+        u"\u9009\u62e9 '{node}' \u4e0a\u8981\u53c2\u4e0e\u8be5\u9a71\u52a8\u6e90 RBF \u8f93\u5165\u5411\u91cf\u7684\u5c5e\u6027\u3002",
+    "btn_ok":              u"\u786e\u5b9a",
+    "warning_driver_source_no_node_for_attrs":
+        u"Driver Sources: \u8be5\u6e90\u5c1a\u672a\u6307\u5b9a\u8282\u70b9\uff1b\u8bf7\u5148\u79fb\u9664\u5b83\uff0c"
+        u"\u7136\u540e\u5728\u573a\u666f\u4e2d\u9009\u62e9\u8282\u70b9\u91cd\u65b0\u6dfb\u52a0\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

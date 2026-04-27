@@ -294,6 +294,73 @@ def _hline():
 
 
 # =====================================================================
+#  M_UIRECONCILE_PLUS Item 4b — Driver attribute picker dialog
+# =====================================================================
+
+class _DriverAttrPickerDialog(QtWidgets.QDialog):
+    """Modal dialog for picking the keyable attributes that feed a
+    single driver source's RBF input vector.
+
+    MVC-clean: the dialog never imports cmds; the calling slot in
+    RBFToolsWindow resolves the available attribute list via
+    cmds.listAttr and passes it in. The dialog returns the
+    user-selected list (or None on cancel)."""
+
+    def __init__(self, parent, node, available_attrs, preselected):
+        super(_DriverAttrPickerDialog, self).__init__(parent)
+        self.setWindowTitle(tr("title_pick_driver_attrs"))
+        self.setModal(True)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        summary = tr("summary_pick_driver_attrs").format(node=node)
+        self._lbl = QtWidgets.QLabel(summary)
+        self._lbl.setWordWrap(True)
+        layout.addWidget(self._lbl)
+
+        self._list = QtWidgets.QListWidget()
+        self._list.setSelectionMode(
+            QtWidgets.QAbstractItemView.MultiSelection)
+        preselected_set = set(preselected or [])
+        for attr in available_attrs or []:
+            item = QtWidgets.QListWidgetItem(attr)
+            self._list.addItem(item)
+            if attr in preselected_set:
+                item.setSelected(True)
+        layout.addWidget(self._list, 1)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addStretch(1)
+        self._btn_ok = QtWidgets.QPushButton(tr("btn_ok"))
+        self._btn_ok.setDefault(True)
+        self._btn_ok.clicked.connect(self.accept)
+        self._btn_cancel = QtWidgets.QPushButton(tr("cancel"))
+        self._btn_cancel.clicked.connect(self.reject)
+        btn_row.addWidget(self._btn_ok)
+        btn_row.addWidget(self._btn_cancel)
+        layout.addLayout(btn_row)
+
+        self.resize(360, 380)
+
+    def selected_attrs(self):
+        """Return the list of selected attribute names in display
+        order."""
+        return [
+            self._list.item(i).text()
+            for i in range(self._list.count())
+            if self._list.item(i).isSelected()
+        ]
+
+    @classmethod
+    def pick(cls, parent, node, available_attrs, preselected):
+        """Convenience: open the dialog modally + return the
+        selected attribute list, or None on cancel."""
+        dlg = cls(parent, node, available_attrs, preselected)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+        return dlg.selected_attrs()
+
+
+# =====================================================================
 #  Main Window
 # =====================================================================
 
@@ -846,6 +913,9 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._on_driver_source_add_requested)
         self._driver_source_list.removeRequested.connect(
             self._on_driver_source_remove_requested)
+        # M_UIRECONCILE_PLUS Item 4b: per-row Attrs... picker.
+        self._driver_source_list.attrsRequested.connect(
+            self._on_driver_source_attrs_requested)
         ctrl.driverSourcesChanged.connect(self._reload_driver_sources)
         ctrl.editorLoaded.connect(self._reload_driver_sources)
         ctrl.nodesRefreshed.connect(
@@ -986,6 +1056,38 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         """M_UIRECONCILE: forward the row index to controller's
         path-A confirm + remove flow."""
         self._ctrl.remove_driver_source(int(index))
+
+    def _on_driver_source_attrs_requested(self, index, node, current_attrs):
+        """M_UIRECONCILE_PLUS Item 4b: open the attribute picker
+        dialog for an existing driver source row + forward the
+        result to controller.set_driver_source_attrs.
+
+        MVC-clean: this slot owns the cmds.listAttr call and the
+        QDialog lifecycle; the controller never sees Qt and the
+        widget never imports cmds."""
+        if not node:
+            cmds.warning(
+                tr("warning_driver_source_no_node_for_attrs"))
+            return
+        # Resolve keyable attrs on the source node + open a multi-
+        # select dialog seeded with the current selection.
+        try:
+            available = cmds.listAttr(
+                node, keyable=True, scalar=True) or []
+        except Exception:
+            available = []
+        # If listAttr lost a scalar=True hit, fall back to a plain
+        # listAttr keyable so the TD still gets a populated picker.
+        if not available:
+            try:
+                available = cmds.listAttr(node, keyable=True) or []
+            except Exception:
+                available = []
+        chosen = _DriverAttrPickerDialog.pick(
+            self, node, available, list(current_attrs))
+        if chosen is None:
+            return   # user cancelled
+        self._ctrl.set_driver_source_attrs(int(index), list(chosen))
 
     def _reload_driver_sources(self):
         """M_UIRECONCILE: reload DriverSourceListEditor + maintain
