@@ -506,14 +506,21 @@ class T6_SchemaVersionUnchanged(unittest.TestCase):
     """
 
     def test_PERMANENT_current_schema_version(self):
+        # Commit 1 (M_PER_POSE_SIGMA) atomic bump.
         from RBFtools.core_json import SCHEMA_VERSION
-        self.assertEqual(SCHEMA_VERSION, "rbftools.v5.m_b24")
+        self.assertEqual(SCHEMA_VERSION,
+                         "rbftools.v5.m_per_pose_sigma")
 
     def test_PERMANENT_legacy_schema_versions_present(self):
         from RBFtools.core_json import LEGACY_SCHEMA_VERSIONS
         self.assertIn("rbftools.v5.m3", LEGACY_SCHEMA_VERSIONS,
             "rbftools.v5.m3 MUST remain in LEGACY_SCHEMA_VERSIONS - "
             "deletion would orphan v5.0-pre-M_B24 .json fixtures")
+        # Commit 1: M_B24 string is now legacy after the m_per_pose_sigma
+        # bump; deletion would orphan M_B24-era .json fixtures.
+        self.assertIn("rbftools.v5.m_b24", LEGACY_SCHEMA_VERSIONS,
+            "rbftools.v5.m_b24 MUST remain in LEGACY_SCHEMA_VERSIONS - "
+            "deletion would orphan M_B24-era .json fixtures")
 
 
 # ----------------------------------------------------------------------

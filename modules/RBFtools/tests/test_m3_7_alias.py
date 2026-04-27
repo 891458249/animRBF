@@ -504,11 +504,14 @@ class T12_SchemaVersionUnchanged(unittest.TestCase):
     Test now asserts current M_B24 + LEGACY M3 preservation."""
 
     def test_schema_version_still_m3(self):
+        # Commit 1 (M_PER_POSE_SIGMA) atomic bump.
         from RBFtools.core_json import (
             SCHEMA_VERSION, LEGACY_SCHEMA_VERSIONS,
         )
-        self.assertEqual(SCHEMA_VERSION, "rbftools.v5.m_b24")
-        self.assertIn("rbftools.v5.m3", LEGACY_SCHEMA_VERSIONS)
+        self.assertEqual(SCHEMA_VERSION,
+                         "rbftools.v5.m_per_pose_sigma")
+        self.assertIn("rbftools.v5.m3",     LEGACY_SCHEMA_VERSIONS)
+        self.assertIn("rbftools.v5.m_b24",  LEGACY_SCHEMA_VERSIONS)
 
 
 # ----------------------------------------------------------------------

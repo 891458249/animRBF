@@ -70,6 +70,7 @@ from RBFtools.constants import (
     FILTER_DEFAULTS,
     FILTER_VAR_TEMPLATE,
     SCALE_ATTR_NAMES,
+    DEFAULT_POSE_RADIUS,
 )
 
 
@@ -612,7 +613,11 @@ def mirror_node(source_node, target_name, mirror_axis,
         for nm in unrec:
             warnings.append("Unrecognized driven attr {!r} — passed "
                             "through unchanged".format(nm))
-        new_pose = PoseData(pose.index, new_inputs, new_values)
+        # Commit 1: mirroring preserves per-pose σ (independent of
+        # axis flips on the driven side).
+        new_pose = PoseData(pose.index, new_inputs, new_values,
+                            radius=getattr(pose, "radius",
+                                           DEFAULT_POSE_RADIUS))
         mirrored_poses.append(new_pose)
 
     # Mirror per-pose local Transforms (M2.3 contract).
@@ -2489,6 +2494,12 @@ class PoseData(object):
         Driver attribute snapshot (one value per ``input[i]``).
     values : list[float]
         Driven attribute snapshot (one value per ``output[i]``).
+    radius : float
+        Commit 1 (M_PER_POSE_SIGMA): per-pose RBF kernel σ. Default
+        ``DEFAULT_POSE_RADIUS`` (5.0) for newly-created poses; legacy
+        nodes (no ``poseRadius[]`` plug populated) round-trip through
+        the same default. Constructors taking only ``(index, inputs,
+        values)`` remain valid — radius is keyword-only with default.
 
     Design note
     -----------
@@ -2498,24 +2509,35 @@ class PoseData(object):
     rather than silent ``KeyError`` / ``None`` bugs.
     """
 
-    __slots__ = ("index", "inputs", "values")
+    __slots__ = ("index", "inputs", "values", "radius")
 
-    def __init__(self, index, inputs, values):
+    def __init__(self, index, inputs, values, radius=None):
         self.index  = int(index)
         self.inputs = list(inputs)
         self.values = list(values)
+        # Commit 1: positional-compat — None => DEFAULT_POSE_RADIUS so
+        # all 6 historical PoseData(idx, in, val) callsites keep working.
+        self.radius = (DEFAULT_POSE_RADIUS
+                       if radius is None
+                       else float(radius))
 
     def __repr__(self):
-        return "PoseData(index={}, inputs={}, values={})".format(
-            self.index, self.inputs, self.values)
+        return ("PoseData(index={}, inputs={}, values={}, "
+                "radius={})").format(
+                    self.index, self.inputs, self.values, self.radius)
 
     def __eq__(self, other):
-        """Tolerance-based equality (see :func:`float_eq`)."""
+        """Tolerance-based equality (see :func:`float_eq`).
+
+        Commit 1: radius participates in equality but uses
+        :func:`float_eq` so legacy poses (radius == DEFAULT) compare
+        bit-equal to JSON-deserialised ones."""
         if not isinstance(other, PoseData):
             return NotImplemented
         return (self.index == other.index
                 and vector_eq(self.inputs, other.inputs)
-                and vector_eq(self.values, other.values))
+                and vector_eq(self.values, other.values)
+                and float_eq(self.radius, other.radius))
 
     def __ne__(self, other):
         result = self.__eq__(other)
@@ -2607,7 +2629,12 @@ def read_all_poses(node):
 
     poses = []
     if prepend_rest:
-        poses.append(PoseData(0, [0.0] * n_inputs, [0.0] * n_outputs))
+        # Commit 1: synthetic rest pose uses default σ; never written
+        # back to scene unless the user explicitly creates pose 0.
+        poses.append(PoseData(0,
+                              [0.0] * n_inputs,
+                              [0.0] * n_outputs,
+                              radius=DEFAULT_POSE_RADIUS))
 
     for pid in pose_indices:
         inputs = [
@@ -2618,9 +2645,77 @@ def read_all_poses(node):
             safe_get("{}.poses[{}].poseValue[{}]".format(shape, pid, i), 0.0)
             for i in range(n_outputs)
         ]
-        poses.append(PoseData(pid, inputs, values))
+        # Commit 1 (M_PER_POSE_SIGMA): per-pose σ lives at the
+        # top-level multi attr ``shape.poseRadius[pid]`` (parallel
+        # array, NOT a child of poses[]). Legacy v5-pre-M_PERPOSE
+        # nodes have no slot at this index — safe_get returns the
+        # fallback (DEFAULT_POSE_RADIUS) so old scenes round-trip
+        # unchanged.
+        radius = safe_get("{}.poseRadius[{}]".format(shape, pid),
+                          DEFAULT_POSE_RADIUS)
+        if not radius or radius <= 0.0:
+            radius = DEFAULT_POSE_RADIUS
+        poses.append(PoseData(pid, inputs, values, radius=radius))
 
     return poses
+
+
+# =====================================================================
+#  10b. Base pose values — Commit 1 (M_BASE_POSE)
+# =====================================================================
+
+
+def read_base_pose_values(node):
+    """Read ``shape.basePoseValue[]`` as a flat list[float].
+
+    Commit 1 (M_BASE_POSE): per-output additive baseline applied at
+    plugin ``setOutputValues`` time. Empty plug / legacy node returns
+    ``[]``; the plugin treats absent indices as 0.0 (bit-identical to
+    pre-M_BASE_POSE behaviour).
+
+    Sparse-array safety: ``multiIndices=True`` skips holes. Returned
+    list is **dense**, indexed by output channel; missing indices are
+    filled with 0.0 up to ``output[]`` size. Returns ``[]`` when the
+    plug has never been written so callers can distinguish "no
+    baseline configured" from "all-zero baseline".
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        n_outputs = cmds.getAttr(shape + ".output", size=True)
+    except Exception:
+        n_outputs = 0
+    indices = _multi_indices(shape, "basePoseValue")
+    if not indices:
+        return []
+    result = [0.0] * max(n_outputs, max(indices) + 1)
+    for idx in indices:
+        result[idx] = safe_get(
+            "{}.basePoseValue[{}]".format(shape, idx), 0.0)
+    return result
+
+
+def write_base_pose_values(node, values):
+    """Write ``shape.basePoseValue[i] = values[i]`` for each i.
+
+    Commit 1 (M_BASE_POSE): does NOT clear higher indices; callers
+    that shrink the baseline must pass a full-length list and rely on
+    the plugin's sparse-array semantics for trailing absent indices
+    (which evaluate to 0.0 — same as pre-M_BASE_POSE behaviour).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    with undo_chunk("RBFtools: write basePoseValue"):
+        for i, v in enumerate(values or []):
+            try:
+                cmds.setAttr(
+                    "{}.basePoseValue[{}]".format(shape, i), float(v))
+            except Exception as exc:
+                cmds.warning(
+                    "write_base_pose_values: index {} failed: {}".format(
+                        i, exc))
 
 
 # =====================================================================
@@ -2664,6 +2759,21 @@ def _write_pose_to_node(shape, sequential_idx, pose):
         except Exception as exc:
             cmds.warning("_write_pose_to_node: poseValue[{}][{}] failed: {}".format(
                 sequential_idx, i, exc))
+    # Commit 1 (M_PER_POSE_SIGMA): write per-pose σ. Indexed parallel
+    # to poses[sequential_idx]. Failure non-fatal — legacy plugins
+    # without the poseRadius attr just emit a warning and the caller
+    # gets pre-M_PERPOSE behaviour (global radius for all poses).
+    try:
+        radius = float(getattr(pose, "radius", DEFAULT_POSE_RADIUS))
+        if radius <= 0.0:
+            radius = DEFAULT_POSE_RADIUS
+        cmds.setAttr(
+            "{}.poseRadius[{}]".format(shape, sequential_idx), radius)
+    except Exception as exc:
+        cmds.warning(
+            "_write_pose_to_node: poseRadius[{}] failed (legacy "
+            "plugin without per-pose σ?): {}".format(
+                sequential_idx, exc))
 
 
 # =====================================================================

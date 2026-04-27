@@ -357,10 +357,14 @@ def execute_prune(node, action):
     new_drvn_attrs = [drvn_attrs[i] for i in keep_out]
     new_poses = []
     for new_idx, p in enumerate(keep_pose):
+        # Commit 1: prune rebuild preserves per-pose σ for the surviving
+        # poses (driver/driven attr columns are pruned; the pose's own
+        # influence radius is unaffected).
         new_poses.append(core.PoseData(
             new_idx,
             [p.inputs[i] for i in keep_in],
-            [p.values[i] for i in keep_out]))
+            [p.values[i] for i in keep_out],
+            radius=getattr(p, "radius", None)))
 
     # E.2 contract: invalid quat groups keep their ORIGINAL start.
     # Unaffected groups get the shifted index. Filtered out: nothing

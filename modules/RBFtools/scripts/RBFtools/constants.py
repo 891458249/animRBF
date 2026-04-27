@@ -98,6 +98,13 @@ FILTER_KEYS = list(FILTER_DEFAULTS.keys())
 # Scale-channel attribute names (M1.2 — Output Base Value)
 # ------------------------------------------------------------------
 
+# Commit 1 (M_PER_POSE_SIGMA): default RBF kernel σ for new poses.
+# Mirrors the C++ ``initialize()`` plug default of 5.0 so legacy nodes
+# (which never set ``shape.poseRadius[i]``) round-trip with the same
+# value the plugin would synthesise on first read.
+DEFAULT_POSE_RADIUS = 5.0
+
+
 # Scale channels must anchor at 1.0 regardless of captured scene values
 # to defend against t-pose mesh collapse when a driven node is transiently
 # at scale=0.  Both Maya long and short names are matched exactly.

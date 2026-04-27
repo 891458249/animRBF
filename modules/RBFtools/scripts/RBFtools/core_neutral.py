@@ -147,7 +147,9 @@ def add_neutral_sample(node):
             # to keep packed indices contiguous (matches the Apply
             # step's clear-then-write pattern).
             shifted = [
-                core.PoseData(p.index + 1, p.inputs, p.values)
+                # Commit 1: index shift preserves per-pose σ.
+                core.PoseData(p.index + 1, p.inputs, p.values,
+                              radius=getattr(p, "radius", None))
                 for p in existing
             ]
             core.clear_node_data(node)

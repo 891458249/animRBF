@@ -47,13 +47,17 @@ import tempfile
 # the SAME commit, with PERMANENT guard updates (T6 / T_M3_3_SCHEMA_FIELDS
 # / T_FLOAT_ROUND_TRIP) flipped to dual-version form. See addendum
 # §M_B24a2 PROJECT-CONSTITUTIONAL-EVENT for the precedent.
-SCHEMA_VERSION = "rbftools.v5.m_b24"
+SCHEMA_VERSION = "rbftools.v5.m_per_pose_sigma"
 
 # M_B24a2 — versions older than SCHEMA_VERSION that this loader can
 # upgrade in-memory. PERMANENT inclusion: removing entries here would
 # orphan legacy fixtures (T_VERSIONED_SCHEMA_PRESENT #26.b).
 LEGACY_SCHEMA_VERSIONS = frozenset({
     "rbftools.v5.m3",
+    "rbftools.v5.m_b24",  # Commit 1: per-pose σ + base pose are
+                          # additive; legacy m_b24 dicts (no
+                          # base_pose_values, no per-pose radius)
+                          # round-trip via key-defaults.
 })
 
 
@@ -256,6 +260,7 @@ EXPECTED_NODE_DICT_KEYS = frozenset({
     "output_quaternion_groups",
     "output_encoding",            # NEW M_B24a2-2 (node-level enum 0..2)
     "poses",
+    "base_pose_values",           # NEW Commit 1 (M_BASE_POSE) per-output baseline
 })
 
 # M_B24a2-2: PERMANENT — keys for legacy v5.0-pre-M_B24 schema.
@@ -410,6 +415,12 @@ def node_to_dict(node):
             "index": int(pose.index),
             "inputs": [float(x) for x in pose.inputs],
             "values": [float(x) for x in pose.values],
+            # Commit 1 (M_PER_POSE_SIGMA): JSON forward-compat field.
+            # Older import paths that don't know "radius" silently drop
+            # it; PoseData defaults to DEFAULT_POSE_RADIUS on read so
+            # round-trip through old exporter is loss-tolerant.
+            "radius": float(getattr(pose, "radius",
+                                    core.DEFAULT_POSE_RADIUS)),
             "local_transform": {
                 "translate": [float(x) for x in lx["translate"]],
                 "quat":      [float(x) for x in lx["quat"]],
@@ -420,6 +431,11 @@ def node_to_dict(node):
     # M_B24a2-2: read node-level outputEncoding (M_B24a1 schema field)
     output_encoding = int(core.safe_get(shape + ".outputEncoding", 0))
 
+    # Commit 1 (M_BASE_POSE): export the per-output additive baseline
+    # vector. Empty list when the user has not configured one (legacy
+    # nodes); importer defaults the same way.
+    base_pose_values = core.read_base_pose_values(node)
+
     return {
         "name": str(node),
         "type_mode": type_mode,
@@ -429,6 +445,7 @@ def node_to_dict(node):
         "output_quaternion_groups": quat_groups,
         "output_encoding": output_encoding,
         "poses": pose_dicts,
+        "base_pose_values": base_pose_values,
     }
 
 
@@ -845,11 +862,22 @@ def dict_to_node(ndata, mode="add", will_overwrite=False):
         core.clear_node_data(target)
         shape = core.get_shape(target)
         for pose in ndata.get("poses", []):
+            # Commit 1 (M_PER_POSE_SIGMA): legacy JSON (no "radius" key)
+            # falls back to DEFAULT_POSE_RADIUS via PoseData ctor.
             core._write_pose_to_node(
                 shape, int(pose["index"]),
                 core.PoseData(int(pose["index"]),
                               list(pose["inputs"]),
-                              list(pose["values"])))
+                              list(pose["values"]),
+                              radius=pose.get("radius")))
+
+        # Commit 1 (M_BASE_POSE): restore per-output additive baseline.
+        # Missing key (legacy JSON) leaves the plug untouched, which
+        # the plugin treats as zero-baseline (bit-identical to v5-pre-
+        # M_BASE_POSE).
+        bpv = ndata.get("base_pose_values")
+        if bpv:
+            core.write_base_pose_values(target, bpv)
 
         # baselines (M1.2): pull base_value + is_scale per driven attr.
         baselines = []

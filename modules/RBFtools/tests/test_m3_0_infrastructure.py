@@ -55,15 +55,19 @@ class T0_SchemaVersionImmutability(unittest.TestCase):
         from RBFtools.core_json import (
             SCHEMA_VERSION, LEGACY_SCHEMA_VERSIONS,
         )
+        # Commit 1 (M_PER_POSE_SIGMA) atomic version bump: m_b24 →
+        # m_per_pose_sigma. Both prior versions preserved in LEGACY.
         self.assertEqual(
-            SCHEMA_VERSION, "rbftools.v5.m_b24",
-            "SCHEMA_VERSION mismatch - M_B24a2-2 bumped to "
-            "rbftools.v5.m_b24; further evolution requires a new "
-            "string + LEGACY extension + same-commit guard upgrade.")
+            SCHEMA_VERSION, "rbftools.v5.m_per_pose_sigma",
+            "SCHEMA_VERSION mismatch - Commit 1 bumped to "
+            "rbftools.v5.m_per_pose_sigma; further evolution requires "
+            "a new string + LEGACY extension + same-commit guard upgrade.")
         self.assertIn("rbftools.v5.m3", LEGACY_SCHEMA_VERSIONS,
             "M3.0 SCHEMA_VERSION lost from LEGACY_SCHEMA_VERSIONS - "
             "addendum M3.0 contract violation: legacy fixtures would "
             "be orphaned.")
+        self.assertIn("rbftools.v5.m_b24", LEGACY_SCHEMA_VERSIONS,
+            "M_B24 SCHEMA_VERSION lost from LEGACY_SCHEMA_VERSIONS.")
 
 
 # ----------------------------------------------------------------------

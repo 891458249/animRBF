@@ -38,9 +38,13 @@ class TestVersionedSchemaPresent(unittest.TestCase):
     """#26 — three sub-checks lock the v5.0-M_B24 versioning protocol."""
 
     def test_a_current_schema_version_locked(self):
+        # Commit 1 (M_PER_POSE_SIGMA) atomic bump from m_b24 →
+        # m_per_pose_sigma. M_B24 string is now in LEGACY (#26.b
+        # extension verified by test_b_legacy_m_b24_membership_PERMANENT).
         from RBFtools.core_json import SCHEMA_VERSION
-        self.assertEqual(SCHEMA_VERSION, "rbftools.v5.m_b24",
-            "SCHEMA_VERSION must be the M_B24 string post-bump")
+        self.assertEqual(SCHEMA_VERSION,
+                         "rbftools.v5.m_per_pose_sigma",
+            "SCHEMA_VERSION must be the m_per_pose_sigma string post-bump")
 
     def test_b_legacy_m3_membership_PERMANENT(self):
         from RBFtools.core_json import LEGACY_SCHEMA_VERSIONS

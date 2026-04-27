@@ -308,8 +308,11 @@ class T_CoreJsonDiffEmpty(unittest.TestCase):
         from RBFtools.core_json import (
             SCHEMA_VERSION, LEGACY_SCHEMA_VERSIONS,
         )
-        self.assertEqual(SCHEMA_VERSION, "rbftools.v5.m_b24")
-        self.assertIn("rbftools.v5.m3", LEGACY_SCHEMA_VERSIONS)
+        # Commit 1 (M_PER_POSE_SIGMA): atomic schema version bump.
+        self.assertEqual(SCHEMA_VERSION,
+                         "rbftools.v5.m_per_pose_sigma")
+        self.assertIn("rbftools.v5.m3",     LEGACY_SCHEMA_VERSIONS)
+        self.assertIn("rbftools.v5.m_b24",  LEGACY_SCHEMA_VERSIONS)
 
 
 if __name__ == "__main__":
