@@ -444,6 +444,21 @@ _EN = {
         "This source has no node assigned yet; nothing to select.",
     "warning_source_node_missing":
         "Source node {node!r} no longer exists in the scene.",
+    # -- Phase 2 - PoseGridEditor (multi-source-aware Pose tab grid) --
+    "pose_grid_empty_hint":
+        "Add driver and driven sources above, then click Add Pose "
+        "to capture the first pose snapshot.",
+    "pose_grid_row_label":             "Pose {idx}",
+    "pose_grid_go_to_pose":            "Go to Pose",
+    "pose_grid_go_to_pose_tip":
+        "Restore this pose's driver + driven values to the scene "
+        "(read-only preview - no permanent change).",
+    "pose_grid_add_pose_tip":
+        "Capture the current Maya driver + driven values as a new "
+        "pose row.",
+    "pose_grid_delete_all_tip":
+        "Remove every pose entry from the active node.",
+    "delete_poses":                    "Delete Poses",
 }
 
 _ZH = {
@@ -822,6 +837,20 @@ _ZH = {
         u"\u8be5\u6e90\u5c1a\u672a\u6307\u5b9a\u8282\u70b9\uff0c\u65e0\u53ef\u9009\u62e9\u5bf9\u8c61\u3002",
     "warning_source_node_missing":
         u"\u6e90\u8282\u70b9 {node!r} \u5df2\u4e0d\u5728\u573a\u666f\u4e2d\u3002",
+    # Phase 2 PoseGridEditor \u591a\u6e90\u611f\u77e5 Pose \u7f51\u683c
+    "pose_grid_empty_hint":
+        u"\u8bf7\u5148\u5728\u4e0a\u65b9\u6dfb\u52a0\u9a71\u52a8\u6e90 + \u88ab\u9a71\u52a8\u76ee\u6807\uff0c\u7136\u540e\u70b9\u51fb\"\u6dfb\u52a0\u59ff\u52bf\""
+        u"\u6355\u83b7\u7b2c\u4e00\u4e2a\u59ff\u52bf\u5feb\u7167\u3002",
+    "pose_grid_row_label":             u"\u59ff\u52bf {idx}",
+    "pose_grid_go_to_pose":            u"\u5207\u5230\u8be5\u59ff\u52bf",
+    "pose_grid_go_to_pose_tip":
+        u"\u5c06\u8be5\u59ff\u52bf\u7684\u9a71\u52a8 + \u88ab\u9a71\u52a8\u6570\u503c\u6062\u590d\u5230\u573a\u666f\u4e2d"
+        u"\uff08\u4ec5\u9884\u89c8\uff0c\u4e0d\u505a\u6c38\u4e45\u4fee\u6539\uff09\u3002",
+    "pose_grid_add_pose_tip":
+        u"\u5c06 Maya \u5f53\u524d\u9a71\u52a8 + \u88ab\u9a71\u52a8\u6570\u503c\u6355\u83b7\u4e3a\u4e00\u4e2a\u65b0\u7684\u59ff\u52bf\u884c\u3002",
+    "pose_grid_delete_all_tip":
+        u"\u6e05\u7a7a\u8be5\u8282\u70b9\u7684\u5168\u90e8\u59ff\u52bf\u9879\u3002",
+    "delete_poses":                    u"\u5220\u9664\u59ff\u52bf",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

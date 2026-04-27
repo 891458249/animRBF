@@ -85,6 +85,11 @@ class _PoseEditorPanel(CollapsibleFrame):
     disconnectRequested  = QtCore.Signal()
     reloadRequested      = QtCore.Signal()
     autoFillChanged      = QtCore.Signal(bool)
+    # Phase 2 PoseGridEditor signals re-emitted at the panel level.
+    poseRecallRequested  = QtCore.Signal(int)
+    poseDeleteRequested  = QtCore.Signal(int)
+    poseDeleteAllRequested = QtCore.Signal()
+    poseValueChanged     = QtCore.Signal(int, str, int, float)
 
     def __init__(self, parent=None):
         super(_PoseEditorPanel, self).__init__(
@@ -122,6 +127,11 @@ class _PoseEditorPanel(CollapsibleFrame):
         self._outer_tabs.addTab(dd_widget, tr("tab_driver_driven"))
 
         # ---- Tab 2: Pose -----------------------------------------
+        # Phase 2 (2026-04-27): the pose tab is now a multi-source-
+        # aware grid (PoseGridEditor) instead of the legacy
+        # QTableView + PoseTableModel. The grid renders one row per
+        # pose with column groups derived from the active node's
+        # driverSource[] + drivenSource[] entries.
         pose_widget = QtWidgets.QWidget()
         pose_layout = QtWidgets.QVBoxLayout(pose_widget)
         pose_layout.setContentsMargins(4, 4, 4, 4)
@@ -142,39 +152,41 @@ class _PoseEditorPanel(CollapsibleFrame):
         self._lbl_poses.setStyleSheet("font-weight: bold;")
         pose_layout.addWidget(self._lbl_poses)
 
-        # QTableView (bound to PoseTableModel by the window).
-        self._table = QtWidgets.QTableView()
-        self._table.setAlternatingRowColors(True)
-        self._table.setSelectionBehavior(
-            QtWidgets.QAbstractItemView.SelectRows)
-        self._table.setSelectionMode(
-            QtWidgets.QAbstractItemView.SingleSelection)
-        self._table.verticalHeader().setVisible(False)
-        hdr = self._table.horizontalHeader()
-        hdr.setStretchLastSection(True)
-        hdr.setDefaultSectionSize(70)
-        self._table.setMinimumHeight(160)
-        pose_layout.addWidget(self._table, 1)
+        # PoseGridEditor (replaces QTableView).
+        from RBFtools.ui.widgets.pose_grid_editor import PoseGridEditor
+        self._pose_grid = PoseGridEditor()
+        self._pose_grid.setMinimumHeight(180)
+        pose_layout.addWidget(self._pose_grid, 1)
 
-        # Per-row action buttons are handled by the delegate /
-        # context menu rather than embedded widgets - keeps the
-        # model clean. Context menu on right-click:
+        # Legacy QTableView kept hidden (PoseTableModel still backs
+        # the controller's add_pose / update_pose paths via
+        # _gather_role_info; the table is the model's view of last
+        # resort during the migration). Hidden + zero-size so it
+        # doesn't take any visual real estate.
+        self._table = QtWidgets.QTableView()
+        self._table.setVisible(False)
+        self._table.setMaximumHeight(0)
         self._table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self._table.customContextMenuRequested.connect(
             self._show_row_menu)
+        pose_layout.addWidget(self._table)
 
         pose_layout.addWidget(_hline())
 
-        # Bottom action buttons (pose-level Add/Apply/Connect/etc.).
+        # Bottom action buttons (pose-level Apply/Connect/Disconnect/
+        # Reload). The Add Pose / Delete Poses pair lives inside the
+        # grid widget itself - we surface only Apply/Connect/Disc/Reload
+        # here. (The legacy _btn_add reference is preserved for
+        # backcompat with set_buttons_enabled + retranslate paths.)
         btn_row = QtWidgets.QHBoxLayout()
         self._btn_add        = QtWidgets.QPushButton(tr("add_pose"))
+        self._btn_add.setVisible(False)   # add lives in pose grid
         self._btn_apply      = QtWidgets.QPushButton(tr("apply"))
         self._btn_connect    = QtWidgets.QPushButton(tr("connect"))
         self._btn_disconnect = QtWidgets.QPushButton(tr("disconnect"))
         self._btn_reload     = QtWidgets.QPushButton(tr("reload"))
 
         for btn, key in [
-            (self._btn_add, "add_pose"),
             (self._btn_apply, "apply_poses"),
             (self._btn_connect, "connect_poses"),
             (self._btn_disconnect, "disconnect_poses"),
@@ -190,6 +202,20 @@ class _PoseEditorPanel(CollapsibleFrame):
         self._btn_reload.clicked.connect(self.reloadRequested)
         pose_layout.addLayout(btn_row)
 
+        # PoseGridEditor signals -> panel-level signals.
+        # Add Pose / Delete Poses live INSIDE the grid; surface them
+        # via the pose-editor panel signal interface for
+        # main_window slot wiring.
+        self._pose_grid.addPoseRequested.connect(self.addPoseRequested)
+        self._pose_grid.deleteAllPosesRequested.connect(
+            self._on_grid_delete_all_poses)
+        self._pose_grid.poseRecallRequested.connect(
+            self._on_grid_recall_pose)
+        self._pose_grid.poseDeleteRequested.connect(
+            self._on_grid_delete_pose)
+        self._pose_grid.poseValueChanged.connect(
+            self._on_grid_pose_value_changed)
+
         self._outer_tabs.addTab(pose_widget, tr("tab_pose"))
 
         # Default to the DriverDriven tab being active.
@@ -200,6 +226,38 @@ class _PoseEditorPanel(CollapsibleFrame):
     @property
     def table_view(self):
         return self._table
+
+    # ----- Phase 2 grid signal forwarding ----------------------------
+
+    def _on_grid_recall_pose(self, pose_index):
+        self.poseRecallRequested.emit(int(pose_index))
+
+    def _on_grid_delete_pose(self, pose_index):
+        self.poseDeleteRequested.emit(int(pose_index))
+
+    def _on_grid_delete_all_poses(self):
+        self.poseDeleteAllRequested.emit()
+
+    def _on_grid_pose_value_changed(self, pose_idx, side,
+                                    flat_idx, value):
+        self.poseValueChanged.emit(
+            int(pose_idx), str(side), int(flat_idx), float(value))
+
+    def reload_pose_grid(self, driver_sources, driven_sources, poses):
+        """Public hook for main_window: push the latest source +
+        pose state into the embedded PoseGridEditor so its rows
+        rebuild after each editorLoaded /
+        driver/drivenSourcesChanged signal cascade."""
+        try:
+            self._pose_grid.set_data(
+                driver_sources, driven_sources, poses)
+        except AttributeError:
+            pass
+
+    @property
+    def pose_grid(self):
+        """Read-only accessor for the embedded PoseGridEditor."""
+        return self._pose_grid
 
     @property
     def driver_editor(self):
@@ -949,6 +1007,13 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         pe.disconnectRequested.connect(self._on_disconnect)
         pe.reloadRequested.connect(self._on_reload)
         pe.autoFillChanged.connect(ctrl.set_auto_fill)
+        # Phase 2 PoseGridEditor signals.
+        pe.poseRecallRequested.connect(self._on_pose_grid_recall)
+        pe.poseDeleteRequested.connect(self._on_pose_grid_delete)
+        pe.poseDeleteAllRequested.connect(
+            self._on_pose_grid_delete_all)
+        pe.poseValueChanged.connect(
+            self._on_pose_grid_value_changed)
 
         # Row context-menu callback
         pe._row_action_callback = self._on_pose_row_action
@@ -1259,6 +1324,83 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
                 sources, available_attrs_per_source=available_per_source)
         except AttributeError:
             pass
+        # Phase 2: cascade into the pose grid as well.
+        self._refresh_pose_grid()
+
+    # ----- Phase 2 PoseGridEditor helpers + slots --------------------
+
+    def _refresh_pose_grid(self):
+        """Push the active node's driver / driven sources + poses
+        into the embedded PoseGridEditor so its column structure
+        + per-row spinboxes track the latest state."""
+        try:
+            drv_sources = list(self._ctrl.read_driver_sources())
+        except Exception:
+            drv_sources = []
+        try:
+            dvn_sources = list(self._ctrl.read_driven_sources())
+        except Exception:
+            dvn_sources = []
+        # Pose data lives on the controller's pose model.
+        poses = []
+        try:
+            for r in range(self._ctrl.pose_model.rowCount()):
+                p = self._ctrl.pose_model.get_pose(r)
+                if p is not None:
+                    poses.append(p)
+        except (AttributeError, Exception):
+            poses = []
+        self._pose_editor.reload_pose_grid(
+            drv_sources, dvn_sources, poses)
+
+    def _on_pose_grid_recall(self, pose_index):
+        """Phase 2: PoseGridEditor row Go to Pose -> recall_pose."""
+        drv_node, dvn_node, drv_attrs, dvn_attrs = (
+            self._gather_role_info())
+        self._ctrl.recall_pose(
+            int(pose_index), drv_node, dvn_node, drv_attrs, dvn_attrs)
+
+    def _on_pose_grid_delete(self, pose_index):
+        """Phase 2: PoseGridEditor row delete (right-click menu)."""
+        self._ctrl.delete_pose(int(pose_index))
+        self._refresh_pose_grid()
+
+    def _on_pose_grid_delete_all(self):
+        """Phase 2: PoseGridEditor 'Delete Poses' button - clears
+        every pose row from the model."""
+        try:
+            n = self._ctrl.pose_model.rowCount()
+        except (AttributeError, Exception):
+            n = 0
+        for r in range(n - 1, -1, -1):
+            self._ctrl.delete_pose(r)
+        self._refresh_pose_grid()
+
+    def _on_pose_grid_value_changed(self, pose_idx, side, flat_idx,
+                                     value):
+        """Phase 2: live edit of a spinbox in the grid -> push the
+        new value into the pose model. side is 'input' (driver) or
+        'value' (driven); flat_idx is the index in the flat
+        concat across all sources of that side."""
+        try:
+            pose = self._ctrl.pose_model.get_pose(int(pose_idx))
+        except (AttributeError, Exception):
+            return
+        if pose is None:
+            return
+        new_inputs = list(pose.inputs)
+        new_values = list(pose.values)
+        if side == "input":
+            if 0 <= flat_idx < len(new_inputs):
+                new_inputs[int(flat_idx)] = float(value)
+        elif side == "value":
+            if 0 <= flat_idx < len(new_values):
+                new_values[int(flat_idx)] = float(value)
+        try:
+            self._ctrl.pose_model.update_pose_values(
+                int(pose_idx), new_inputs, new_values)
+        except AttributeError:
+            pass
 
     def _resolve_available_attrs_per_source(self, sources):
         """M_TABBED_EDITOR helper: for each source's node, resolve
@@ -1401,6 +1543,9 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # gone (the legacy AttributeList it warned about no longer
         # exists). The tabbed editor IS the multi-source UI - no
         # additional notice needed.
+        # Phase 2: cascade the rebuild into the pose grid so its
+        # column structure tracks the new driver source list.
+        self._refresh_pose_grid()
 
     def _on_filters_changed(self, role, filters):
         """M_TABBED_EDITOR_INTEGRATION: filter UX lived on the
@@ -1470,6 +1615,8 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             drv_node, dvn_node, drv_attrs, dvn_attrs)
         if pose is not None:
             self._delegate.set_input_count(self._ctrl.pose_model.n_inputs)
+            # Phase 2: refresh the grid so the new pose row appears.
+            self._refresh_pose_grid()
 
     def _on_apply(self):
         self._set_interaction_enabled(False)
