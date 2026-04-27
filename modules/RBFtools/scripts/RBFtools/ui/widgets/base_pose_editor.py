@@ -142,10 +142,12 @@ class BasePoseEditor(QtWidgets.QWidget):
         if no_sources:
             return
 
-        # Header (same geometry contract as PoseGridEditor's header
-        # so the user perceives a consistent column track across tabs).
+        # Header (same QSplitter geometry contract as PoseGridEditor
+        # so column tracks read identically across tabs).
         self._header_widget = PoseHeaderWidget(
             self._driver_sources, self._driven_sources)
+        self._header_widget.splitterMoved.connect(
+            self._sync_column_widths)
         self._inner_layout.insertWidget(
             self._inner_layout.count() - 1,  # before stretch
             self._header_widget)
@@ -169,3 +171,28 @@ class BasePoseEditor(QtWidgets.QWidget):
         self._inner_layout.insertWidget(
             self._inner_layout.count() - 1,
             self._row_widget)
+
+        # Commit 2b: same Header-Driven Sync as PoseGridEditor.
+        QtCore.QTimer.singleShot(0, self._sync_column_widths)
+        self._sync_column_widths()
+
+    # ----- Header-Driven Sync (Commit 2b) ----------------------------
+
+    def _sync_column_widths(self, *_args):
+        if self._header_widget is None or self._row_widget is None:
+            return
+        try:
+            sizes = self._header_widget.splitter_sizes()
+        except AttributeError:
+            return
+        if len(sizes) < 3:
+            return
+        try:
+            self._row_widget.set_container_widths(
+                sizes[0], sizes[1], sizes[2])
+        except AttributeError:
+            pass
+
+    def showEvent(self, event):
+        super(BasePoseEditor, self).showEvent(event)
+        QtCore.QTimer.singleShot(0, self._sync_column_widths)

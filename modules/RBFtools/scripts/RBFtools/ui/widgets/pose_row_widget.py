@@ -1,20 +1,31 @@
 # -*- coding: utf-8 -*-
-"""Commit 2 (M_UIRECONCILE2): PoseHeaderWidget + PoseRowWidget.
+"""Commit 2 (M_UIRECONCILE2) + Commit 2b (M_UI_SPLITTER): Header +
+Row composers for the Pose / BaseDrivenPose tabs.
 
-Implements the *Header Separation* layout the user specified for the
-Pose tab refactor:
+Layout (Commit 2b — *Header-Driven Sync*):
 
-  ┌─ PoseHeaderWidget (instantiated ONCE at top of list) ─────────────┐
-  │  [PoseLabel ph]  [DriverBoneBox]…  [GoBtn ph]  [DrivenBoneBox]…   │
-  │                                                  [Radius ph][Acts]│
-  └────────────────────────────────────────────────────────────────────┘
-  ┌─ PoseRowWidget (one per pose) ────────────────────────────────────┐
-  │  "Pose 0"  [drv spins]…  [Go]  [drvn spins]…  [Radius]  [Edit][X] │
-  └────────────────────────────────────────────────────────────────────┘
+  ┌─ PoseHeaderWidget ─────────────────────────────────────────────┐
+  │ ┌── QSplitter(H), children-non-collapsible ──────────────────┐ │
+  │ │ DriverContainer│ DrivenContainer │ TailContainer (Radius)  │ │
+  │ │ pose_lbl + N×  │ go_btn + N×     │ radius_hdr + acts_ph    │ │
+  │ │ BoneDataGrpBox │ BoneDataGrpBox  │                         │ │
+  │ └──────^─────────────────^────────────────^──────────────────┘ │
+  │  user-draggable column boundaries (the only QSplitter on tab)  │
+  └────────|──splitterMoved───|────────────────|──────────────────┘
+           ▼                  ▼                ▼
+  ┌─ PoseRowWidget (one per pose; NO splitter inside) ─────────────┐
+  │  driver_container│  driven_container│  tail_container          │
+  │  width-locked from header pane sizes via set_container_widths()│
+  └────────────────────────────────────────────────────────────────┘
 
-Column widths are pinned by :data:`bone_data_widgets.COL_WIDTH` so
-the bare row spinboxes sit directly under their matching header
-attr labels.
+Width sync contract: PoseGridEditor (and BasePoseEditor) listen to
+the header's :attr:`splitterMoved` signal, query
+:meth:`PoseHeaderWidget.splitter_sizes`, and call
+:meth:`PoseRowWidget.set_container_widths` on every row so the three
+column tracks line up across header + N rows. An initial sync runs
+after every :meth:`PoseGridEditor.set_data` rebuild + a one-shot
+``QTimer.singleShot(0, ...)`` so Qt has time to compute the splitter's
+default geometry.
 """
 
 from __future__ import absolute_import
@@ -23,82 +34,117 @@ from RBFtools.ui.compat import QtCore, QtWidgets
 from RBFtools.ui.i18n import tr
 from RBFtools.ui.widgets.bone_data_widgets import (
     BoneDataGroupBox, BoneRowDataWidget,
-    COL_WIDTH, COL_SPACING, COL_MARGIN,
+    COL_SPACING, COL_MARGIN,
     RADIUS_COLOR,
 )
 
 
-# Geometry pins so Header / Row / footer columns align across all
-# instantiated rows.
-POSE_LABEL_W = 70
-GO_BTN_W     = 90
-RADIUS_W     = 90
-ACTIONS_W    = 130
+# Minimum widths (Commit 2b: hints, not absolute pins). The Header
+# QSplitter drives runtime sizes; these establish floors so the user
+# can't drag a column into oblivion.
+POSE_LABEL_MIN_W = 60
+GO_BTN_MIN_W     = 70
+RADIUS_MIN_W     = 80
+ACTIONS_MIN_W    = 110
 
 
 # ----------------------------------------------------------------------
-# Header — instantiated ONCE per Pose tab
+# Header — instantiated ONCE per Pose / BaseDrivenPose tab
 # ----------------------------------------------------------------------
 
 
 class PoseHeaderWidget(QtWidgets.QWidget):
     """Top-of-list bone-name + attr-name strip.
 
-    Builds one :class:`BoneDataGroupBox` per driver source (red), then
-    a Go-button-shaped placeholder, then one per driven source (blue),
-    then a Radius / Actions placeholder pair. Column widths are pinned
-    so :class:`PoseRowWidget` rows sit underneath without manual
-    calibration.
+    Outer layout is a horizontal QSplitter with three panes:
+
+      0. driver_container — pose-label placeholder + per-driver-source
+         BoneDataGroupBox (red).
+      1. driven_container — go-button placeholder + per-driven-source
+         BoneDataGroupBox (blue).
+      2. tail_container   — radius-column header + actions placeholder.
+
+    Re-emits ``splitterMoved(int pos, int index)`` so PoseGridEditor /
+    BasePoseEditor can keep the row containers width-locked to the
+    header's pane sizes.
     """
+
+    splitterMoved = QtCore.Signal(int, int)
 
     def __init__(self, driver_sources, driven_sources, parent=None):
         super(PoseHeaderWidget, self).__init__(parent)
         self._driver_sources = list(driver_sources or [])
         self._driven_sources = list(driven_sources or [])
 
-        h = QtWidgets.QHBoxLayout(self)
-        h.setContentsMargins(COL_MARGIN, COL_MARGIN,
-                             COL_MARGIN, COL_MARGIN)
-        h.setSpacing(COL_SPACING)
+        outer = QtWidgets.QHBoxLayout(self)
+        outer.setContentsMargins(COL_MARGIN, COL_MARGIN,
+                                 COL_MARGIN, COL_MARGIN)
+        outer.setSpacing(0)
 
-        # Pose label column placeholder.
+        self._splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.splitterMoved.connect(self.splitterMoved)
+        outer.addWidget(self._splitter, 1)
+
+        # Pane 0: Driver header.
+        drv_c = QtWidgets.QWidget()
+        drv_l = QtWidgets.QHBoxLayout(drv_c)
+        drv_l.setContentsMargins(0, 0, 0, 0)
+        drv_l.setSpacing(COL_SPACING)
         ph_pose = QtWidgets.QLabel("")
-        ph_pose.setFixedWidth(POSE_LABEL_W)
-        h.addWidget(ph_pose)
-
-        # Driver side header boxes.
+        ph_pose.setMinimumWidth(POSE_LABEL_MIN_W)
+        drv_l.addWidget(ph_pose)
         for src in self._driver_sources:
             box = BoneDataGroupBox(
                 src.node, list(src.attrs), side="driver")
-            h.addWidget(box)
+            drv_l.addWidget(box, 1)
+        drv_l.addStretch(1)
+        self._splitter.addWidget(drv_c)
 
-        # Go-button column placeholder.
+        # Pane 1: Driven header.
+        dvn_c = QtWidgets.QWidget()
+        dvn_l = QtWidgets.QHBoxLayout(dvn_c)
+        dvn_l.setContentsMargins(0, 0, 0, 0)
+        dvn_l.setSpacing(COL_SPACING)
         ph_go = QtWidgets.QLabel("")
-        ph_go.setFixedWidth(GO_BTN_W)
-        h.addWidget(ph_go)
-
-        # Driven side header boxes.
+        ph_go.setMinimumWidth(GO_BTN_MIN_W)
+        dvn_l.addWidget(ph_go)
         for src in self._driven_sources:
             box = BoneDataGroupBox(
                 src.node, list(src.attrs), side="driven")
-            h.addWidget(box)
+            dvn_l.addWidget(box, 1)
+        dvn_l.addStretch(1)
+        self._splitter.addWidget(dvn_c)
 
-        # Radius column placeholder.
+        # Pane 2: Tail (Radius header + Actions placeholder).
+        tail_c = QtWidgets.QWidget()
+        tail_l = QtWidgets.QHBoxLayout(tail_c)
+        tail_l.setContentsMargins(0, 0, 0, 0)
+        tail_l.setSpacing(COL_SPACING)
         ph_rad = QtWidgets.QLabel(tr("radius"))
         ph_rad.setAlignment(QtCore.Qt.AlignCenter)
-        ph_rad.setFixedWidth(RADIUS_W)
+        ph_rad.setMinimumWidth(RADIUS_MIN_W)
         ph_rad.setStyleSheet(
             "color: {color}; font-weight: bold;"
             "border: 1px solid {color}; border-radius: 3px;"
             "padding: 2px;".format(color=RADIUS_COLOR))
-        h.addWidget(ph_rad)
-
-        # Actions column placeholder.
+        tail_l.addWidget(ph_rad)
         ph_act = QtWidgets.QLabel("")
-        ph_act.setFixedWidth(ACTIONS_W)
-        h.addWidget(ph_act)
+        ph_act.setMinimumWidth(ACTIONS_MIN_W)
+        tail_l.addWidget(ph_act)
+        tail_l.addStretch(1)
+        self._splitter.addWidget(tail_c)
 
-        h.addStretch(1)
+        # Initial stretch — driver / driven get the bulk; tail compact.
+        self._splitter.setStretchFactor(0, 3)
+        self._splitter.setStretchFactor(1, 3)
+        self._splitter.setStretchFactor(2, 1)
+
+    def splitter_sizes(self):
+        """Return ``[drv_w, dvn_w, tail_w]`` (current Splitter pane
+        sizes). Used by PoseGridEditor / BasePoseEditor to width-lock
+        every row's matching containers."""
+        return list(self._splitter.sizes())
 
 
 # ----------------------------------------------------------------------
@@ -109,33 +155,24 @@ class PoseHeaderWidget(QtWidgets.QWidget):
 class PoseRowWidget(QtWidgets.QWidget):
     """A single pose row.
 
-    Layout (left → right):
+    Outer is a single QHBoxLayout (NO splitter — only the header has a
+    splitter; rows mirror its sizes via :meth:`set_container_widths`).
+    Three containers mirror the header's three panes:
 
-        [Pose N label] [driver clusters…] [Go] [driven clusters…]
-            [Radius spin (green)] [Edit] [Delete]
+      ``driver_container`` — pose-label + driver BoneRowDataWidgets
+      ``driven_container`` — go-button + driven BoneRowDataWidgets
+      ``tail_container``   — green Radius spin + Update + Delete
 
-    Signals (Commit 3 — C2 semantic refactor)
-    -------
-    poseValueChangedV2(int pose_idx, str side, int source_idx,
-                       str attr_name, float new_value)
-        Spinbox edit. ``side`` is ``"input"`` (driver) or ``"value"``
-        (driven). ``source_idx`` indexes into the side's source list;
-        ``attr_name`` is the literal attr (``"rotateX"`` etc.). The
-        legacy flat_attr_idx form was dropped per the user's hard
-        decree — semantic-arg form is the single supported contract.
-        ``pose_idx == -1`` is the BasePose sentinel: the row was
-        constructed with ``is_base_pose=True`` and edits should write
-        to ``shape.basePoseValue[]`` rather than ``shape.poses[]``.
-    poseRadiusChanged(int pose_idx, float new_radius)
-        The green Radius spinbox was edited (suppressed in BasePose
-        mode — radius has no semantic on the rest pose).
-    poseRecallRequested(int pose_idx)
-        "Go to Pose" clicked. ``pose_idx == -1`` => recall basePose.
-    poseDeleteRequested(int pose_idx)
-        Right-click → Delete (suppressed in BasePose mode).
+    Signals — see module docstring of base_pose_editor.py for the
+    BasePose sentinel contract; otherwise:
+
+      poseValueChangedV2(int pose_idx, str side, int source_idx,
+                         str attr_name, float new_value)
+      poseRadiusChanged(int pose_idx, float new_radius)
+      poseRecallRequested(int pose_idx)
+      poseDeleteRequested(int pose_idx)
     """
 
-    # C2 semantic signal — replaces legacy poseValueChanged.
     poseValueChangedV2  = QtCore.Signal(int, str, int, str, float)
     poseRadiusChanged   = QtCore.Signal(int, float)
     poseRecallRequested = QtCore.Signal(int)
@@ -147,39 +184,36 @@ class PoseRowWidget(QtWidgets.QWidget):
                  inputs, values, radius=5.0, parent=None,
                  is_base_pose=False):
         super(PoseRowWidget, self).__init__(parent)
-        self._pose_index = int(pose_index)
+        self._pose_index   = int(pose_index)
         self._is_base_pose = bool(is_base_pose)
         self._driver_sources = list(driver_sources or [])
         self._driven_sources = list(driven_sources or [])
 
-        h = QtWidgets.QHBoxLayout(self)
-        h.setContentsMargins(COL_MARGIN, COL_SPACING,
-                             COL_MARGIN, COL_SPACING)
-        h.setSpacing(COL_SPACING)
+        outer = QtWidgets.QHBoxLayout(self)
+        outer.setContentsMargins(COL_MARGIN, COL_SPACING,
+                                 COL_MARGIN, COL_SPACING)
+        outer.setSpacing(0)
 
-        # Pose label. BasePose mode: literal "Base Pose" instead of
-        # the indexed format, so the UI is self-explanatory and the
-        # right-click "Delete" affordance is suppressed.
+        # ----- driver_container -------------------------------------
+        self._driver_container = QtWidgets.QWidget()
+        drv_l = QtWidgets.QHBoxLayout(self._driver_container)
+        drv_l.setContentsMargins(0, 0, 0, 0)
+        drv_l.setSpacing(COL_SPACING)
+
         if self._is_base_pose:
             label_text = tr("base_pose_label_fallback")
         else:
             label_text = tr("pose_grid_row_label").format(
                 idx=self._pose_index)
         self._lbl_pose = QtWidgets.QLabel(label_text)
-        self._lbl_pose.setFixedWidth(POSE_LABEL_W)
+        self._lbl_pose.setMinimumWidth(POSE_LABEL_MIN_W)
         if not self._is_base_pose:
             self._lbl_pose.setContextMenuPolicy(
                 QtCore.Qt.CustomContextMenu)
             self._lbl_pose.customContextMenuRequested.connect(
                 self._show_row_menu)
-        h.addWidget(self._lbl_pose)
+        drv_l.addWidget(self._lbl_pose)
 
-        # Driver-side bare clusters. Each cluster's local valueChanged
-        # is mapped to the C2 semantic signal carrying the source_idx
-        # + attr_name pair (no more flat_attr_idx). In BasePose mode
-        # the driver clusters are visible (so the Header sits over
-        # *something*) but disabled — basePose has no driver semantic;
-        # only the driven-side baseline is meaningful.
         for src_idx, src in enumerate(self._driver_sources):
             attrs = list(src.attrs)
             attr_offset = sum(
@@ -197,20 +231,24 @@ class PoseRowWidget(QtWidgets.QWidget):
                             int(_src),
                             str(_attrs[int(local_i)]),
                             float(val)))
-            h.addWidget(cluster)
+            drv_l.addWidget(cluster, 1)
+        drv_l.addStretch(1)
+        outer.addWidget(self._driver_container)
 
-        # Go to Pose.
+        # ----- driven_container -------------------------------------
+        self._driven_container = QtWidgets.QWidget()
+        dvn_l = QtWidgets.QHBoxLayout(self._driven_container)
+        dvn_l.setContentsMargins(0, 0, 0, 0)
+        dvn_l.setSpacing(COL_SPACING)
+
         self._btn_go = QtWidgets.QPushButton(tr("pose_grid_go_to_pose"))
         self._btn_go.setToolTip(tr("pose_grid_go_to_pose_tip"))
-        self._btn_go.setFixedWidth(GO_BTN_W)
+        self._btn_go.setMinimumWidth(GO_BTN_MIN_W)
         self._btn_go.clicked.connect(
             lambda _checked=False:
                 self.poseRecallRequested.emit(self._pose_index))
-        h.addWidget(self._btn_go)
+        dvn_l.addWidget(self._btn_go)
 
-        # Driven-side bare clusters. Always editable — driven side is
-        # the meaningful axis for both regular poses and the BasePose
-        # baseline.
         for src_idx, src in enumerate(self._driven_sources):
             attrs = list(src.attrs)
             attr_offset = sum(
@@ -225,19 +263,23 @@ class PoseRowWidget(QtWidgets.QWidget):
                         int(_src),
                         str(_attrs[int(local_i)]),
                         float(val)))
-            h.addWidget(cluster)
+            dvn_l.addWidget(cluster, 1)
+        dvn_l.addStretch(1)
+        outer.addWidget(self._driven_container)
 
-        # Green Radius spin (per-pose σ — wired through Commit 0/1
-        # schema). Hidden in BasePose mode per user spec: BasePose has
-        # no influence-radius concept (it is a single fixed baseline,
-        # not a kernel center).
+        # ----- tail_container (Radius + Actions) ---------------------
+        self._tail_container = QtWidgets.QWidget()
+        tail_l = QtWidgets.QHBoxLayout(self._tail_container)
+        tail_l.setContentsMargins(0, 0, 0, 0)
+        tail_l.setSpacing(COL_SPACING)
+
         self._radius_box = QtWidgets.QGroupBox()
         self._radius_box.setStyleSheet(
             "QGroupBox {{ border: 1px solid {color}; border-radius: 3px;"
             "padding: 1px; margin: 0px; }}"
             "QDoubleSpinBox {{ color: {color}; }}".format(
                 color=RADIUS_COLOR))
-        self._radius_box.setFixedWidth(RADIUS_W)
+        self._radius_box.setMinimumWidth(RADIUS_MIN_W)
         rb_l = QtWidgets.QHBoxLayout(self._radius_box)
         rb_l.setContentsMargins(2, 2, 2, 2)
         rb_l.setSpacing(0)
@@ -253,30 +295,43 @@ class PoseRowWidget(QtWidgets.QWidget):
             lambda v: self.poseRadiusChanged.emit(
                 self._pose_index, float(v)))
         rb_l.addWidget(self._spin_radius)
-        h.addWidget(self._radius_box)
+        tail_l.addWidget(self._radius_box)
         if self._is_base_pose:
             self._radius_box.setVisible(False)
 
-        # Actions: Update (re-capture this pose, semantics match the
-        # legacy "Edit" affordance) + Delete. Hidden in BasePose mode
-        # per user spec: rest pose is unique and cannot be deleted.
         self._btn_edit = QtWidgets.QPushButton(tr("update"))
-        self._btn_edit.setFixedWidth(ACTIONS_W // 2 - 4)
+        self._btn_edit.setMinimumWidth(ACTIONS_MIN_W // 2 - 4)
         self._btn_edit.clicked.connect(
             lambda _checked=False:
                 self.poseRecallRequested.emit(self._pose_index))
-        h.addWidget(self._btn_edit)
+        tail_l.addWidget(self._btn_edit)
         self._btn_del = QtWidgets.QPushButton(tr("delete"))
-        self._btn_del.setFixedWidth(ACTIONS_W // 2 - 4)
+        self._btn_del.setMinimumWidth(ACTIONS_MIN_W // 2 - 4)
         self._btn_del.clicked.connect(
             lambda _checked=False:
                 self.poseDeleteRequested.emit(self._pose_index))
-        h.addWidget(self._btn_del)
+        tail_l.addWidget(self._btn_del)
         if self._is_base_pose:
             self._btn_edit.setVisible(False)
             self._btn_del.setVisible(False)
+        tail_l.addStretch(1)
+        outer.addWidget(self._tail_container)
 
-        h.addStretch(1)
+        outer.addStretch(0)
+
+    # -- Header-Driven Sync API ----------------------------------------
+
+    def set_container_widths(self, drv_w, dvn_w, tail_w):
+        """Commit 2b: width-lock the three row containers to the
+        header's QSplitter pane sizes. Called by the parent
+        PoseGridEditor / BasePoseEditor on splitterMoved + once
+        after every set_data() rebuild."""
+        for c, w in ((self._driver_container, drv_w),
+                     (self._driven_container, dvn_w),
+                     (self._tail_container,   tail_w)):
+            wi = max(int(w), 0)
+            c.setMinimumWidth(wi)
+            c.setMaximumWidth(wi)
 
     # -- internal --
 

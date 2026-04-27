@@ -24,8 +24,12 @@ from __future__ import absolute_import
 from RBFtools.ui.compat import QtCore, QtWidgets
 
 
-# Locked column geometry so Header labels sit directly above Row spins.
-COL_WIDTH       = 78
+# Commit 2b (M_UI_SPLITTER): width tokens are now MINIMUM hints, not
+# absolute constraints. The Header QSplitter drives container widths
+# at runtime (Header-Driven Sync pattern); internal widgets shrink /
+# grow to fit. COL_MIN_WIDTH is the smallest spinbox the user can
+# resize a column down to — below that, click-targets become unusable.
+COL_MIN_WIDTH   = 60
 COL_SPACING     = 2
 COL_MARGIN      = 4
 
@@ -94,15 +98,23 @@ class BoneDataGroupBox(QtWidgets.QGroupBox):
         for a in self._attrs:
             lbl = QtWidgets.QLabel(a)
             lbl.setAlignment(QtCore.Qt.AlignCenter)
-            lbl.setFixedWidth(COL_WIDTH)
+            # Commit 2b: COL_MIN_WIDTH is a hint; the cluster grows
+            # with the splitter pane it lives in.
+            lbl.setMinimumWidth(COL_MIN_WIDTH)
+            lbl.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding,
+                QtWidgets.QSizePolicy.Preferred)
             self._attr_labels.append(lbl)
-            attr_row.addWidget(lbl)
+            attr_row.addWidget(lbl, 1)
         v.addLayout(attr_row)
 
-        # Lock outer width to attrs * COL_WIDTH so row cluster aligns.
         n = max(1, len(self._attrs))
-        outer_w = n * COL_WIDTH + (n - 1) * COL_SPACING + 2 * COL_MARGIN + 4
-        self.setFixedWidth(outer_w)
+        self.setMinimumWidth(
+            n * COL_MIN_WIDTH + (n - 1) * COL_SPACING
+            + 2 * COL_MARGIN + 4)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Preferred)
 
 
 # ----------------------------------------------------------------------
@@ -139,7 +151,11 @@ class BoneRowDataWidget(QtWidgets.QWidget):
             sb = QtWidgets.QDoubleSpinBox()
             sb.setRange(-1e9, 1e9)
             sb.setDecimals(3)
-            sb.setFixedWidth(COL_WIDTH)
+            # Commit 2b: spinboxes flex with the column they live in.
+            sb.setMinimumWidth(COL_MIN_WIDTH)
+            sb.setSizePolicy(
+                QtWidgets.QSizePolicy.Expanding,
+                QtWidgets.QSizePolicy.Fixed)
             try:
                 sb.setValue(float(vals[i]))
             except (TypeError, ValueError):
@@ -148,11 +164,14 @@ class BoneRowDataWidget(QtWidgets.QWidget):
                 lambda v, _i=i: self.valueChanged.emit(
                     _i, float(v)))
             self._spins.append(sb)
-            h.addWidget(sb)
+            h.addWidget(sb, 1)
 
         n = max(1, len(self._attrs))
-        outer_w = n * COL_WIDTH + (n - 1) * COL_SPACING + 2 * COL_MARGIN
-        self.setFixedWidth(outer_w)
+        self.setMinimumWidth(
+            n * COL_MIN_WIDTH + (n - 1) * COL_SPACING + 2 * COL_MARGIN)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Fixed)
 
     def values(self):
         return [s.value() for s in self._spins]

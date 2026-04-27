@@ -58,11 +58,16 @@ class TestM_UIRECONCILE2_SourceScan(unittest.TestCase):
         self.assertIn("class BoneDataGroupBox", self._bone)
         self.assertIn("class BoneRowDataWidget", self._bone)
 
-    def test_bone_data_locked_column_width(self):
-        # COL_WIDTH constant pinned + setFixedWidth used so header
-        # and row line up without runtime calibration.
-        self.assertIn("COL_WIDTH", self._bone)
-        self.assertIn("setFixedWidth", self._bone)
+    def test_bone_data_min_column_width(self):
+        # Commit 2b: setFixedWidth replaced by setMinimumWidth so the
+        # internal widgets shrink/grow with the header QSplitter
+        # pane they live in. COL_MIN_WIDTH replaces COL_WIDTH.
+        self.assertIn("COL_MIN_WIDTH", self._bone)
+        self.assertIn("setMinimumWidth", self._bone)
+        self.assertNotIn("setFixedWidth", self._bone,
+            "Commit 2b: bone widgets must NOT pin width; the Header "
+            "QSplitter is the single source of truth for column "
+            "geometry.")
 
     def test_bone_data_color_styles(self):
         # Red driver / blue driven / green radius — all three
@@ -166,16 +171,15 @@ class TestM_UIRECONCILE2_RowSignals(unittest.TestCase):
 
 class TestM_UIRECONCILE2_AlignmentContract(unittest.TestCase):
 
-    def test_col_width_shared_across_modules(self):
+    def test_col_min_width_shared_across_modules(self):
         bone = _read(_BONE_PY)
         row  = _read(_ROW_PY)
-        # COL_WIDTH must be defined in bone_data_widgets and
-        # imported (not redefined) in pose_row_widget so both
-        # column tracks key off the same number.
-        self.assertIn("COL_WIDTH", bone)
+        # Commit 2b: COL_WIDTH (absolute) replaced by COL_MIN_WIDTH
+        # (hint). Defined in bone_data_widgets, imported by
+        # pose_row_widget transitively via the BoneRowDataWidget.
+        self.assertIn("COL_MIN_WIDTH", bone)
         self.assertIn("from RBFtools.ui.widgets.bone_data_widgets",
                       row)
-        self.assertIn("COL_WIDTH", row)
 
     def test_no_per_row_scroll_area(self):
         row  = _read(_ROW_PY)

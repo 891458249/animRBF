@@ -123,14 +123,25 @@ class _PoseEditorPanel(CollapsibleFrame):
         lay.addWidget(self._outer_tabs, 1)
 
         # ---- Tab 1: DriverDriven ---------------------------------
+        # Commit 2b (M_UI_SPLITTER): the driver/driven panels live
+        # inside a horizontal QSplitter so the user can drag the
+        # divider to reallocate width when one side has long bone
+        # names. Initial stretch 1:1; the splitter's children are
+        # NOT collapsible so a careless drag cannot zero-width
+        # either editor.
         dd_widget = QtWidgets.QWidget()
         dd_layout = QtWidgets.QHBoxLayout(dd_widget)
         dd_layout.setContentsMargins(4, 4, 4, 4)
-        dd_layout.setSpacing(6)
+        dd_layout.setSpacing(0)
         self._driver_editor = TabbedDriverSourceEditor()
         self._driven_editor = TabbedDrivenSourceEditor()
-        dd_layout.addWidget(self._driver_editor, 1)
-        dd_layout.addWidget(self._driven_editor, 1)
+        self._dd_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self._dd_splitter.setChildrenCollapsible(False)
+        self._dd_splitter.addWidget(self._driver_editor)
+        self._dd_splitter.addWidget(self._driven_editor)
+        self._dd_splitter.setStretchFactor(0, 1)
+        self._dd_splitter.setStretchFactor(1, 1)
+        dd_layout.addWidget(self._dd_splitter, 1)
         self._outer_tabs.addTab(dd_widget, tr("tab_driver_driven"))
 
         # ---- Tab 2: Pose -----------------------------------------

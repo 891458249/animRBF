@@ -173,8 +173,12 @@ class PoseGridEditor(QtWidgets.QWidget):
 
         # Header: one BoneDataGroupBox per driver source (red), one
         # per driven source (blue), Radius / Actions placeholders.
+        # Commit 2b: header itself is a QSplitter; we listen to its
+        # moves to width-lock every row's three containers.
         self._header_widget = PoseHeaderWidget(
             self._driver_sources, self._driven_sources)
+        self._header_widget.splitterMoved.connect(
+            self._sync_column_widths)
         self._inner_layout.insertWidget(
             self._inner_layout.count() - 1,  # before stretch
             self._header_widget)
@@ -199,3 +203,39 @@ class PoseGridEditor(QtWidgets.QWidget):
             self._inner_layout.insertWidget(
                 self._inner_layout.count() - 1,  # before stretch
                 row)
+
+        # Initial sync — the splitter has not yet computed its
+        # default geometry inside the freshly-built widget tree, so
+        # defer to next event-loop tick. Direct call covers headless
+        # / mock environments where singleShot is a no-op.
+        QtCore.QTimer.singleShot(0, self._sync_column_widths)
+        self._sync_column_widths()
+
+    # ----- Header-Driven Sync (Commit 2b) ----------------------------
+
+    def _sync_column_widths(self, *_args):
+        """Width-lock every PoseRowWidget's three containers to the
+        Header QSplitter's current pane sizes. Called on
+        splitterMoved + once after each set_data() rebuild + once
+        on showEvent so initial state is aligned without user
+        interaction."""
+        if self._header_widget is None:
+            return
+        try:
+            sizes = self._header_widget.splitter_sizes()
+        except AttributeError:
+            return
+        if len(sizes) < 3:
+            return
+        drv_w, dvn_w, tail_w = sizes[0], sizes[1], sizes[2]
+        for row in self._row_widgets:
+            try:
+                row.set_container_widths(drv_w, dvn_w, tail_w)
+            except AttributeError:
+                pass
+
+    def showEvent(self, event):
+        super(PoseGridEditor, self).showEvent(event)
+        # First show: splitter geometry is settled; re-sync so any
+        # rows built in a hidden tab pick up the correct widths.
+        QtCore.QTimer.singleShot(0, self._sync_column_widths)
