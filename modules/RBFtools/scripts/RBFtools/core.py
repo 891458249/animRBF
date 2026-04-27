@@ -3519,6 +3519,54 @@ def _flatten_targets(targets):
     return plugs
 
 
+@contextlib.contextmanager
+def _node_state_frozen(shape):
+    """2026-04-28 (M_CRASH_FIX defense 2): freeze the solver node's
+    DG compute for the duration of a batch wire/unwire storm.
+
+    Setting ``nodeState`` to 1 (``HasNoEffect``) tells Maya to skip
+    ``compute()`` on the node entirely. Without this, every single
+    ``cmds.connectAttr`` against ``shape.input[i]`` /
+    ``shape.output[i]`` triggers DG dirty propagation, the C++
+    ``compute()`` runs with a half-wired ``input[]`` array, and any
+    array-bound assertion in the kernel build (M1.4 / M2.1a /
+    M2.2 paths) explodes -> CTD.
+
+    Restoration is in ``finally`` so an exception inside the loop
+    cannot leave a node permanently disabled. Failure to read or
+    restore the prior state surfaces via ``cmds.warning`` rather
+    than the silent state corruption it would be otherwise.
+    """
+    plug = "{}.nodeState".format(shape)
+    prev_state = 0
+    captured = False
+    try:
+        prev_state = int(cmds.getAttr(plug))
+        captured = True
+    except Exception as exc:
+        cmds.warning(
+            "_node_state_frozen: could not read {} ({}); proceeding "
+            "WITHOUT freeze (crash-risk path).".format(plug, exc))
+    if captured:
+        try:
+            cmds.setAttr(plug, 1)   # 1 == HasNoEffect
+        except Exception as exc:
+            cmds.warning(
+                "_node_state_frozen: could not set {}=1 ({}); "
+                "proceeding without freeze".format(plug, exc))
+            captured = False
+    try:
+        yield
+    finally:
+        if captured:
+            try:
+                cmds.setAttr(plug, prev_state)
+            except Exception as exc:
+                cmds.warning(
+                    "_node_state_frozen: failed to restore {} -> "
+                    "{}: {}".format(plug, prev_state, exc))
+
+
 def connect_routed(node, driver_targets, driven_targets):
     """2026-04-28 (M_BATCH_ROUTING): tab-aware Connect.
 
@@ -3533,9 +3581,11 @@ def connect_routed(node, driver_targets, driven_targets):
       driver_plugs[i]  ──→  shape.input[i]
       shape.output[i]  ──→  driven_plugs[i]
 
-    Replaces :func:`connect_node` for the routed UI path. Plugs
-    beyond the assembled length are NOT cleared — caller is expected
-    to pair this with :func:`disconnect_routed` when scope shrinks.
+    M_CRASH_FIX defense 2 (2026-04-28): the entire connectAttr loop
+    runs INSIDE :func:`_node_state_frozen` — the solver's nodeState
+    is forced to ``HasNoEffect`` so the half-wired ``input[]`` array
+    cannot trigger ``compute()`` mid-construction. Restoration is in
+    ``finally``; exceptions cannot leak a permanent freeze.
     """
     shape = get_shape(node)
     if not _exists(shape):
@@ -3546,7 +3596,8 @@ def connect_routed(node, driver_targets, driven_targets):
     drv_plugs = _flatten_targets(driver_targets)
     dvn_plugs = _flatten_targets(driven_targets)
 
-    with undo_chunk("RBFtools: connect routed"):
+    with undo_chunk("RBFtools: connect routed"), \
+         _node_state_frozen(shape):
         for i, src in enumerate(drv_plugs):
             dst = "{}.input[{}]".format(shape, i)
             try:
@@ -3563,8 +3614,17 @@ def connect_routed(node, driver_targets, driven_targets):
                 cmds.warning(
                     "connect_routed: {} → {} failed: {}".format(
                         src, dst, exc))
+    # nodeState restored by the context manager exit. Trigger a
+    # SINGLE consolidated re-evaluation outside the freeze window so
+    # the solver runs exactly once with the FINAL fully-wired array,
+    # not N partial computes during the storm.
+    try:
         cmds.setAttr(shape + ".evaluate", 0)
         cmds.setAttr(shape + ".evaluate", 1)
+    except Exception as exc:
+        cmds.warning(
+            "connect_routed: post-freeze evaluate toggle failed: "
+            "{}".format(exc))
 
 
 def disconnect_routed(node, driver_targets, driven_targets):
@@ -3591,7 +3651,11 @@ def disconnect_routed(node, driver_targets, driven_targets):
     drv_plugs = _flatten_targets(driver_targets)
     dvn_plugs = _flatten_targets(driven_targets)
 
-    with undo_chunk("RBFtools: disconnect routed"):
+    with undo_chunk("RBFtools: disconnect routed"), \
+         _node_state_frozen(shape):
+        # M_CRASH_FIX defense 2 (2026-04-28): same nodeState freeze
+        # as connect_routed — disconnectAttr also dirties the DG and
+        # can re-fire compute() while the array is shrinking.
         # Driver side: bone.attr → shape.input[i]. List the OUTGOING
         # connections of bone.attr; keep only those targeting THIS
         # solver's input[] subscript.

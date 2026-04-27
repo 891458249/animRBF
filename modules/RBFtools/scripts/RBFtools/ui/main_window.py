@@ -577,6 +577,14 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Delegate (updated when columns change)
         self._delegate = PoseDelegate(n_inputs=0, parent=self)
 
+        # M_CRASH_FIX defense 3 (2026-04-28): re-entrancy lock.
+        # Set to True during a batch Connect/Disconnect storm so
+        # _refresh_pose_grid + _refresh_base_pose_panel become
+        # no-ops and node-change callbacks cannot re-paint the
+        # tabbed editors mid-operation (which would invalidate
+        # the very widget pointers the slot is iterating over -> CTD).
+        self._is_updating = False
+
         self._build_ui()
         self._connect_signals()
 
@@ -1480,6 +1488,10 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         """Push the active node's driver / driven sources + poses
         into the embedded PoseGridEditor so its column structure
         + per-row spinboxes track the latest state."""
+        # M_CRASH_FIX defense 3: skip during a batch storm. Caller
+        # invokes a single consolidated refresh after the storm.
+        if getattr(self, "_is_updating", False) is True:
+            return
         try:
             drv_sources = list(self._ctrl.read_driver_sources())
         except Exception:
@@ -1619,6 +1631,9 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
 
     def _refresh_base_pose_panel(self):
         """Push read_base_pose_values into the BasePoseEditor."""
+        # M_CRASH_FIX defense 3: skip during a batch storm.
+        if getattr(self, "_is_updating", False) is True:
+            return
         try:
             drv_sources = list(self._ctrl.read_driver_sources())
         except Exception:
@@ -1890,45 +1905,85 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._set_interaction_enabled(True)
 
     def _gather_routed_targets(self):
-        """2026-04-28 (M_BATCH_ROUTING): consult the per-side Batch
-        checkboxes on the tabbed editors and return a pair of
-        ``[(node, [attr, ...]), ...]`` lists.
+        """2026-04-28 (M_BATCH_ROUTING + M_CRASH_FIX defense 1):
+        PURE-STRING UI READ. Walks the driver / driven tabbed
+        editors and returns
 
-        Replaces the legacy flat-aggregate :meth:`_gather_role_info`
-        for the Connect / Disconnect buttons. Apply / Add Pose still
-        use the flat form because the solver's ``input[]`` /
-        ``output[]`` plug arrays must be filled contiguously at
-        Apply time."""
+            ([(driver_bone_str, [attr_str, ...]), ...],
+             [(driven_bone_str, [attr_str, ...]), ...])
+
+        — plain Python data with NO Qt object references and NO
+        cmds calls. The collected data must outlive any subsequent
+        UI mutation; downstream consumers (controller / core) MUST
+        operate on this snapshot WITHOUT touching the originating
+        widgets. This decouples the UI traversal from the Maya API
+        write storm so a node-change callback firing during the
+        write phase cannot invalidate widget pointers we are still
+        iterating over (the documented CTD path)."""
         drv_editor = self._pose_editor.driver_editor
         dvn_editor = self._pose_editor.driven_editor
         try:
-            driver_targets = list(drv_editor.routed_targets())
+            raw_drv = list(drv_editor.routed_targets())
         except (AttributeError, Exception):
-            driver_targets = []
+            raw_drv = []
         try:
-            driven_targets = list(dvn_editor.routed_targets())
+            raw_dvn = list(dvn_editor.routed_targets())
         except (AttributeError, Exception):
-            driven_targets = []
+            raw_dvn = []
+        # Coerce every element to plain str / list[str] so the
+        # downstream call stack has no chance of holding a stale
+        # widget reference. ``raw_drv`` already comes back as
+        # tuples of str + list[str], but defensive str() makes
+        # this explicit + breaks any accidental QString reference.
+        driver_targets = [
+            (str(node or ""), [str(a) for a in (attrs or [])])
+            for node, attrs in raw_drv
+        ]
+        driven_targets = [
+            (str(node or ""), [str(a) for a in (attrs or [])])
+            for node, attrs in raw_dvn
+        ]
         return driver_targets, driven_targets
 
     def _on_connect(self):
+        # M_CRASH_FIX (2026-04-28) — three-defense protocol:
+        #   1. Pure-string gather BEFORE any cmds.* call. Once
+        #      _gather_routed_targets returns, the UI is no longer
+        #      consulted for the duration of the storm.
+        #   2. core.connect_routed wraps the connectAttr loop in
+        #      _node_state_frozen so partial-wire compute() cannot
+        #      crash the kernel.
+        #   3. _is_updating lock blocks _refresh_pose_grid +
+        #      _refresh_base_pose_panel re-entry from any node-
+        #      change callback that fires mid-storm.
+        # Step 1: pure-string gather.
+        driver_targets, driven_targets = (
+            self._gather_routed_targets())
+        # Step 2: enter critical section.
         self._set_interaction_enabled(False)
+        self._is_updating = True
         try:
-            driver_targets, driven_targets = (
-                self._gather_routed_targets())
-            self._ctrl.connect_routed(driver_targets, driven_targets)
+            self._ctrl.connect_routed(
+                driver_targets, driven_targets)
         finally:
+            self._is_updating = False
             self._set_interaction_enabled(True)
+        # Step 3: ONE consolidated refresh outside the lock.
+        self._refresh_pose_grid()
 
     def _on_disconnect(self):
+        # M_CRASH_FIX symmetric protocol — same three defenses.
+        driver_targets, driven_targets = (
+            self._gather_routed_targets())
         self._set_interaction_enabled(False)
+        self._is_updating = True
         try:
-            driver_targets, driven_targets = (
-                self._gather_routed_targets())
             self._ctrl.disconnect_routed(
                 driver_targets, driven_targets)
         finally:
+            self._is_updating = False
             self._set_interaction_enabled(True)
+        self._refresh_pose_grid()
 
     def _on_reload(self):
         """M_TABBED_EDITOR_INTEGRATION: reload the tabbed driver +
