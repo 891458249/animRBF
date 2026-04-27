@@ -1905,21 +1905,18 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._set_interaction_enabled(True)
 
     def _gather_routed_targets(self):
-        """2026-04-28 (M_BATCH_ROUTING + M_CRASH_FIX defense 1):
-        PURE-STRING UI READ. Walks the driver / driven tabbed
-        editors and returns
+        """2026-04-28 (M_BATCH_ROUTING + M_CRASH_FIX defense 1 +
+        M_LIVE_DEBUG): PURE-STRING UI READ + diagnostic prints.
 
-            ([(driver_bone_str, [attr_str, ...]), ...],
-             [(driven_bone_str, [attr_str, ...]), ...])
-
-        — plain Python data with NO Qt object references and NO
-        cmds calls. The collected data must outlive any subsequent
-        UI mutation; downstream consumers (controller / core) MUST
-        operate on this snapshot WITHOUT touching the originating
-        widgets. This decouples the UI traversal from the Maya API
-        write storm so a node-change callback firing during the
-        write phase cannot invalidate widget pointers we are still
-        iterating over (the documented CTD path)."""
+        Returns ``([(drv_bone, [attr,...]), ...],
+        [(dvn_bone, [attr,...]), ...])`` — plain Python data with
+        no Qt object references and no cmds calls. Both lists are
+        printed to the Script Editor before return so a live-Maya
+        operator can confirm which scope reached the controller —
+        if the prints do not appear when the Connect button is
+        clicked, the user is running stale module cache and needs
+        to ``importlib.reload(RBFtools.ui.main_window)`` (or
+        relaunch Maya)."""
         drv_editor = self._pose_editor.driver_editor
         dvn_editor = self._pose_editor.driven_editor
         try:
@@ -1930,11 +1927,6 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             raw_dvn = list(dvn_editor.routed_targets())
         except (AttributeError, Exception):
             raw_dvn = []
-        # Coerce every element to plain str / list[str] so the
-        # downstream call stack has no chance of holding a stale
-        # widget reference. ``raw_drv`` already comes back as
-        # tuples of str + list[str], but defensive str() makes
-        # this explicit + breaks any accidental QString reference.
         driver_targets = [
             (str(node or ""), [str(a) for a in (attrs or [])])
             for node, attrs in raw_drv
@@ -1943,9 +1935,21 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             (str(node or ""), [str(a) for a in (attrs or [])])
             for node, attrs in raw_dvn
         ]
+        # M_LIVE_DEBUG: explicit Script-Editor traces so a live
+        # operator can verify the new code path is loaded.
+        print("[RBFtools] GATHERED DRIVERS: {}".format(driver_targets))
+        print("[RBFtools] GATHERED DRIVENS: {}".format(driven_targets))
         return driver_targets, driven_targets
 
     def _on_connect(self):
+        # M_LIVE_DEBUG (2026-04-28): top-of-slot trace so a live
+        # operator can confirm the new code path is loaded. Goes
+        # to cmds.warning so it appears in Script Editor with the
+        # yellow icon even if 'Print all warnings' is off.
+        try:
+            cmds.warning(">>> ON_CONNECT TRIGGERED <<<")
+        except Exception:
+            print(">>> ON_CONNECT TRIGGERED <<<")
         # M_CRASH_FIX (2026-04-28) — three-defense protocol:
         #   1. Pure-string gather BEFORE any cmds.* call. Once
         #      _gather_routed_targets returns, the UI is no longer
@@ -1972,6 +1976,11 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._refresh_pose_grid()
 
     def _on_disconnect(self):
+        # M_LIVE_DEBUG: top-of-slot trace. See _on_connect note.
+        try:
+            cmds.warning(">>> ON_DISCONNECT TRIGGERED <<<")
+        except Exception:
+            print(">>> ON_DISCONNECT TRIGGERED <<<")
         # M_CRASH_FIX symmetric protocol — same three defenses.
         driver_targets, driven_targets = (
             self._gather_routed_targets())
