@@ -111,22 +111,30 @@ class _PoseEditorPanel(CollapsibleFrame):
 
         lay.addWidget(_hline())
 
-        # Driver / Driven split via QSplitter
+        # M_TABBED_EDITOR_INTEGRATION (user directive 2026-04-27):
+        # The standalone Driver Sources + Driven Targets sections
+        # outside the pose editor are removed; the multi-source
+        # tabbed editors live HERE inside the pose editor as the
+        # primary driver / driven UI. Single-source nodes show as a
+        # single "Driver 0" / "Driven 0" tab; multi-source nodes get
+        # one tab per source.
         splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        self._driver_list = AttributeList("driver")
-        self._driven_list = AttributeList("driven")
-        splitter.addWidget(self._driver_list)
-        splitter.addWidget(self._driven_list)
+        self._driver_editor = TabbedDriverSourceEditor()
+        self._driven_editor = TabbedDrivenSourceEditor()
+        splitter.addWidget(self._driver_editor)
+        splitter.addWidget(self._driven_editor)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
         lay.addWidget(splitter)
-
-        self._driver_list.selectNodeRequested.connect(
-            lambda: self.selectNodeRequested.emit("driver"))
-        self._driven_list.selectNodeRequested.connect(
-            lambda: self.selectNodeRequested.emit("driven"))
-        self._driver_list.filtersChanged.connect(self.filtersChanged)
-        self._driven_list.filtersChanged.connect(self.filtersChanged)
+        # Legacy single-source AttributeList widgets used to live
+        # here. They are removed under the user's 2026-04-27 strict
+        # paradigm directive ("驱动源这一栏UI删除"). Slots that
+        # previously read pose_editor.driver_list.node_name() etc.
+        # now derive from controller.read_driver_sources() /
+        # read_driven_sources() (multi-source aggregate). The
+        # selectNodeRequested + filtersChanged signal definitions
+        # remain on this panel for downstream-consumer backcompat
+        # but are no longer wired to any internal child widget.
 
         lay.addWidget(_hline())
 
@@ -189,12 +197,17 @@ class _PoseEditorPanel(CollapsibleFrame):
         return self._table
 
     @property
-    def driver_list(self):
-        return self._driver_list
+    def driver_editor(self):
+        """M_TABBED_EDITOR_INTEGRATION (2026-04-27): the embedded
+        multi-source driver editor. Replaces the legacy
+        AttributeList ``driver_list`` accessor as the source of
+        truth for driver bones + attributes."""
+        return self._driver_editor
 
     @property
-    def driven_list(self):
-        return self._driven_list
+    def driven_editor(self):
+        """Twin of :py:attr:`driver_editor` for the driven side."""
+        return self._driven_editor
 
     def set_auto_fill(self, checked):
         self._cb_auto.blockSignals(True)
@@ -215,8 +228,17 @@ class _PoseEditorPanel(CollapsibleFrame):
         self.set_title(tr("rbf_pose_editor"))
         self._cb_auto.setText(tr("auto_fill_bs"))
         self._lbl_poses.setText(tr("poses"))
-        self._driver_list.retranslate()
-        self._driven_list.retranslate()
+        # M_TABBED_EDITOR_INTEGRATION: the legacy driver_list /
+        # driven_list AttributeList widgets are gone; the tabbed
+        # editors carry their own retranslate.
+        try:
+            self._driver_editor.retranslate()
+        except AttributeError:
+            pass
+        try:
+            self._driven_editor.retranslate()
+        except AttributeError:
+            pass
         self._btn_add.setText(tr("add_pose"))
         self._btn_apply.setText(tr("apply"))
         self._btn_connect.setText(tr("connect"))
@@ -463,42 +485,39 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._general    = GeneralSection()
         self._va_section = VectorAngleSection()
         self._rbf_section = RBFSection()
-        # M_B24b1: multi-source driver section (B2 + B4 UI primary
-        # deliverable per user override 2026-04-26).
-        # M_UIRECONCILE (decision C.1 + D.1): default to expanded so
-        # the wired multi-source editor is the first thing the TD
-        # sees; the section header label dropped the "(preview)"
-        # qualifier in the i18n dictionary.
-        self._driver_sources_section = CollapsibleFrame(
-            tr("section_driver_sources"), collapsed=False)
-        # M_TABBED_EDITOR (2026-04-27): switch to the QTabWidget
-        # paradigm. The legacy DriverSourceListEditor / DrivenSource
-        # ListEditor remain available as importable widget classes
-        # so existing tests + downstream consumers stay green; only
-        # the inspector layout swaps to the tabbed variants here.
-        self._driver_source_list = TabbedDriverSourceEditor()
+        # M_TABBED_EDITOR_INTEGRATION (user directive 2026-04-27,
+        # "驱动源这一栏UI删除"): the standalone Driver Sources +
+        # Driven Targets sections are removed from the inspector.
+        # The multi-source tabbed editors now live INSIDE the pose
+        # editor (replacing the legacy AttributeList driver / driven
+        # picker). The output-encoding combo + Hardening 1
+        # collapsible header are moved into a smaller "Output
+        # Encoding" section so the node-level enum is still
+        # reachable.
+        self._pose_editor = _PoseEditorPanel()
+        # Aliases that preserve the M_UIRECONCILE / M_DRIVEN_MULTI
+        # public attribute names (`_driver_source_list`,
+        # `_driven_source_list`) so the existing signal wiring +
+        # _retranslate_all + permanent-guard #36 source-scans all
+        # continue to find them. They now point at the tabbed
+        # editors embedded inside the pose-editor panel.
+        self._driver_source_list = self._pose_editor.driver_editor
+        self._driven_source_list = self._pose_editor.driven_editor
+        # Output Encoding gets its own slim collapsible (it lives at
+        # the node level, not per-source, and was previously hosted
+        # inside the now-removed Driver Sources section).
         self._output_encoding_combo = OutputEncodingCombo()
-        self._driver_sources_section.add_widget(self._driver_source_list)
+        self._output_encoding_section = CollapsibleFrame(
+            tr("section_output_encoding"), collapsed=True)
         _oe_row = QtWidgets.QHBoxLayout()
         _oe_row.addWidget(QtWidgets.QLabel(tr("output_encoding_label")))
         _oe_row.addWidget(self._output_encoding_combo, 1)
-        self._driver_sources_section.add_layout(_oe_row)
-        # M_DRIVEN_MULTI (Items 1 + 4c, 2026-04-27): Driven Targets
-        # twin section, sitting alongside Driver Sources just above
-        # the pose editor. The legacy pose_editor.driver_list /
-        # driven_list AttributeList widgets stay in place per red
-        # line 14 backcompat parity for the single-source workflow.
-        self._driven_sources_section = CollapsibleFrame(
-            tr("section_driven_sources"), collapsed=False)
-        self._driven_source_list = TabbedDrivenSourceEditor()
-        self._driven_sources_section.add_widget(self._driven_source_list)
-        self._pose_editor = _PoseEditorPanel()
+        self._output_encoding_section.add_layout(_oe_row)
 
         self._sections.addWidget(self._general)
         self._sections.addWidget(self._va_section)
         self._sections.addWidget(self._rbf_section)
-        self._sections.addWidget(self._driver_sources_section)
-        self._sections.addWidget(self._driven_sources_section)
+        self._sections.addWidget(self._output_encoding_section)
         self._sections.addWidget(self._pose_editor)
         self._sections.addStretch()
 
@@ -979,10 +998,12 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             return  # Window was closed before deferred init fired
         self._node_sel.set_language_checked(current_language())
         self._pose_editor.set_auto_fill(self._ctrl.auto_fill)
-        # Load filter states
-        for al in (self._pose_editor.driver_list,
-                   self._pose_editor.driven_list):
-            al.set_filters(self._ctrl.get_filters(al.role))
+        # M_TABBED_EDITOR_INTEGRATION: filter persistence per
+        # driver/driven role lived on the legacy AttributeList
+        # widgets - the tabbed editors don't expose a per-role
+        # filter dict (each tab's QListWidget is a flat keyable
+        # multi-select). The filter optionVar state is preserved
+        # by the controller; nothing to push into the UI here.
 
     # =================================================================
     #  Node selector handlers
@@ -1054,13 +1075,13 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
     # =================================================================
 
     def _on_select_node_for_role(self, role):
-        sel = cmds.ls(selection=True) or []
-        if not sel:
-            return
-        al = (self._pose_editor.driver_list if role == "driver"
-              else self._pose_editor.driven_list)
-        al.set_node_name(sel[0])
-        self._refresh_attr_list(role)
+        """M_TABBED_EDITOR_INTEGRATION (2026-04-27): legacy slot
+        kept as no-op. The tabbed driver / driven editors handle
+        per-tab Select via their own selectNodeRequested signals
+        (-> _bind_source_node_from_selection); the pose-editor
+        panel no longer carries a single-source AttributeList
+        whose Select button this slot used to service."""
+        return
 
     # =================================================================
     #  M_UIRECONCILE — DriverSourceListEditor slot wiring
@@ -1272,35 +1293,25 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             sources)
         self._driver_source_list.set_sources(
             sources, available_attrs_per_source=available_per_source)
-        try:
-            if len(sources) > 1:
-                self._pose_editor.show_multi_source_banner(
-                    tr("banner_multi_source_detected"))
-            else:
-                self._pose_editor.hide_multi_source_banner()
-        except AttributeError:
-            # pose_editor banner support is added by P2 below; this
-            # branch keeps the wiring forward-compatible if the
-            # banner methods land in a follow-up commit.
-            pass
+        # M_TABBED_EDITOR_INTEGRATION: the multi-source banner is
+        # gone (the legacy AttributeList it warned about no longer
+        # exists). The tabbed editor IS the multi-source UI - no
+        # additional notice needed.
 
     def _on_filters_changed(self, role, filters):
+        """M_TABBED_EDITOR_INTEGRATION: filter UX lived on the
+        legacy AttributeList right-click menu (now removed). Filter
+        state still persists in the controller's optionVar so we
+        forward the dict for storage but no longer have a UI to
+        repopulate."""
         for k, v in filters.items():
             self._ctrl.set_filter(role, k, v)
-        al = (self._pose_editor.driver_list if role == "driver"
-              else self._pose_editor.driven_list)
-        al.set_filters(filters)
-        self._refresh_attr_list(role)
 
     def _refresh_attr_list(self, role):
-        al = (self._pose_editor.driver_list if role == "driver"
-              else self._pose_editor.driven_list)
-        node_name = al.node_name()
-        if not node_name:
-            al.set_attributes([])
-            return
-        attrs = self._ctrl.list_attributes(node_name, al.filters())
-        al.set_attributes(attrs)
+        """M_TABBED_EDITOR_INTEGRATION: legacy slot kept as no-op.
+        Per-tab attribute lists are pre-populated by
+        _resolve_available_attrs_per_source during reload."""
+        return
 
     # =================================================================
     #  Pose editor — editor loaded callback
@@ -1323,12 +1334,30 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
     # =================================================================
 
     def _gather_role_info(self):
-        """Read driver/driven nodes + selected attrs from the UI."""
-        pe = self._pose_editor
-        drv_node  = pe.driver_list.node_name()
-        dvn_node  = pe.driven_list.node_name()
-        drv_attrs = pe.driver_list.selected_attributes()
-        dvn_attrs = pe.driven_list.selected_attributes()
+        """M_TABBED_EDITOR_INTEGRATION (2026-04-27): aggregate
+        driver / driven node + attrs across ALL tabs. The legacy
+        single-source AttributeList accessors are gone; the
+        controller's multi-source readers are the source of truth.
+
+        Returns the legacy 4-tuple shape (drv_node, dvn_node,
+        drv_attrs, dvn_attrs) so existing Apply / Connect / Add
+        Pose flows keep working unchanged. For multi-source nodes
+        this returns the FIRST source's node + a flat concat of
+        every source's attrs (matches the input[]/output[] index
+        order produced by add_driver_source / add_driven_source).
+        """
+        try:
+            drv_sources = list(self._ctrl.read_driver_sources())
+        except Exception:
+            drv_sources = []
+        try:
+            dvn_sources = list(self._ctrl.read_driven_sources())
+        except Exception:
+            dvn_sources = []
+        drv_node  = drv_sources[0].node if drv_sources else ""
+        dvn_node  = dvn_sources[0].node if dvn_sources else ""
+        drv_attrs = [a for src in drv_sources for a in src.attrs]
+        dvn_attrs = [a for src in dvn_sources for a in src.attrs]
         return drv_node, dvn_node, drv_attrs, dvn_attrs
 
     def _on_add_pose(self):
@@ -1364,18 +1393,22 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._set_interaction_enabled(True)
 
     def _on_reload(self):
-        result = self._ctrl.reload_editor()
-        if result:
-            driver_node, driver_attrs, driven_node, driven_attrs = result
-            pe = self._pose_editor
-            pe.driver_list.set_node_name(driver_node)
-            pe.driven_list.set_node_name(driven_node)
-            if driver_node:
-                self._refresh_attr_list("driver")
-                pe.driver_list.select_attributes(driver_attrs)
-            if driven_node:
-                self._refresh_attr_list("driven")
-                pe.driven_list.select_attributes(driven_attrs)
+        """M_TABBED_EDITOR_INTEGRATION: reload the tabbed driver +
+        driven editors from the controller's multi-source state.
+        The legacy AttributeList per-role set_node_name +
+        select_attributes path is gone; the tabbed editors
+        rebuild themselves from controller.read_driver_sources /
+        read_driven_sources via the editorLoaded signal subscribed
+        in the wiring section, so we only need to (re-)trigger
+        the controller-side reload + let the signal cascade do
+        the rest."""
+        self._ctrl.reload_editor()
+        # Reload signals (driverSourcesChanged + drivenSourcesChanged)
+        # also fire from controller mutations; here we explicitly
+        # call the slots so a manual Reload click rebuilds the
+        # tabs even when the source state hasn't changed.
+        self._reload_driver_sources()
+        self._reload_driven_sources()
 
     def _on_pose_row_action(self, action, row):
         """Handle Recall / Update / Delete from the table context menu."""

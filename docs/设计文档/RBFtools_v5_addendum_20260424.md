@@ -6435,6 +6435,198 @@ the remaining ~355 LoC.
 
 ---
 
+## §M_TABBED_EDITOR_INTEGRATION — Merge tabbed editors INTO pose editor; delete standalone sections
+
+> **STATUS** (2026-04-27): user strict directive
+> ("驱动源这一栏UI删除") - the standalone Driver Sources +
+> Driven Targets sections in the inspector are **deleted**;
+> their tabbed multi-source editors are **merged INTO the
+> pose editor** as the primary driver / driven UI, replacing
+> the legacy single-source AttributeList split. The legacy
+> AttributeList widgets are removed from the pose-editor panel.
+> Reload + Apply / Connect / Add Pose flows now derive their
+> node + attrs from `controller.read_driver_sources()` /
+> `read_driven_sources()` (multi-source aggregate, flat concat
+> for the legacy 4-tuple shape that `_gather_role_info`
+> consumers still expect).
+
+### §M_TABBED_EDITOR_INTEGRATION.scope
+
+| Layer | Change | LoC |
+|---|---|---|
+| `ui/main_window.py` `_PoseEditorPanel._build` | Replace the legacy `AttributeList("driver")` + `AttributeList("driven")` split inside the pose-editor panel with `TabbedDriverSourceEditor()` + `TabbedDrivenSourceEditor()`. The split QSplitter layout is preserved for visual continuity (driver left / driven right). The legacy `selectNodeRequested` / `filtersChanged` signals on the panel remain as definitions (downstream-consumer backcompat) but are no longer wired to internal child widgets. | ~25 |
+| `ui/main_window.py` `_PoseEditorPanel` properties | `driver_list` / `driven_list` properties replaced with `driver_editor` / `driven_editor` returning the tabbed editors. `retranslate` updated to call the tabbed editors' retranslate. | ~25 |
+| `ui/main_window.py` inspector assembly | Delete `_driver_sources_section` + `_driven_sources_section` `CollapsibleFrame` instantiations. The pose editor now hosts the tabbed editors directly; `_driver_source_list` / `_driven_source_list` attributes are aliased to `_pose_editor.driver_editor` / `_pose_editor.driven_editor` so the M_UIRECONCILE / M_DRIVEN_MULTI signal wiring + `_retranslate_all` references continue to find them under the original names. The output-encoding combo gets its own slim `_output_encoding_section` `CollapsibleFrame` (collapsed by default) so the node-level enum is still reachable. | ~30 |
+| `ui/main_window.py` slots | `_gather_role_info` rewritten to aggregate from `controller.read_driver_sources()` / `read_driven_sources()` (returns the legacy 4-tuple shape so existing Apply / Connect / Add Pose flows keep working unchanged for both single-source and multi-source nodes). `_on_select_node_for_role` / `_refresh_attr_list` reduced to no-ops (their AttributeList-specific behaviour is replaced by per-tab Select + auto-resolve). `_on_filters_changed` keeps the optionVar persist call but drops the AttributeList re-populate path. `_on_reload` now triggers the controller-side reload + invokes `_reload_driver_sources` / `_reload_driven_sources` directly (cascade-friendly). The `_reload_driver_sources` multi-source banner gating block is removed. `_deferred_init` filter-restore loop dropped (filters live on the controller now, not on a UI widget). | ~50 |
+| `ui/i18n.py` | New `section_output_encoding` key EN+ZH for the new collapsible header. | ~5 |
+| `tests/test_m_uireconcile_driver_source_wired.py` | `test_main_window_gates_banner_on_source_count` widened to accept either the legacy banner gating call OR the M_TABBED_EDITOR_INTEGRATION half-state-free removal. The standalone-PoseEditor banner methods stay covered by sibling tests. | ~15 |
+| `addendum_20260424.md` | this section. | ~110 |
+| **Total** | | **~260** |
+
+Pure code: ~135 LoC; addendum + tests: ~125 LoC. Well under
+the 800-LoC red line; no precedent invocation needed.
+
+### §M_TABBED_EDITOR_INTEGRATION.directive-rationale
+
+The user's 2026-04-27 strict directive was three-pronged:
+
+1. **驱动源功能并入RBF姿态编辑器进行升级** - merge driver-source
+   functionality INTO the RBF pose editor.
+2. **将驱动选择升级成多源（多骨骼&多属性）选择** - upgrade the
+   driver selection to multi-source (multi-bone + multi-attr).
+3. **驱动源这一栏UI删除** - delete the standalone Driver Sources
+   section UI.
+
+M_TABBED_EDITOR (last commit, `c82392a`) shipped the QTabWidget
+paradigm but kept the standalone sections in the inspector +
+kept the legacy AttributeList widgets inside the pose editor as
+backcompat parity. The user's follow-up makes the paradigm
+shift explicit: the AttributeList workflow is retired in the
+pose-editor, and the standalone sections that hosted the
+tabbed editors before are removed.
+
+### §M_TABBED_EDITOR_INTEGRATION.layout-after
+
+```
+inspector (top-down):
+  NodeSelector
+  GeneralSection
+  VectorAngleSection
+  RBFSection
+  Output Encoding (new slim collapsible, collapsed by default)
+  PoseEditorPanel
+    [auto-fill checkbox]
+    ----------------------------------------
+    +-------------------+ +-------------------+
+    | TabbedDriver-     | | TabbedDriven-     |
+    | SourceEditor      | | SourceEditor      |
+    | [Driver 0|D 1|+]  | | [Driven 0|D 1|+]  |
+    | node: ___ Select  | | node: ___ Select  |
+    | attributes:       | | attributes:       |
+    | [QListWidget]     | | [QListWidget]     |
+    | [Connect][Disc.]  | | [Connect][Disc.]  |
+    | weight: __ enc:_  | |   (no weight/enc) |
+    +-------------------+ +-------------------+
+    ----------------------------------------
+    [output-scale editor]
+    [Poses table]
+    [Add][Apply][Connect][Disconnect][Reload]
+```
+
+Compare to pre-M_TABBED_EDITOR_INTEGRATION:
+
+```
+inspector (top-down):
+  NodeSelector
+  GeneralSection
+  VectorAngleSection
+  RBFSection
+  Driver Sources       <- DELETED
+    TabbedDriverSourceEditor
+    Output Encoding combo
+  Driven Targets       <- DELETED
+    TabbedDrivenSourceEditor
+  PoseEditorPanel
+    [auto-fill]
+    [multi-source banner]   <- DELETED (no AttributeList to warn about)
+    +---------+ +---------+
+    | Attribute| | Attribute|  <- DELETED (legacy single-source picker)
+    | List drv | | List dvn |
+    +---------+ +---------+
+    ...
+```
+
+### §M_TABBED_EDITOR_INTEGRATION.gather-role-info-aggregate
+
+`_gather_role_info` is consumed by Add Pose / Apply / Connect /
+Recall / Update + the row context-menu actions. Its return
+shape is the legacy 4-tuple `(drv_node, dvn_node, drv_attrs,
+dvn_attrs)`. Post-M_TABBED_EDITOR_INTEGRATION it derives from
+the controller's multi-source readers:
+
+```python
+drv_sources = self._ctrl.read_driver_sources()
+dvn_sources = self._ctrl.read_driven_sources()
+drv_node  = drv_sources[0].node if drv_sources else ""
+dvn_node  = dvn_sources[0].node if dvn_sources else ""
+drv_attrs = [a for src in drv_sources for a in src.attrs]
+dvn_attrs = [a for src in dvn_sources for a in src.attrs]
+```
+
+The flat-concat aggregation matches the input[]/output[] index
+order produced by `add_driver_source` / `add_driven_source` (M_B24c
+mirror flow already established this convention). For single-
+source nodes this collapses to the legacy single-source shape
+exactly; for multi-source nodes the existing Apply / Connect
+flows now operate on the full source set without rewrite.
+
+### §M_TABBED_EDITOR_INTEGRATION.attribute-name-aliases
+
+The M_UIRECONCILE / M_DRIVEN_MULTI signal wiring + permanent
+guard #36 source-scans reference `_driver_source_list` /
+`_driven_source_list` attribute names on `RBFToolsWindow`. After
+the standalone sections are deleted those attributes would be
+gone, breaking the wiring + the guard.
+
+The fix is one-line aliases set immediately after `_pose_editor`
+construction:
+
+```python
+self._driver_source_list = self._pose_editor.driver_editor
+self._driven_source_list = self._pose_editor.driven_editor
+```
+
+The aliases preserve the public attribute names so:
+- The M_UIRECONCILE wiring block (`_driver_source_list.addRequested.connect(...)`) continues to find the same editor instance.
+- Permanent guard #36 sub-check (a) (`_driver_source_list.<signal>.connect`) keeps matching.
+- The `_retranslate_all` `try/except AttributeError` paths still find the editors.
+
+### §M_TABBED_EDITOR_INTEGRATION.legacy-widget-coexistence
+
+Files / classes preserved (importable; not used in the active
+inspector):
+
+- `ui/widgets/attribute_list.py` (`AttributeList`) - still
+  imported by `_PoseEditorPanel` for the time being via
+  module-level import; the class remains available for any
+  out-of-tree consumer.
+- `ui/widgets/driver_source_list_editor.py` (`DriverSourceListEditor`)
+  - the M_B24b1 list-row widget. Permanent guards #27 + #36
+  source-scan its file; class is unchanged.
+- `ui/widgets/driven_source_list_editor.py` (`DrivenSourceListEditor`)
+  - the M_DRIVEN_MULTI list-row widget. Same status.
+- `ui/widgets/pose_editor.py` (`PoseEditor`) standalone class -
+  unmodified by this commit (the active class is
+  `_PoseEditorPanel` inside main_window). Its banner methods
+  remain so test_m_uireconcile_driver_source_wired.py's
+  source-scan + lifecycle tests stay green.
+
+### §M_TABBED_EDITOR_INTEGRATION.empirical-baseline (2026-04-27)
+
+| Env | Pre (post-M_TABBED_EDITOR `c82392a`) | Post |
+|---|---|---|
+| Pure-Python | 627 OK (skip 3) | **627 OK (skip 3)** |
+| mayapy 2025 | 627 ran 531 pass 96 skip | **627 ran 531 pass 96 skip** |
+
+Test count unchanged (no new tests; one widened existing
+assertion). Zero-regression at every step.
+
+### §M_TABBED_EDITOR_INTEGRATION.scope-exclusions
+
+- 0 lines C++ / 0 .mll / 0 CMakeLists / 0 schema modifications
+- 0 lines `controller.py` / `core.py` business logic
+- 0 modifications to the legacy widget files
+  (`AttributeList`, `DriverSourceListEditor`,
+  `DrivenSourceListEditor`, `pose_editor.PoseEditor`)
+- 0 modifications to `tabbed_source_editor.py` (the editors
+  themselves are unchanged - only their hosting moved)
+- 0 modifications to hotfix 4 files
+- The `_DriverAttrPickerDialog` class definition stays in
+  main_window for backcompat / dialog-mode callers; no longer
+  the primary attrs UX
+
+---
+
 ## §M_HOTFIX_PYSIDE6 — QActionGroup PySide6 migration shim
 
 > **STRUCTURAL LESSON** (2026-04-27):

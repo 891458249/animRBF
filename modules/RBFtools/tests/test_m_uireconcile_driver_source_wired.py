@@ -267,15 +267,31 @@ class TestM_UIRECONCILE_BannerSourceScan(unittest.TestCase):
                       self._pose_editor_src)
 
     def test_main_window_gates_banner_on_source_count(self):
-        """Hardening 2: banner only fires when len(sources) > 1.
-        Single source must keep the legacy AttributeList workflow
-        visually unchanged (red line 14 backcompat parity)."""
-        self.assertIn("len(sources) > 1", self._main_src,
-            "main_window must gate the banner on len(sources) > 1 "
-            "- single-source nodes keep the legacy workflow "
-            "(red line 14 backcompat parity)")
-        self.assertIn("hide_multi_source_banner", self._main_src)
-        self.assertIn("show_multi_source_banner", self._main_src)
+        """M_TABBED_EDITOR_INTEGRATION (2026-04-27): the multi-
+        source banner is removed from main_window because the
+        legacy AttributeList it warned about no longer exists -
+        the tabbed editor IS the multi-source UI now. The banner
+        methods themselves remain on the standalone PoseEditor
+        class (covered by sibling test
+        test_pose_editor_exposes_banner_methods) for any
+        downstream consumer that imports the standalone widget
+        outside of main_window. This test now passes when EITHER
+        the legacy gating call lives in main_window OR the user
+        directive removed it."""
+        legacy_gate_present = (
+            "len(sources) > 1" in self._main_src
+            and "show_multi_source_banner" in self._main_src
+            and "hide_multi_source_banner" in self._main_src)
+        # Post-M_TABBED_EDITOR_INTEGRATION the banner is intentionally
+        # absent from the main_window reload path.
+        self.assertTrue(
+            legacy_gate_present
+            or "show_multi_source_banner" not in self._main_src,
+            "main_window must either retain the M_UIRECONCILE banner "
+            "gate (legacy single-source backcompat) OR have removed "
+            "it under M_TABBED_EDITOR_INTEGRATION; the half-state "
+            "where show_multi_source_banner is present without the "
+            "len(sources) > 1 gate is forbidden")
 
 
 @unittest.skipIf(conftest._REAL_MAYA,

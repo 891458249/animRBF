@@ -393,6 +393,10 @@ _EN = {
         "sources up.",
     "driver_source_weight_label":      "Weight:",
     "driver_source_encoding_label":    "Encoding:",
+    # -- M_TABBED_EDITOR_INTEGRATION (2026-04-27): the standalone
+    #    Driver Sources / Driven Targets sections are removed; the
+    #    output-encoding combo gets its own slim collapsible header. --
+    "section_output_encoding":         "Output Encoding",
 }
 
 _ZH = {
@@ -736,6 +740,7 @@ _ZH = {
         u"\u63d2\u4ef6\u4f1a\u4ece input[]/output[] \u4e2d\u79fb\u9664\u8be5\u6e90\u7684\u8fde\u63a5\u5e76\u4e0a\u79fb\u540e\u7eed\u6e90\u3002",
     "driver_source_weight_label":      u"\u6743\u91cd\uff1a",
     "driver_source_encoding_label":    u"\u7f16\u7801\uff1a",
+    "section_output_encoding":         u"\u8f93\u51fa\u7f16\u7801",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}
