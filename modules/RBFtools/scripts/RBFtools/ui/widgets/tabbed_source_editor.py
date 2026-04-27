@@ -88,14 +88,14 @@ class _SourceTabContent(QtWidgets.QWidget):
             QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
         row_attrs.addWidget(self._lbl_attrs)
         self._list = QtWidgets.QListWidget()
-        # Selection mode per role (user strict spec):
-        #   driver -> single ; driven -> multi (extended).
-        if self._role == "driver":
-            self._list.setSelectionMode(
-                QtWidgets.QAbstractItemView.SingleSelection)
-        else:
-            self._list.setSelectionMode(
-                QtWidgets.QAbstractItemView.ExtendedSelection)
+        # Selection mode (user clarification 2026-04-27 follow-up):
+        # both driver and driven attribute lists support multi-select
+        # (ExtendedSelection). This matches the AnimaRbfSolver
+        # reference image where multiple driver attrs are highlighted
+        # simultaneously, and aligns with the multi-attr RBF input
+        # vector semantics in the M_B24a/b/c/d backend.
+        self._list.setSelectionMode(
+            QtWidgets.QAbstractItemView.ExtendedSelection)
         self._list.setVerticalScrollBarPolicy(
             QtCore.Qt.ScrollBarAsNeeded)
         self._list.setSizePolicy(
