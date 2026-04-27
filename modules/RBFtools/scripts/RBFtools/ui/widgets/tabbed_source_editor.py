@@ -175,6 +175,7 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
     _header_key           = "driver_source_list_header"
     _add_button_key       = "btn_add_driver"
     _empty_hint_key       = "driver_source_list_empty_hint"
+    _batch_checkbox_key   = "batch_all_driver_tabs"
 
     def __init__(self, parent=None):
         super(_TabbedSourceEditorBase, self).__init__(
@@ -220,6 +221,17 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         self._btn_add.clicked.connect(self.addRequested)
         lay.addWidget(self._btn_add)
 
+        # 2026-04-28 (M_BATCH_ROUTING): Batch toggle. When unchecked
+        # the panel-level Connect / Disconnect operate on ONLY the
+        # currently-active tab; when checked they sweep every tab.
+        # The actual scope decision lives in main_window's
+        # _gather_routed_targets — this is just the pickup point.
+        self._chk_batch = QtWidgets.QCheckBox(
+            tr(self._batch_checkbox_key))
+        self._chk_batch.setToolTip(tr("source_tab_batch_tip"))
+        self._chk_batch.setChecked(False)
+        lay.addWidget(self._chk_batch)
+
         self._update_empty_hint()
 
     # -- internals --
@@ -264,6 +276,63 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
 
     def current_index(self):
         return self._tabs.currentIndex()
+
+    # 2026-04-28 (M_BATCH_ROUTING): scope queries for the panel-level
+    # Connect / Disconnect routed flow. ``is_batch_mode()`` reads the
+    # bottom-of-panel checkbox; ``tab_targets`` returns
+    # ``[(node_name, [attr, ...]), ...]`` either limited to the
+    # active tab or covering all tabs depending on the flag.
+
+    def is_batch_mode(self):
+        try:
+            return bool(self._chk_batch.isChecked())
+        except AttributeError:
+            return False
+
+    def _tab_target(self, idx):
+        if not (0 <= idx < self._tabs.count()):
+            return None
+        content = self._tabs.widget(idx)
+        if content is None:
+            return None
+        node = ""
+        try:
+            node = str(content.node_name() or "")
+        except AttributeError:
+            try:
+                node = str(getattr(content, "_node_name", "") or "")
+            except Exception:
+                node = ""
+        attrs = []
+        try:
+            attrs = list(content.selected_attrs() or [])
+        except AttributeError:
+            attrs = []
+        return (node, attrs)
+
+    def active_tab_target(self):
+        """Return ``(node, attrs)`` for the active tab, or ``None`` if
+        no tab is active."""
+        return self._tab_target(self._tabs.currentIndex())
+
+    def tab_targets(self):
+        """Return a list of ``(node, attrs)`` for every tab. Empty
+        list when there are no tabs."""
+        out = []
+        for i in range(self._tabs.count()):
+            t = self._tab_target(i)
+            if t is not None:
+                out.append(t)
+        return out
+
+    def routed_targets(self):
+        """Convenience: ``tab_targets()`` if batch checked, else a
+        single-element list with the active tab. Empty list when no
+        tabs are present at all."""
+        if self.is_batch_mode():
+            return self.tab_targets()
+        active = self.active_tab_target()
+        return [active] if active is not None else []
 
     def set_sources(self, sources, available_attrs_per_source=None):
         """Programmatic rebuild from list[DriverSource | DrivenSource].
@@ -339,6 +408,11 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         self._btn_connect.setToolTip(tr("source_tab_connect_tip"))
         self._btn_disconnect.setText(tr("disconnect"))
         self._btn_disconnect.setToolTip(tr("source_tab_disconnect_tip"))
+        try:
+            self._chk_batch.setText(tr(self._batch_checkbox_key))
+            self._chk_batch.setToolTip(tr("source_tab_batch_tip"))
+        except AttributeError:
+            pass
         for i in range(self._tabs.count()):
             content = self._tabs.widget(i)
             if hasattr(content, "retranslate"):
@@ -370,3 +444,4 @@ class TabbedDrivenSourceEditor(_TabbedSourceEditorBase):
     _header_key       = "driven_source_list_header"
     _add_button_key   = "btn_add_driven"
     _empty_hint_key   = "driven_source_list_empty_hint"
+    _batch_checkbox_key = "batch_all_driven_tabs"

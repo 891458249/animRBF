@@ -486,6 +486,12 @@ _EN = {
     "base_pose_label_fallback":        "Base Pose",
     "base_pose_empty_hint_fallback":
         "Connect driver / driven sources to configure the base pose.",
+    # 2026-04-28 (M_BATCH_ROUTING) — bottom-of-panel batch toggles.
+    "batch_all_driver_tabs":           "Batch All Driver Tabs",
+    "batch_all_driven_tabs":           "Batch All Driven Tabs",
+    "source_tab_batch_tip":
+        "When unchecked, panel Connect / Disconnect operate ONLY on "
+        "the active tab. When checked, every tab is included.",
 }
 
 _ZH = {
@@ -900,6 +906,12 @@ _ZH = {
     "base_pose_label_fallback":        u"\u57fa\u7840\u59ff\u6001",
     "base_pose_empty_hint_fallback":
         u"\u8fde\u63a5\u9a71\u52a8/\u88ab\u9a71\u52a8\u6e90\u4ee5\u914d\u7f6e\u57fa\u7840\u59ff\u6001\u3002",
+    # 2026-04-28 (M_BATCH_ROUTING) \u2014 \u6279\u91cf\u52fe\u9009
+    "batch_all_driver_tabs":           u"\u6279\u91cf\u5904\u7406\u6240\u6709\u9a71\u52a8\u6807\u7b7e\u9875",
+    "batch_all_driven_tabs":           u"\u6279\u91cf\u5904\u7406\u6240\u6709\u88ab\u9a71\u52a8\u6807\u7b7e\u9875",
+    "source_tab_batch_tip":
+        u"\u672a\u52fe\u9009\uff1a\u9762\u677f\u7684\u8fde\u63a5/\u65ad\u5f00\u4ec5\u5bf9\u5f53\u524d\u6fc0\u6d3b\u6807\u7b7e\u9875\u751f\u6548\uff1b"
+        u"\u5df2\u52fe\u9009\uff1a\u904d\u5386\u6240\u6709\u6807\u7b7e\u9875\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

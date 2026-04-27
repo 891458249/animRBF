@@ -1889,19 +1889,44 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         finally:
             self._set_interaction_enabled(True)
 
+    def _gather_routed_targets(self):
+        """2026-04-28 (M_BATCH_ROUTING): consult the per-side Batch
+        checkboxes on the tabbed editors and return a pair of
+        ``[(node, [attr, ...]), ...]`` lists.
+
+        Replaces the legacy flat-aggregate :meth:`_gather_role_info`
+        for the Connect / Disconnect buttons. Apply / Add Pose still
+        use the flat form because the solver's ``input[]`` /
+        ``output[]`` plug arrays must be filled contiguously at
+        Apply time."""
+        drv_editor = self._pose_editor.driver_editor
+        dvn_editor = self._pose_editor.driven_editor
+        try:
+            driver_targets = list(drv_editor.routed_targets())
+        except (AttributeError, Exception):
+            driver_targets = []
+        try:
+            driven_targets = list(dvn_editor.routed_targets())
+        except (AttributeError, Exception):
+            driven_targets = []
+        return driver_targets, driven_targets
+
     def _on_connect(self):
         self._set_interaction_enabled(False)
         try:
-            drv_node, dvn_node, drv_attrs, dvn_attrs = self._gather_role_info()
-            self._ctrl.connect_poses(
-                drv_node, dvn_node, drv_attrs, dvn_attrs)
+            driver_targets, driven_targets = (
+                self._gather_routed_targets())
+            self._ctrl.connect_routed(driver_targets, driven_targets)
         finally:
             self._set_interaction_enabled(True)
 
     def _on_disconnect(self):
         self._set_interaction_enabled(False)
         try:
-            self._ctrl.disconnect_outputs()
+            driver_targets, driven_targets = (
+                self._gather_routed_targets())
+            self._ctrl.disconnect_routed(
+                driver_targets, driven_targets)
         finally:
             self._set_interaction_enabled(True)
 

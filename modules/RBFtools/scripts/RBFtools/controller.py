@@ -1491,6 +1491,45 @@ class MainController(QtCore.QObject):
         core.disconnect_outputs(node)
         self.statusMessage.emit("Output connections disconnected.")
 
+    # =================================================================
+    #  7b. M_BATCH_ROUTING — tab-aware Connect / Disconnect (2026-04-28)
+    # =================================================================
+
+    def connect_routed(self, driver_targets, driven_targets):
+        """Tab-aware Connect: ``[(node, [attr, ...]), ...]`` for each
+        side. Scope is decided in main_window via the panel-level
+        Batch checkboxes; here we just forward to core."""
+        node = self._current_node
+        if not node or not cmds.objExists(node):
+            cmds.warning(
+                "connect_routed: no active RBFtools node — apply "
+                "poses first.")
+            return
+        if not driver_targets and not driven_targets:
+            cmds.warning(
+                "connect_routed: empty scope on both sides; "
+                "nothing to connect.")
+            return
+        core.connect_routed(node, driver_targets, driven_targets)
+        self.statusMessage.emit("Routed connect complete.")
+
+    def disconnect_routed(self, driver_targets, driven_targets):
+        """Tab-aware Disconnect — symmetric to connect_routed. Logs
+        cmds.warning when a target plug is not actually connected to
+        the solver (no silent failure)."""
+        node = self._current_node
+        if not node or not cmds.objExists(node):
+            cmds.warning(
+                "disconnect_routed: no active RBFtools node.")
+            return
+        if not driver_targets and not driven_targets:
+            cmds.warning(
+                "disconnect_routed: empty scope on both sides; "
+                "nothing to disconnect.")
+            return
+        core.disconnect_routed(node, driver_targets, driven_targets)
+        self.statusMessage.emit("Routed disconnect complete.")
+
     def _validate_apply_args(self, driver_node, driven_node,
                              driver_attrs, driven_attrs):
         """Common validation for apply / connect."""

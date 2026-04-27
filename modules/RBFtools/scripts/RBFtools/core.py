@@ -3494,6 +3494,161 @@ def connect_poses(node, driver_node, driven_node,
         cmds.setAttr(shape + ".evaluate", 1)
 
 
+def _flatten_targets(targets):
+    """Normalise ``[(node, [attr, ...]), ...]`` → flat list of
+    ``"node.attr"`` plug strings, **dropping pairs where the node /
+    attr does not actually exist on the scene**. Each rejection is
+    logged via cmds.warning so the failure is never silent."""
+    plugs = []
+    for entry in (targets or []):
+        if entry is None:
+            continue
+        node, attrs = entry
+        if not node or not _exists(node):
+            cmds.warning(
+                "M_BATCH_ROUTING: skipping target with missing "
+                "node {!r}".format(node))
+            continue
+        for a in (attrs or []):
+            if not cmds.attributeQuery(a, node=node, exists=True):
+                cmds.warning(
+                    "M_BATCH_ROUTING: {}.{} does not exist; "
+                    "skipping".format(node, a))
+                continue
+            plugs.append("{}.{}".format(node, a))
+    return plugs
+
+
+def connect_routed(node, driver_targets, driven_targets):
+    """2026-04-28 (M_BATCH_ROUTING): tab-aware Connect.
+
+    ``driver_targets`` / ``driven_targets`` are lists of
+    ``(node_name, [attr, ...])`` produced by main_window's
+    :func:`_gather_routed_targets`. Each list is FLATTENED via
+    :func:`_flatten_targets` (with per-attr ``attributeQuery``
+    existence checks + ``cmds.warning`` on miss) before wiring.
+
+    Wires sequentially:
+
+      driver_plugs[i]  ──→  shape.input[i]
+      shape.output[i]  ──→  driven_plugs[i]
+
+    Replaces :func:`connect_node` for the routed UI path. Plugs
+    beyond the assembled length are NOT cleared — caller is expected
+    to pair this with :func:`disconnect_routed` when scope shrinks.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        cmds.warning("connect_routed: solver shape missing for "
+                     "{!r}".format(node))
+        return
+
+    drv_plugs = _flatten_targets(driver_targets)
+    dvn_plugs = _flatten_targets(driven_targets)
+
+    with undo_chunk("RBFtools: connect routed"):
+        for i, src in enumerate(drv_plugs):
+            dst = "{}.input[{}]".format(shape, i)
+            try:
+                cmds.connectAttr(src, dst, force=True)
+            except Exception as exc:
+                cmds.warning(
+                    "connect_routed: {} → {} failed: {}".format(
+                        src, dst, exc))
+        for i, dst in enumerate(dvn_plugs):
+            src = "{}.output[{}]".format(shape, i)
+            try:
+                cmds.connectAttr(src, dst, force=True)
+            except Exception as exc:
+                cmds.warning(
+                    "connect_routed: {} → {} failed: {}".format(
+                        src, dst, exc))
+        cmds.setAttr(shape + ".evaluate", 0)
+        cmds.setAttr(shape + ".evaluate", 1)
+
+
+def disconnect_routed(node, driver_targets, driven_targets):
+    """2026-04-28 (M_BATCH_ROUTING): tab-aware Disconnect — symmetric
+    to :func:`connect_routed`.
+
+    For each ``(bone, attr)`` in scope:
+      * Query incoming/outgoing connections at the precise plug via
+        :func:`cmds.listConnections` with ``plugs=True``.
+      * Disconnect ONLY the pair that actually involves the solver
+        ``shape.input[]`` / ``shape.output[]`` (so unrelated rig
+        connections survive).
+      * No silent ``try/except: pass`` — every failure becomes
+        :func:`cmds.warning` output. Plugs without a connection log
+        an informational warning so the user never sees "nothing
+        happened".
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        cmds.warning("disconnect_routed: solver shape missing for "
+                     "{!r}".format(node))
+        return
+
+    drv_plugs = _flatten_targets(driver_targets)
+    dvn_plugs = _flatten_targets(driven_targets)
+
+    with undo_chunk("RBFtools: disconnect routed"):
+        # Driver side: bone.attr → shape.input[i]. List the OUTGOING
+        # connections of bone.attr; keep only those targeting THIS
+        # solver's input[] subscript.
+        for plug in drv_plugs:
+            conns = cmds.listConnections(
+                plug, source=False, destination=True,
+                plugs=True, connections=True) or []
+            hit = False
+            for k in range(0, len(conns), 2):
+                src_plug = conns[k]
+                dst_plug = conns[k + 1]
+                if not dst_plug.startswith(shape + ".input["):
+                    continue
+                hit = True
+                cmds.warning(
+                    "disconnect_routed: trying {} -> {}".format(
+                        src_plug, dst_plug))
+                try:
+                    cmds.disconnectAttr(src_plug, dst_plug)
+                except Exception as exc:
+                    cmds.warning(
+                        "disconnect_routed: {} -> {} FAILED: "
+                        "{}".format(src_plug, dst_plug, exc))
+            if not hit:
+                cmds.warning(
+                    "disconnect_routed: no input[] connection found "
+                    "for {} (skipped)".format(plug))
+
+        # Driven side: shape.output[i] → bone.attr. List the INCOMING
+        # connections of bone.attr; keep only those originating from
+        # THIS solver's output[] subscript.
+        for plug in dvn_plugs:
+            conns = cmds.listConnections(
+                plug, source=True, destination=False,
+                plugs=True, connections=True) or []
+            hit = False
+            for k in range(0, len(conns), 2):
+                dst_plug = conns[k]
+                src_plug = conns[k + 1]
+                if not src_plug.startswith(shape + ".output["):
+                    continue
+                hit = True
+                cmds.warning(
+                    "disconnect_routed: trying {} -> {}".format(
+                        src_plug, dst_plug))
+                try:
+                    cmds.disconnectAttr(src_plug, dst_plug)
+                except Exception as exc:
+                    cmds.warning(
+                        "disconnect_routed: {} -> {} FAILED: "
+                        "{}".format(src_plug, dst_plug, exc))
+            if not hit:
+                cmds.warning(
+                    "disconnect_routed: no output[] connection found "
+                    "for {} (skipped)".format(plug))
+
+
 def connect_node(node, driver_node, driven_node,
                  driver_attrs, driven_attrs):
     """Wire driver inputs and driven outputs on the solver node.
