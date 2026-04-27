@@ -1166,11 +1166,19 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._ctrl.remove_driven_source(int(index))
 
     def _on_driven_source_attrs_apply(self, index, attrs):
-        """M_TABBED_EDITOR: Connect button on a driven tab."""
+        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD: Connect on a
+        driven tab. Same idempotency gate as the driver side."""
+        if not self._guard_attrs_apply(
+                "driven", int(index), list(attrs)):
+            return
         self._ctrl.set_driven_source_attrs(int(index), list(attrs))
 
     def _on_driven_source_attrs_clear(self, index):
-        """M_TABBED_EDITOR: Disconnect button on a driven tab."""
+        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD: Disconnect on
+        a driven tab. Same nothing-to-disconnect guard as driver
+        side."""
+        if not self._guard_attrs_clear("driven", int(index)):
+            return
         self._ctrl.set_driven_source_attrs(int(index), [])
 
     def _on_driven_source_select_node(self, index):
@@ -1220,15 +1228,68 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         return out
 
     def _on_driver_source_attrs_apply(self, index, attrs):
-        """M_TABBED_EDITOR: Connect button on a driver tab. Apply the
-        currently-selected attrs to the source via
-        controller.set_driver_source_attrs."""
+        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD (2026-04-27):
+        Connect button on a driver tab. Pre-flight idempotency
+        check - if the source already has any attrs connected, the
+        TD must Disconnect first; this prevents accidental
+        rebuilds + makes the "is this connected?" state explicit
+        instead of letting set_driver_source_attrs silently
+        rebuild on every click."""
+        if not self._guard_attrs_apply(
+                "driver", int(index), list(attrs)):
+            return
         self._ctrl.set_driver_source_attrs(int(index), list(attrs))
 
     def _on_driver_source_attrs_clear(self, index):
-        """M_TABBED_EDITOR: Disconnect button on a driver tab.
-        Clears the source's attr list."""
+        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD: Disconnect
+        button on a driver tab. Pre-flight check - if the source
+        already has 0 attrs, surface a 'nothing to disconnect'
+        notice instead of triggering a no-op rebuild."""
+        if not self._guard_attrs_clear("driver", int(index)):
+            return
         self._ctrl.set_driver_source_attrs(int(index), [])
+
+    # ----- M_TABBED_CONNECT_GUARD: shared guard helpers --------------
+
+    def _guard_attrs_apply(self, role, index, attrs):
+        """Returns True if the Connect call should proceed; False if
+        a notice dialog was surfaced and the call must short-circuit."""
+        # Connect with empty selection -> ask the TD to pick attrs first.
+        if not attrs:
+            QtWidgets.QMessageBox.information(
+                self,
+                tr("title_no_attrs_selected"),
+                tr("msg_no_attrs_selected"))
+            return False
+        # Already-connected gate.
+        sources = (self._ctrl.read_driver_sources()
+                   if role == "driver"
+                   else self._ctrl.read_driven_sources())
+        if 0 <= index < len(sources):
+            existing = list(sources[index].attrs)
+            if existing:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    tr("title_already_connected"),
+                    tr("msg_already_connected"))
+                return False
+        return True
+
+    def _guard_attrs_clear(self, role, index):
+        """Returns True if the Disconnect call should proceed; False
+        if 'nothing to disconnect' notice was surfaced."""
+        sources = (self._ctrl.read_driver_sources()
+                   if role == "driver"
+                   else self._ctrl.read_driven_sources())
+        if 0 <= index < len(sources):
+            existing = list(sources[index].attrs)
+            if not existing:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    tr("title_nothing_to_disconnect"),
+                    tr("msg_nothing_to_disconnect"))
+                return False
+        return True
 
     def _on_driver_source_select_node(self, index):
         """M_TABBED_EDITOR: Select button on a driver tab. Picks

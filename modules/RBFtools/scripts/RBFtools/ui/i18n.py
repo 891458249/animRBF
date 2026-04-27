@@ -403,6 +403,21 @@ _EN = {
     "tab_pose":                        "Pose",
     "btn_add_driver":                  "Add Driver",
     "btn_add_driven":                  "Add Driven",
+    # -- M_TABBED_CONNECT_GUARD (2026-04-27 user request): Connect /
+    #    Disconnect pre-flight idempotency checks + user-facing
+    #    notice dialogs. --
+    "title_already_connected":         "Already Connected",
+    "msg_already_connected":
+        "This source already has attributes connected. Click "
+        "Disconnect first if you want to pick a different set.",
+    "title_nothing_to_disconnect":     "Nothing To Disconnect",
+    "msg_nothing_to_disconnect":
+        "This source has no attributes connected; there is nothing "
+        "to disconnect.",
+    "title_no_attrs_selected":         "No Attributes Selected",
+    "msg_no_attrs_selected":
+        "Please select at least one attribute in the list before "
+        "clicking Connect.",
 }
 
 _ZH = {
@@ -752,6 +767,16 @@ _ZH = {
     "tab_pose":                        u"\u59ff\u52bf",
     "btn_add_driver":                  u"\u6dfb\u52a0\u9a71\u52a8",
     "btn_add_driven":                  u"\u6dfb\u52a0\u88ab\u9a71\u52a8",
+    # M_TABBED_CONNECT_GUARD \u8fde\u63a5 / \u65ad\u5f00 \u5e42\u7b49\u6027\u68c0\u67e5
+    "title_already_connected":         u"\u5df2\u6709\u94fe\u63a5",
+    "msg_already_connected":
+        u"\u8be5\u6e90\u5df2\u6709\u5c5e\u6027\u8fde\u63a5\u3002\u5982\u9700\u66f4\u6362\u5c5e\u6027\u96c6\u5408\uff0c\u8bf7\u5148\u70b9\u51fb\"\u65ad\u5f00\"\u3002",
+    "title_nothing_to_disconnect":     u"\u6ca1\u6709\u53ef\u65ad\u5f00\u7684\u94fe\u63a5",
+    "msg_nothing_to_disconnect":
+        u"\u8be5\u6e90\u5f53\u524d\u6ca1\u6709\u5c5e\u6027\u8fde\u63a5\uff0c\u65e0\u9700\u65ad\u5f00\u3002",
+    "title_no_attrs_selected":         u"\u672a\u9009\u62e9\u5c5e\u6027",
+    "msg_no_attrs_selected":
+        u"\u8bf7\u5148\u5728\u5c5e\u6027\u5217\u8868\u4e2d\u81f3\u5c11\u9009\u62e9\u4e00\u9879\u518d\u70b9\u51fb\"\u8fde\u63a5\"\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}
