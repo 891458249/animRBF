@@ -1,103 +1,110 @@
 # -*- coding: utf-8 -*-
-"""PoseGridEditor — multi-source-aware Pose tab grid (Phase 2 of the
-2026-04-27 user audit).
+"""PoseGridEditor — Commit 2 (M_UIRECONCILE2) rewrite.
 
-Replaces the legacy QTableView (PoseTableModel) inside the Pose
-outer tab with a dynamic grid that mirrors the AnimaRbfSolver
-reference layout:
+Replaces the legacy QGridLayout flat-grid implementation with the
+*Header Separation* layout per the user's 2026-04-27 audit:
 
-  | Pose # | Driver headers (per source: node + attr) | Go to Pose |
-  | Pose # | Driver value spinboxes per attr          | [Btn]      |
-                                                      |
-  ... separator ...
-                                                      |
-  | Driven headers (per source: node + attr) | radius (future)
-  | Driven value spinboxes per attr           |
+  ┌─ PoseHeaderWidget                  ─┐  ← red driver / blue driven
+  │ ┌─ QScrollArea (global, h+v) ──────┐│
+  │ │  PoseRowWidget                   ││  ← bare spinboxes,
+  │ │  PoseRowWidget                   ││    width-locked to header
+  │ │  ...                             ││
+  │ └──────────────────────────────────┘│
+  │ [Add Pose] [Delete Poses]            │
+  └──────────────────────────────────────┘
 
-Single-source nodes degrade gracefully (one column group on each
-side). Multi-source nodes get one column group per source on each
-side. Live edits to a spinbox emit ``poseValueChanged`` so the
-controller can write the new value back to the node + the pose
-data model.
+Public signal contract preserved bit-for-bit so main_window slots
+keep working without modification (Commit 3 will add the
+semantic-signal sibling for the per-source / attr-name refactor).
+The new ``poseRadiusChanged(int pose_idx, float)`` signal is added
+on top of the legacy contract for consumption by Commit 3.
 
-MVC red line preserved: this widget never imports cmds. It receives
-already-resolved DriverSource / DrivenSource / PoseData instances
-via :py:meth:`set_data` and emits intent signals up to main_window.
+MVC red line preserved: never imports cmds. Receives DriverSource /
+DrivenSource / PoseData via :py:meth:`set_data`; emits intent
+signals for main_window to translate into core operations.
 """
 
 from __future__ import absolute_import
 
 from RBFtools.ui.compat import QtCore, QtWidgets
 from RBFtools.ui.i18n import tr
-
-
-# ----------------------------------------------------------------------
-# PoseGridEditor
-# ----------------------------------------------------------------------
+from RBFtools.ui.widgets.bone_data_widgets import (
+    COL_SPACING, COL_MARGIN,
+)
+from RBFtools.ui.widgets.pose_row_widget import (
+    PoseHeaderWidget, PoseRowWidget,
+)
 
 
 class PoseGridEditor(QtWidgets.QWidget):
-    """Multi-source-aware pose grid editor.
+    """Header + scrollable list of :class:`PoseRowWidget`.
 
-    Columns are rebuilt every time :py:meth:`set_data` is called -
-    typically on controller editorLoaded / driverSourcesChanged /
-    drivenSourcesChanged signal cascades. The widget never queries
-    Maya directly; main_window resolves the DriverSource /
-    DrivenSource / PoseData payload and pushes it in.
+    Signal contract (legacy preserved):
+      poseRecallRequested(int)
+      poseDeleteRequested(int)
+      poseValueChanged(int pose_idx, str side, int flat_attr_idx, float)
+      addPoseRequested()
+      deleteAllPosesRequested()
+
+    New (Commit 2):
+      poseRadiusChanged(int pose_idx, float new_radius)
     """
 
-    # Per-row Go to Pose button -> recall this pose.
+    # Legacy contract (kept for main_window backcompat).
     poseRecallRequested  = QtCore.Signal(int)
-    # Per-row delete affordance (right-click menu).
     poseDeleteRequested  = QtCore.Signal(int)
-    # A spinbox changed - payload (pose_index, side, flat_attr_idx, new_value).
-    # side is "input" (driver) or "value" (driven).
     poseValueChanged     = QtCore.Signal(int, str, int, float)
-    # Bottom Add Pose button.
     addPoseRequested     = QtCore.Signal()
-    # Bottom Delete Poses button (clear all).
     deleteAllPosesRequested = QtCore.Signal()
+    # Commit 2 (M_PER_POSE_SIGMA): per-pose σ live edit.
+    poseRadiusChanged    = QtCore.Signal(int, float)
 
     def __init__(self, parent=None):
         super(PoseGridEditor, self).__init__(parent)
         self._driver_sources = []
         self._driven_sources = []
         self._poses          = []
-        # Per-row tracking lists so spinbox edits can resolve back to
-        # (pose_index, side, flat_attr_idx).
-        self._row_widgets    = []   # list[dict] keyed by row data
+        self._header_widget  = None
+        self._row_widgets    = []
         self._build()
 
     # ------------------------------------------------------------------
-    # Build (one-shot)
+    # Build (one-shot scaffold)
     # ------------------------------------------------------------------
 
     def _build(self):
-        lay = QtWidgets.QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(2)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(COL_MARGIN, COL_MARGIN,
+                                 COL_MARGIN, COL_MARGIN)
+        outer.setSpacing(COL_SPACING)
 
-        # Empty hint shown when there are no driver/driven sources or
-        # no poses yet.
+        # Empty hint shown when there are no driver/driven sources.
         self._lbl_empty_hint = QtWidgets.QLabel(
             tr("pose_grid_empty_hint"))
         self._lbl_empty_hint.setStyleSheet(
             "color: gray; font-style: italic;")
         self._lbl_empty_hint.setWordWrap(True)
-        self._lbl_empty_hint.setVisible(True)
-        lay.addWidget(self._lbl_empty_hint)
+        outer.addWidget(self._lbl_empty_hint)
 
-        # Scroll area containing the dynamic grid.
+        # Global QScrollArea — single source of truth for horizontal +
+        # vertical scrolling. Per the user's spec we MUST NOT install
+        # per-row scroll areas (would yield N horizontal bars for N
+        # poses; UX disaster).
         self._scroll = QtWidgets.QScrollArea()
         self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAsNeeded)
+        self._scroll.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAsNeeded)
         self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self._grid_widget = QtWidgets.QWidget()
-        self._grid = QtWidgets.QGridLayout(self._grid_widget)
-        self._grid.setContentsMargins(4, 4, 4, 4)
-        self._grid.setHorizontalSpacing(4)
-        self._grid.setVerticalSpacing(4)
-        self._scroll.setWidget(self._grid_widget)
-        lay.addWidget(self._scroll, 1)
+
+        self._inner = QtWidgets.QWidget()
+        self._inner_layout = QtWidgets.QVBoxLayout(self._inner)
+        self._inner_layout.setContentsMargins(0, 0, 0, 0)
+        self._inner_layout.setSpacing(COL_SPACING)
+        self._inner_layout.addStretch(1)
+        self._scroll.setWidget(self._inner)
+        outer.addWidget(self._scroll, 1)
 
         # Bottom action row: Add Pose + Delete Poses.
         btn_row = QtWidgets.QHBoxLayout()
@@ -112,21 +119,18 @@ class PoseGridEditor(QtWidgets.QWidget):
             self.deleteAllPosesRequested)
         btn_row.addWidget(self._btn_add)
         btn_row.addWidget(self._btn_delete_all)
-        lay.addLayout(btn_row)
+        btn_row.addStretch(1)
+        outer.addLayout(btn_row)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def set_data(self, driver_sources, driven_sources, poses):
-        """Rebuild the grid from the supplied sources + poses.
-
-        Called by main_window after each
-        controller.driverSourcesChanged / drivenSourcesChanged /
-        editorLoaded signal cascade."""
+        """Rebuild header + rows from the supplied sources + poses."""
         self._driver_sources = list(driver_sources or [])
         self._driven_sources = list(driven_sources or [])
-        self._poses = list(poses or [])
+        self._poses          = list(poses or [])
         self._rebuild()
 
     def retranslate(self):
@@ -135,22 +139,28 @@ class PoseGridEditor(QtWidgets.QWidget):
         self._btn_add.setToolTip(tr("pose_grid_add_pose_tip"))
         self._btn_delete_all.setText(tr("delete_poses"))
         self._btn_delete_all.setToolTip(tr("pose_grid_delete_all_tip"))
+        # Header + rows are torn down + rebuilt on each set_data, so
+        # any tr() string changes pick up automatically the next
+        # cascade. No need to walk the existing tree here.
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _clear_grid(self):
-        while self._grid.count() > 0:
-            item = self._grid.takeAt(0)
+    def _clear_inner(self):
+        # Remove header (if any) + every row, leaving the trailing
+        # stretch in place at index 0.
+        while self._inner_layout.count() > 1:
+            item = self._inner_layout.takeAt(0)
             w = item.widget() if item is not None else None
             if w is not None:
                 w.deleteLater()
+        self._header_widget = None
         self._row_widgets = []
 
     def _rebuild(self):
-        self._clear_grid()
-        # Show empty hint when there are no sources at all.
+        self._clear_inner()
+
         no_sources = (
             not self._driver_sources and not self._driven_sources)
         self._lbl_empty_hint.setVisible(
@@ -158,160 +168,32 @@ class PoseGridEditor(QtWidgets.QWidget):
         self._scroll.setVisible(not (no_sources and not self._poses))
         if no_sources and not self._poses:
             return
-        self._build_header_rows()
-        self._build_pose_rows()
 
-    # ----- Column index plan -----------------------------------------
-    # Col 0: pose label
-    # Col 1..n_drv: driver value spinboxes (1 column per attr, attrs
-    #               grouped by driver source)
-    # Col n_drv+1: Go to Pose button
-    # Col n_drv+2: vertical divider
-    # Col n_drv+3..end: driven value spinboxes (1 column per attr)
+        # Header: one BoneDataGroupBox per driver source (red), one
+        # per driven source (blue), Radius / Actions placeholders.
+        self._header_widget = PoseHeaderWidget(
+            self._driver_sources, self._driven_sources)
+        self._inner_layout.insertWidget(
+            self._inner_layout.count() - 1,  # before stretch
+            self._header_widget)
 
-    def _driver_attr_total(self):
-        return sum(len(s.attrs) for s in self._driver_sources)
-
-    def _driven_attr_total(self):
-        return sum(len(s.attrs) for s in self._driven_sources)
-
-    def _col_pose_label(self):
-        return 0
-
-    def _col_driver_start(self):
-        return 1
-
-    def _col_driver_end(self):
-        return self._col_driver_start() + self._driver_attr_total()
-
-    def _col_go_button(self):
-        return self._col_driver_end()
-
-    def _col_divider(self):
-        return self._col_go_button() + 1
-
-    def _col_driven_start(self):
-        return self._col_divider() + 1
-
-    def _col_driven_end(self):
-        return self._col_driven_start() + self._driven_attr_total()
-
-    # ----- Header rows -----------------------------------------------
-
-    def _build_header_rows(self):
-        # Row 0: source-name headers (each spans the source's attr count)
-        # Row 1: per-attr name headers
-        col = self._col_driver_start()
-        for src in self._driver_sources:
-            n = max(1, len(src.attrs))
-            lbl_node = QtWidgets.QLabel(src.node or "<unset>")
-            lbl_node.setStyleSheet(
-                "color: #b03a48; font-weight: bold;"
-                "padding: 2px 4px;"
-                "border: 1px solid #b03a48;"
-                "border-radius: 3px;")
-            lbl_node.setAlignment(QtCore.Qt.AlignLeft)
-            self._grid.addWidget(lbl_node, 0, col, 1, n)
-            for i, attr in enumerate(src.attrs):
-                lbl_attr = QtWidgets.QLabel(attr)
-                lbl_attr.setStyleSheet(
-                    "color: #b03a48; padding: 1px 4px;")
-                self._grid.addWidget(lbl_attr, 1, col + i)
-            col += n
-        # Driven side headers.
-        col = self._col_driven_start()
-        for src in self._driven_sources:
-            n = max(1, len(src.attrs))
-            lbl_node = QtWidgets.QLabel(src.node or "<unset>")
-            lbl_node.setStyleSheet(
-                "color: #3a7a8c; font-weight: bold;"
-                "padding: 2px 4px;"
-                "border: 1px solid #3a7a8c;"
-                "border-radius: 3px;")
-            lbl_node.setAlignment(QtCore.Qt.AlignLeft)
-            self._grid.addWidget(lbl_node, 0, col, 1, n)
-            for i, attr in enumerate(src.attrs):
-                lbl_attr = QtWidgets.QLabel(attr)
-                lbl_attr.setStyleSheet(
-                    "color: #3a7a8c; padding: 1px 4px;")
-                self._grid.addWidget(lbl_attr, 1, col + i)
-            col += n
-
-    # ----- Pose rows -------------------------------------------------
-
-    def _build_pose_rows(self):
+        # One PoseRowWidget per pose. Signals re-emitted at the
+        # editor level so main_window can keep its existing slot
+        # connections.
         for i, pose in enumerate(self._poses):
-            row = i + 2   # +2 for the two header rows
-            # Pose label.
-            lbl_pose = QtWidgets.QLabel(
-                tr("pose_grid_row_label").format(idx=i))
-            lbl_pose.setStyleSheet(
-                "padding: 2px 4px; min-width: 60px;")
-            self._grid.addWidget(
-                lbl_pose, row, self._col_pose_label())
-            # Driver value spinboxes.
             inputs = list(getattr(pose, "inputs", []) or [])
-            col = self._col_driver_start()
-            n_drv = self._driver_attr_total()
-            for j in range(n_drv):
-                val = inputs[j] if j < len(inputs) else 0.0
-                sb = self._make_spinbox(val)
-                sb.valueChanged.connect(
-                    lambda v, _i=i, _j=j:
-                        self.poseValueChanged.emit(
-                            _i, "input", _j, float(v)))
-                self._grid.addWidget(sb, row, col + j)
-            # Go to Pose button.
-            btn_go = QtWidgets.QPushButton(tr("pose_grid_go_to_pose"))
-            btn_go.setToolTip(tr("pose_grid_go_to_pose_tip"))
-            btn_go.clicked.connect(
-                lambda _checked=False, _i=i:
-                    self.poseRecallRequested.emit(_i))
-            self._grid.addWidget(btn_go, row, self._col_go_button())
-            # Vertical divider.
-            divider = QtWidgets.QFrame()
-            divider.setFrameShape(QtWidgets.QFrame.VLine)
-            divider.setFrameShadow(QtWidgets.QFrame.Sunken)
-            self._grid.addWidget(divider, row, self._col_divider())
-            # Driven value spinboxes.
             values = list(getattr(pose, "values", []) or [])
-            col = self._col_driven_start()
-            n_dvn = self._driven_attr_total()
-            for j in range(n_dvn):
-                val = values[j] if j < len(values) else 0.0
-                sb = self._make_spinbox(val)
-                sb.valueChanged.connect(
-                    lambda v, _i=i, _j=j:
-                        self.poseValueChanged.emit(
-                            _i, "value", _j, float(v)))
-                self._grid.addWidget(sb, row, col + j)
-            # Right-click context menu on the pose label for delete.
-            lbl_pose.setContextMenuPolicy(
-                QtCore.Qt.CustomContextMenu)
-            lbl_pose.customContextMenuRequested.connect(
-                lambda _pos, _i=i:
-                    self._show_row_menu(_i))
-
-    @staticmethod
-    def _make_spinbox(initial):
-        sb = QtWidgets.QDoubleSpinBox()
-        sb.setRange(-1e9, 1e9)
-        sb.setDecimals(3)
-        sb.setMinimumWidth(70)
-        try:
-            sb.setValue(float(initial))
-        except (TypeError, ValueError):
-            sb.setValue(0.0)
-        return sb
-
-    def _show_row_menu(self, pose_index):
-        menu = QtWidgets.QMenu(self)
-        act_recall = menu.addAction(tr("recall"))
-        act_delete = menu.addAction(tr("delete"))
-        chosen = menu.exec_(QtCore.QCursor.pos()
-                            if hasattr(QtCore, "QCursor")
-                            else None)
-        if chosen is act_recall:
-            self.poseRecallRequested.emit(pose_index)
-        elif chosen is act_delete:
-            self.poseDeleteRequested.emit(pose_index)
+            radius = float(getattr(pose, "radius", 5.0))
+            row = PoseRowWidget(
+                pose_index=i,
+                driver_sources=self._driver_sources,
+                driven_sources=self._driven_sources,
+                inputs=inputs, values=values, radius=radius)
+            row.poseValueChanged.connect(self.poseValueChanged)
+            row.poseRadiusChanged.connect(self.poseRadiusChanged)
+            row.poseRecallRequested.connect(self.poseRecallRequested)
+            row.poseDeleteRequested.connect(self.poseDeleteRequested)
+            self._row_widgets.append(row)
+            self._inner_layout.insertWidget(
+                self._inner_layout.count() - 1,  # before stretch
+                row)
