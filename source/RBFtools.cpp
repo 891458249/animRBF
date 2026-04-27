@@ -78,6 +78,11 @@ MObject RBFtools::poseRotateOrder;
 MObject RBFtools::poses;
 MObject RBFtools::poseValue;
 MObject RBFtools::poseValues;
+// Commit 0 (M_PER_POSE_SIGMA / M_BASE_POSE): see RBFtools.h for the
+// math + backcompat contract. Both are top-level multi-double arrays
+// running parallel to poses[] / output[] respectively.
+MObject RBFtools::poseRadius;
+MObject RBFtools::basePoseValue;
 // M2.3: pure-data per-pose local Transform snapshot.
 MObject RBFtools::poseLocalTransform;
 MObject RBFtools::poseLocalTranslate;
@@ -335,6 +340,28 @@ MStatus RBFtools::initialize()
     nAttr.setDefault(0.0);
     nAttr.setMin(0.0);
     nAttr.setSoftMax(1.0);
+
+    // Commit 0 (M_PER_POSE_SIGMA): per-pose σ. multi double, default
+    // 5.0 per pose. Parallel-indexed to poses[]. Sparse-safe: missing
+    // index falls back to scalar radius via readPoseRadii().
+    poseRadius = nAttr.create("poseRadius", "prad",
+                              MFnNumericData::kDouble);
+    nAttr.setKeyable(true);
+    nAttr.setArray(true);
+    nAttr.setUsesArrayDataBuilder(true);
+    nAttr.setDefault(5.0);
+    nAttr.setMin(0.0);
+    nAttr.setSoftMax(50.0);
+
+    // Commit 0 (M_BASE_POSE): per-output-channel additive baseline
+    // (driven side). multi double, default 0.0 (bit-identical legacy
+    // behaviour for empty array). Length should track output[].
+    basePoseValue = nAttr.create("basePoseValue", "bpv",
+                                 MFnNumericData::kDouble);
+    nAttr.setKeyable(true);
+    nAttr.setArray(true);
+    nAttr.setUsesArrayDataBuilder(true);
+    nAttr.setDefault(0.0);
 
     centerAngle = nAttr.create("centerAngle", "ca", MFnNumericData::kDouble);
     nAttr.setKeyable(true);
@@ -877,6 +904,9 @@ MStatus RBFtools::initialize()
     addAttribute(poseParentMatrix);
     addAttribute(input);
     addAttribute(restInput);
+    // Commit 0 (M_PER_POSE_SIGMA / M_BASE_POSE)
+    addAttribute(poseRadius);
+    addAttribute(basePoseValue);
     addAttribute(poses);
     addAttribute(poseInput);
     addAttribute(poseValue);
@@ -958,6 +988,9 @@ MStatus RBFtools::initialize()
     attributeAffects(RBFtools::driverInputRotateOrder, RBFtools::output);
     attributeAffects(RBFtools::outputQuaternionGroupStart, RBFtools::output);
     attributeAffects(RBFtools::radius, RBFtools::output);
+    // Commit 0 (M_PER_POSE_SIGMA / M_BASE_POSE) — both feed compute().
+    attributeAffects(RBFtools::poseRadius,    RBFtools::output);
+    attributeAffects(RBFtools::basePoseValue, RBFtools::output);
     attributeAffects(RBFtools::centerAngle, RBFtools::output);
     attributeAffects(RBFtools::curveRamp, RBFtools::output);
     attributeAffects(RBFtools::direction, RBFtools::output);
@@ -1683,6 +1716,33 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                 for (i = 0; i < solveCount; i ++)
                     weightsArray.set(0.0, i);
 
+                // Commit 0b (M_PER_POSE_SIGMA): hoist poseRadius read
+                // ABOVE the evalInput block so the SAME widths vector
+                // feeds both training-time getActivations (K matrix
+                // build) and inference-time getPoseWeights (per-pose
+                // φ(dist, σ_j)). Math contract: training and inference
+                // must share the basis function — using widths[i] in
+                // both ensures K[j,j] · w_j evaluates to exactly 1.0
+                // when the driver sits on pose j (modulo regularization).
+                std::vector<double> perPoseWidths;
+                {
+                    MArrayDataHandle prHandle =
+                        data.inputArrayValue(RBFtools::poseRadius);
+                    unsigned prCount = prHandle.elementCount();
+                    perPoseWidths.assign(poseCount, getRadiusValue());
+                    for (unsigned p = 0; p < prCount; p ++)
+                    {
+                        unsigned idx = prHandle.elementIndex();
+                        if (idx < poseCount)
+                        {
+                            double w = prHandle.inputValue().asDouble();
+                            if (w > 0.0)
+                                perPoseWidths[idx] = w;
+                        }
+                        if (p + 1 < prCount) prHandle.next();
+                    }
+                }
+
                 if (evalInput)
                 {
                     // MGlobal::displayInfo("Initialize matrices");
@@ -1719,8 +1779,11 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     // -------------------------------------------------
 
                     // Transform the distance matrix to include the
-                    // activation values.
-                    getActivations(linMat, getRadiusValue(), kernelVal);
+                    // activation values. Commit 0b: perPoseWidths is
+                    // now hoisted above the evalInput block so the
+                    // same vector feeds inference too.
+                    getActivations(linMat, perPoseWidths,
+                                   getRadiusValue(), kernelVal);
 
                     if (exposeDataVal > 2)
                         linMat.show(thisName, "Activations");
@@ -1877,7 +1940,8 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                driver,
                                poseModes,
                                wMat,
-                               getRadiusValue(),
+                               perPoseWidths,         // Commit 0b
+                               getRadiusValue(),      // fallback
                                distanceTypeVal,
                                (int)effectiveEncoding,
                                /*isMatrixMode*/ !genericMode,
@@ -3653,6 +3717,52 @@ void RBFtools::getActivations(BRMatrix &mat, double width, short kernelType)
 
 
 //
+// Commit 0 (M_PER_POSE_SIGMA): vectorised overload.
+//   widths        — per-pose σ (length == count expected). Empty
+//                   vector triggers scalar-fallback path.
+//   widthFallback — used when widths[i]/[j] is non-positive (sparse
+//                   array hole) or when widths.empty().
+// Math: K[i,j] uses σ_pair = (σ_i + σ_j) / 2 (arithmetic mean).
+// Symmetry preserved => Cholesky path of M1.4 stays usable. Setting
+// widths[*] to a constant c reproduces the scalar overload bit-for-
+// bit (regression guard for legacy nodes during migration).
+//
+void RBFtools::getActivations(BRMatrix &mat,
+                              const std::vector<double> &widths,
+                              double widthFallback,
+                              short kernelType)
+{
+    unsigned count = mat.getRowSize();
+
+    if (widths.empty())
+    {
+        // Backcompat path — identical to scalar overload.
+        getActivations(mat, widthFallback, kernelType);
+        return;
+    }
+
+    auto pickSigma = [&](unsigned k) -> double
+    {
+        if (k < widths.size() && widths[k] > 0.0)
+            return widths[k];
+        return widthFallback > 0.0 ? widthFallback : 1.0;
+    };
+
+    unsigned int i, j;
+    for (i = 0; i < count; i ++)
+    {
+        double sigma_i = pickSigma(i);
+        for (j = 0; j < count; j ++)
+        {
+            double sigma_j   = pickSigma(j);
+            double sigmaPair = 0.5 * (sigma_i + sigma_j);
+            mat(i, j) = interpolateRbf(mat(i, j), sigmaPair, kernelType);
+        }
+    }
+}
+
+
+//
 // Description:
 //      Interpolation function for processing the weight values.
 //
@@ -3764,7 +3874,8 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
                                   std::vector<double> driver,
                                   MIntArray poseModes,
                                   BRMatrix weightMat,
-                                  double width,
+                                  const std::vector<double> &widths,
+                                  double widthFallback,
                                   int distType,
                                   int encoding,
                                   bool isMatrixMode,
@@ -3819,7 +3930,16 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
         }
 
         dist = getPoseDelta(dv, ps, distType, encoding, isMatrixMode);
-        const double phi = interpolateRbf(dist, width, kernelType);
+        // Commit 0b (M_PER_POSE_SIGMA): per-pose σ at inference. Must
+        // match the σ used to BUILD K[*, i] during training so the
+        // basis function is identical on both sides — otherwise the
+        // sum_j w_j · φ(||x - c_j||, σ_j) loses the partition-of-unity
+        // property at pose centres.
+        double sigma_i =
+            (i < widths.size() && widths[i] > 0.0)
+                ? widths[i]
+                : (widthFallback > 0.0 ? widthFallback : 1.0);
+        const double phi = interpolateRbf(dist, sigma_i, kernelType);
 
         // Scalar accumulate. Dims flagged as quat-group members take
         // their value from the QWA post-loop instead; skip their scalar
@@ -3950,13 +4070,33 @@ void RBFtools::setOutputValues(MDoubleArray weightsArray, MDataBlock data, bool 
         (void)s_outEncSink;
     }
 
+    // Commit 0 (M_BASE_POSE): read basePoseValue array into a flat
+    // std::vector<double> indexed by output channel. Empty array =>
+    // all zeros => bit-identical legacy behaviour. Out-of-range
+    // channels (basePoseValue shorter than count) treat as 0.0.
+    std::vector<double> baseVals(count, 0.0);
+    if (!inactive)
+    {
+        MArrayDataHandle bpvHandle =
+            data.inputArrayValue(RBFtools::basePoseValue);
+        unsigned bpvCount = bpvHandle.elementCount();
+        for (unsigned k = 0; k < bpvCount; k ++)
+        {
+            unsigned idx = bpvHandle.elementIndex();
+            if (idx < count)
+                baseVals[idx] =
+                    bpvHandle.inputValue().asDouble();
+            if (k + 1 < bpvCount) bpvHandle.next();
+        }
+    }
+
     MArrayDataHandle outputHandle = data.outputArrayValue(output);
     MArrayDataBuilder outputBuilder(&data, output, count);
     for (i = 0; i < count; i ++)
     {
         MDataHandle outputIdHandle = outputBuilder.addElement((unsigned)ids[i]);
         if (!inactive)
-            outputIdHandle.setDouble(weightsArray[i]);
+            outputIdHandle.setDouble(weightsArray[i] + baseVals[i]);
         else
             outputIdHandle.setDouble(0.0);
 

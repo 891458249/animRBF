@@ -215,15 +215,30 @@ public:
                                         std::vector<bool> &isQuatMember,
                                         bool &anyInvalid);
     static void getActivations(BRMatrix &mat, double width, short kernelType);
+    // Commit 0 (M_PER_POSE_SIGMA): vectorised overload — one σ per
+    // pose. K[i,j] uses σ_pair = (widths[i] + widths[j]) / 2 to
+    // preserve matrix symmetry. Falls back to the scalar overload
+    // when widths.empty() so legacy nodes keep bit-identical math.
+    static void getActivations(BRMatrix &mat,
+                               const std::vector<double> &widths,
+                               double widthFallback,
+                               short kernelType);
     static double interpolateRbf(double value, double width, short kernelType);
     static std::vector<double> normalizeVector(std::vector<double> vec, std::vector<double> factors);
+    // Commit 0b (M_PER_POSE_SIGMA): width parameter is now per-pose.
+    // widths[i] is consumed inside the i-th pose loop iteration as
+    // the σ for interpolateRbf(dist, σ_i, kernel). Empty vector or
+    // non-positive entry falls back to widthFallback (the global
+    // radius); legacy bit-identical behaviour preserved when the
+    // caller passes a vector filled with widthFallback.
     static void getPoseWeights(MDoubleArray &out,
                                BRMatrix poses,
                                std::vector<double> norms,
                                std::vector<double> driver,
                                MIntArray poseModes,
                                BRMatrix weightMat,
-                               double dist,
+                               const std::vector<double> &widths,
+                               double widthFallback,
                                int distType,
                                int encoding,           // M2.1a
                                bool isMatrixMode,      // M2.1a
@@ -324,6 +339,22 @@ public:
     static MObject poses;
     static MObject poseValue;
     static MObject poseValues;
+    // Commit 0 (M_PER_POSE_SIGMA): per-pose RBF kernel width.
+    // Top-level multi double, parallel-indexed to poses[]. Empty
+    // array (legacy v5-pre-M_PERPOSE node) => fallback to scalar
+    // radius (existing global). Default 5.0 per pose.
+    // Math contract: at training, K[i,j] uses σ_pair=(σ_i+σ_j)/2
+    // (arithmetic mean — preserves symmetry => Cholesky path of
+    // M1.4 stays valid); at inference, query-vs-center j uses σ_j.
+    static MObject poseRadius;
+    // Commit 0 (M_BASE_POSE): per-output-channel additive baseline
+    // applied at setOutputValues (driven side). Top-level multi
+    // double, length = output[]. Empty array (legacy node) =>
+    // zero baseline => bit-identical to pre-M_BASE_POSE behaviour.
+    // Distinct from M1.2 baseValue (which subtracts pre-solve);
+    // basePoseValue is post-solve add-back representing the
+    // user-authored "neutral driven configuration".
+    static MObject basePoseValue;
     // M2.3: per-pose local-Transform snapshot (Generic mode). Compound
     // child of poses[p]; pure data channel — never read by compute().
     // See v5 addendum §M2.3 for the non-driven-channel freeze contract.
