@@ -250,6 +250,22 @@ class PoseTableModel(QtCore.QAbstractTableModel):
         del self._poses[row]
         self.endRemoveRows()
 
+    def update_pose_radius(self, row, new_radius):
+        """Commit 3 (M_PER_POSE_SIGMA): set the per-pose σ on an
+        existing row. Triggers a dataChanged emit on row 0 (label
+        column) so any downstream view that displays radius can
+        refresh; the column-set is conservative because the legacy
+        QTableView does not surface radius directly."""
+        if row < 0 or row >= len(self._poses):
+            return
+        pose = self._poses[row]
+        try:
+            pose.radius = float(new_radius)
+        except (TypeError, ValueError):
+            return
+        idx = self.index(row, 0)
+        self.dataChanged.emit(idx, idx, [QtCore.Qt.DisplayRole])
+
     def update_pose_values(self, row, inputs, outputs):
         """Replace the numeric data of an existing pose at *row*.
 

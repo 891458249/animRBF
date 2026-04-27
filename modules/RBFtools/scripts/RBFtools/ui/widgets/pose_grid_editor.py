@@ -39,25 +39,27 @@ from RBFtools.ui.widgets.pose_row_widget import (
 class PoseGridEditor(QtWidgets.QWidget):
     """Header + scrollable list of :class:`PoseRowWidget`.
 
-    Signal contract (legacy preserved):
+    Signal contract (Commit 3 — C2 semantic refactor):
       poseRecallRequested(int)
       poseDeleteRequested(int)
-      poseValueChanged(int pose_idx, str side, int flat_attr_idx, float)
+      poseValueChangedV2(int pose_idx, str side, int source_idx,
+                         str attr_name, float new_value)
+      poseRadiusChanged(int pose_idx, float new_radius)
       addPoseRequested()
       deleteAllPosesRequested()
 
-    New (Commit 2):
-      poseRadiusChanged(int pose_idx, float new_radius)
+    The legacy ``poseValueChanged(int, str, int, float)`` flat_attr_idx
+    form was removed in Commit 3 per the user's hard decree.
+    main_window slots were updated atomically.
     """
 
-    # Legacy contract (kept for main_window backcompat).
     poseRecallRequested  = QtCore.Signal(int)
     poseDeleteRequested  = QtCore.Signal(int)
-    poseValueChanged     = QtCore.Signal(int, str, int, float)
+    # C2 semantic signal — per-source / attr-name carriage.
+    poseValueChangedV2   = QtCore.Signal(int, str, int, str, float)
+    poseRadiusChanged    = QtCore.Signal(int, float)
     addPoseRequested     = QtCore.Signal()
     deleteAllPosesRequested = QtCore.Signal()
-    # Commit 2 (M_PER_POSE_SIGMA): per-pose σ live edit.
-    poseRadiusChanged    = QtCore.Signal(int, float)
 
     def __init__(self, parent=None):
         super(PoseGridEditor, self).__init__(parent)
@@ -189,7 +191,7 @@ class PoseGridEditor(QtWidgets.QWidget):
                 driver_sources=self._driver_sources,
                 driven_sources=self._driven_sources,
                 inputs=inputs, values=values, radius=radius)
-            row.poseValueChanged.connect(self.poseValueChanged)
+            row.poseValueChangedV2.connect(self.poseValueChangedV2)
             row.poseRadiusChanged.connect(self.poseRadiusChanged)
             row.poseRecallRequested.connect(self.poseRecallRequested)
             row.poseDeleteRequested.connect(self.poseDeleteRequested)

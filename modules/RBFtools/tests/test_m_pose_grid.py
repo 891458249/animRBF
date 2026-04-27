@@ -54,8 +54,9 @@ class TestM_POSE_GRID_SourceScan(unittest.TestCase):
         self.assertIn("class PoseGridEditor", self._grid)
 
     def test_required_signals(self):
+        # Commit 3 (C2): poseValueChanged was replaced by V2.
         for sig in ("poseRecallRequested", "poseDeleteRequested",
-                    "poseValueChanged", "addPoseRequested",
+                    "poseValueChangedV2", "addPoseRequested",
                     "deleteAllPosesRequested"):
             self.assertIn(sig, self._grid,
                 "PoseGridEditor missing signal {}".format(sig))
@@ -69,11 +70,12 @@ class TestM_POSE_GRID_SourceScan(unittest.TestCase):
         self.assertIn("PoseGridEditor()", self._main)
 
     def test_main_window_helpers(self):
+        # Commit 3: _on_pose_grid_value_changed -> _on_pose_grid_value_changed_v2.
         for helper in ("def _refresh_pose_grid",
                        "def _on_pose_grid_recall",
                        "def _on_pose_grid_delete",
                        "def _on_pose_grid_delete_all",
-                       "def _on_pose_grid_value_changed"):
+                       "def _on_pose_grid_value_changed_v2"):
             self.assertIn(helper, self._main,
                 "main_window missing {}".format(helper))
 
@@ -101,7 +103,7 @@ class TestM_POSE_GRID_Signals(unittest.TestCase):
         grid = PoseGridEditor.__new__(PoseGridEditor)
         grid.poseRecallRequested = mock.MagicMock()
         grid.poseDeleteRequested = mock.MagicMock()
-        grid.poseValueChanged    = mock.MagicMock()
+        grid.poseValueChangedV2  = mock.MagicMock()
         grid.addPoseRequested    = mock.MagicMock()
         grid.deleteAllPosesRequested = mock.MagicMock()
         return grid
@@ -181,18 +183,27 @@ class TestM_POSE_GRID_MainWindowIntegration(unittest.TestCase):
         self.assertEqual(call_args, [2, 1, 0])
 
     def test_value_changed_pushes_into_pose_model(self):
+        # Commit 3 (C2 semantic refactor): slot is now V2 — carries
+        # (source_idx, attr_name) instead of flat_attr_idx. Mock the
+        # controller's read_driver_sources / read_driven_sources so
+        # the (source_idx, attr_name) -> flat_idx mapping resolves.
         from RBFtools.ui.main_window import RBFToolsWindow
         from RBFtools.core import PoseData
         win = self._make_window()
         win._ctrl.pose_model.get_pose.return_value = PoseData(
             0, [0.0, 0.0], [1.0, 1.0, 1.0])
-        # Driver-side spinbox edit on flat input index 1 -> 0.5.
-        RBFToolsWindow._on_pose_grid_value_changed(
-            win, 0, "input", 1, 0.5)
+        # 1 driver source with 2 attrs (joint1.tx, joint1.ty).
+        drv_src = mock.MagicMock()
+        drv_src.attrs = ["tx", "ty"]
+        win._ctrl.read_driver_sources.return_value = [drv_src]
+        win._ctrl.read_driven_sources.return_value = []
+        # Driver-side edit: source 0, attr "ty" -> flat_idx 1 -> 0.5.
+        RBFToolsWindow._on_pose_grid_value_changed_v2(
+            win, 0, "input", 0, "ty", 0.5)
         win._ctrl.pose_model.update_pose_values.assert_called_once()
         args = win._ctrl.pose_model.update_pose_values.call_args[0]
-        self.assertEqual(args[0], 0)            # pose row
-        self.assertEqual(args[1], [0.0, 0.5])   # new inputs
+        self.assertEqual(args[0], 0)
+        self.assertEqual(args[1], [0.0, 0.5])
         self.assertEqual(args[2], [1.0, 1.0, 1.0])
 
     def test_value_changed_value_side_updates_outputs(self):
@@ -201,8 +212,14 @@ class TestM_POSE_GRID_MainWindowIntegration(unittest.TestCase):
         win = self._make_window()
         win._ctrl.pose_model.get_pose.return_value = PoseData(
             0, [0.0], [1.0, 1.0, 1.0])
-        RBFToolsWindow._on_pose_grid_value_changed(
-            win, 0, "value", 2, 9.0)
+        win._ctrl.read_driver_sources.return_value = []
+        # 1 driven source: 3 attrs (rx, ry, rz). source 0, attr "rz"
+        # -> flat_idx 2.
+        dvn_src = mock.MagicMock()
+        dvn_src.attrs = ["rx", "ry", "rz"]
+        win._ctrl.read_driven_sources.return_value = [dvn_src]
+        RBFToolsWindow._on_pose_grid_value_changed_v2(
+            win, 0, "value", 0, "rz", 9.0)
         args = win._ctrl.pose_model.update_pose_values.call_args[0]
         self.assertEqual(args[2], [1.0, 1.0, 9.0])
 

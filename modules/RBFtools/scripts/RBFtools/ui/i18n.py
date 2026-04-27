@@ -481,6 +481,11 @@ _EN = {
         "Removed {n} connectionless output slot(s).",
     "status_cleanup_pose_removed":
         "Removed {n} redundant pose entry/entries.",
+    # Commit 3 (M_BASE_POSE) — BaseDrivenPose tab labels.
+    "tab_base_drv_pose":               "BaseDrivenPose",
+    "base_pose_label_fallback":        "Base Pose",
+    "base_pose_empty_hint_fallback":
+        "Connect driver / driven sources to configure the base pose.",
 }
 
 _ZH = {
@@ -889,6 +894,12 @@ _ZH = {
     "status_cleanup_input_removed":    u"\u5df2\u6e05\u7406 {n} \u4e2a\u672a\u8fde\u63a5\u7684\u8f93\u5165\u69fd\u3002",
     "status_cleanup_output_removed":   u"\u5df2\u6e05\u7406 {n} \u4e2a\u672a\u8fde\u63a5\u7684\u8f93\u51fa\u69fd\u3002",
     "status_cleanup_pose_removed":     u"\u5df2\u6e05\u7406 {n} \u4e2a\u5197\u4f59\u59ff\u52bf\u9879\u3002",
+    # Commit 3 (M_BASE_POSE) \u2014 BaseDrivenPose tab.
+    # "BaseDrivenPose" / "\u57fa\u7840\u59ff\u6001" / "\u8fde\u63a5\u9a71\u52a8/\u88ab\u9a71\u52a8\u6e90\u4ee5\u914d\u7f6e\u57fa\u7840\u59ff\u6001\u3002"
+    "tab_base_drv_pose":               u"\u57fa\u7840\u59ff\u6001",
+    "base_pose_label_fallback":        u"\u57fa\u7840\u59ff\u6001",
+    "base_pose_empty_hint_fallback":
+        u"\u8fde\u63a5\u9a71\u52a8/\u88ab\u9a71\u52a8\u6e90\u4ee5\u914d\u7f6e\u57fa\u7840\u59ff\u6001\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

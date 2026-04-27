@@ -1330,6 +1330,87 @@ class MainController(QtCore.QObject):
         """Remove a pose from the model (does NOT touch the node yet)."""
         self._pose_model.remove_pose(row)
 
+    # =================================================================
+    #  6b. Per-pose σ + BasePose live-edit (Commit 3 wires)
+    # =================================================================
+
+    def set_pose_radius(self, row, new_radius):
+        """Commit 3 (M_PER_POSE_SIGMA): green Radius spin live-edit
+        path. Writes ``shape.poseRadius[i]`` (closing the loop with
+        the C++ Commit 0 vectorised σ math) AND updates the
+        in-memory PoseData.radius so the next Apply / JSON export
+        round-trips the new value."""
+        if self._current_node is None:
+            return
+        try:
+            pose = self._pose_model.get_pose(int(row))
+        except (AttributeError, Exception):
+            pose = None
+        if pose is None:
+            return
+        radius = float(new_radius)
+        if radius <= 0.0:
+            radius = core.DEFAULT_POSE_RADIUS
+        pose.radius = radius
+        self._pose_model.update_pose_radius(int(row), radius)
+        # Plug write — sequential_idx == row in the packed-array
+        # layout core.apply_poses produces.
+        shape = core.get_shape(self._current_node)
+        try:
+            cmds.setAttr(
+                "{}.poseRadius[{}]".format(shape, int(row)), radius)
+        except Exception as exc:
+            cmds.warning(
+                "set_pose_radius: plug write failed at row {}: "
+                "{}".format(row, exc))
+
+    def read_base_pose_values(self):
+        """Commit 3 (M_BASE_POSE): pass-through to
+        :func:`core.read_base_pose_values` so main_window stays
+        controller-MVC-compliant (no direct core access from the UI
+        layer)."""
+        if self._current_node is None:
+            return []
+        return core.read_base_pose_values(self._current_node)
+
+    def set_base_pose_value(self, channel_idx, new_value):
+        """Commit 3 (M_BASE_POSE): per-output baseline live-edit. Reads
+        the current array, expands it if the user is editing a higher
+        index than currently stored, and pushes the modified vector
+        back through :func:`core.write_base_pose_values`."""
+        if self._current_node is None:
+            return
+        idx = int(channel_idx)
+        if idx < 0:
+            return
+        cur = list(core.read_base_pose_values(self._current_node))
+        if len(cur) <= idx:
+            cur.extend([0.0] * (idx + 1 - len(cur)))
+        cur[idx] = float(new_value)
+        core.write_base_pose_values(self._current_node, cur)
+
+    def recall_base_pose(self):
+        """Commit 3 (M_BASE_POSE): apply the baseline to the active
+        driven node attrs. Mirrors :meth:`recall_pose` semantics — sets
+        the scene values directly without going through the solver."""
+        if self._current_node is None:
+            return
+        dvn_node, dvn_attrs = core.read_driven_info(self._current_node)
+        if not dvn_node or not dvn_attrs:
+            return
+        baseline = list(core.read_base_pose_values(self._current_node))
+        # Pad with zeros to match dvn_attrs length (legacy nodes /
+        # newly-connected ones have fewer slots than attrs).
+        if len(baseline) < len(dvn_attrs):
+            baseline.extend([0.0] * (len(dvn_attrs) - len(baseline)))
+        with core.undo_chunk("RBFtools: recall base pose"):
+            for attr, val in zip(dvn_attrs, baseline):
+                try:
+                    cmds.setAttr(
+                        "{}.{}".format(dvn_node, attr), float(val))
+                except Exception:
+                    pass
+
     def recall_pose(self, row, driver_node, driven_node,
                     driver_attrs, driven_attrs):
         """Restore a saved pose to the scene.

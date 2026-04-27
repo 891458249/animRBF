@@ -86,10 +86,17 @@ class _PoseEditorPanel(CollapsibleFrame):
     reloadRequested      = QtCore.Signal()
     autoFillChanged      = QtCore.Signal(bool)
     # Phase 2 PoseGridEditor signals re-emitted at the panel level.
-    poseRecallRequested  = QtCore.Signal(int)
-    poseDeleteRequested  = QtCore.Signal(int)
-    poseDeleteAllRequested = QtCore.Signal()
-    poseValueChanged     = QtCore.Signal(int, str, int, float)
+    # Commit 3 (C2): poseValueChanged was replaced by the semantic
+    # poseValueChangedV2 form carrying source_idx + attr_name (no
+    # more flat_attr_idx). poseRadiusChanged + BasePose triplet
+    # added for the M_PER_POSE_SIGMA + M_BASE_POSE wires.
+    poseRecallRequested      = QtCore.Signal(int)
+    poseDeleteRequested      = QtCore.Signal(int)
+    poseDeleteAllRequested   = QtCore.Signal()
+    poseValueChangedV2       = QtCore.Signal(int, str, int, str, float)
+    poseRadiusChanged        = QtCore.Signal(int, float)
+    baseValueChangedV2       = QtCore.Signal(int, str, int, str, float)
+    basePoseRecallRequested  = QtCore.Signal()
 
     def __init__(self, parent=None):
         super(_PoseEditorPanel, self).__init__(
@@ -213,8 +220,23 @@ class _PoseEditorPanel(CollapsibleFrame):
             self._on_grid_recall_pose)
         self._pose_grid.poseDeleteRequested.connect(
             self._on_grid_delete_pose)
-        self._pose_grid.poseValueChanged.connect(
-            self._on_grid_pose_value_changed)
+        self._pose_grid.poseValueChangedV2.connect(
+            self._on_grid_pose_value_changed_v2)
+        self._pose_grid.poseRadiusChanged.connect(
+            self.poseRadiusChanged)
+
+        # Commit 3 (M_BASE_POSE): BaseDrivenPose tab. Inserted at
+        # index 1 BETWEEN DriverDriven (0) and Pose (2) per the user's
+        # spec ordering. Reuses PoseHeaderWidget + a single
+        # PoseRowWidget(is_base_pose=True) — see widgets/base_pose_editor.
+        from RBFtools.ui.widgets.base_pose_editor import BasePoseEditor
+        self._base_pose_editor = BasePoseEditor()
+        self._base_pose_editor.poseValueChangedV2.connect(
+            self._on_base_pose_value_changed_v2)
+        self._base_pose_editor.poseRecallRequested.connect(
+            self._on_base_pose_recall_requested)
+        self._outer_tabs.addTab(
+            self._base_pose_editor, tr("tab_base_drv_pose"))
 
         self._outer_tabs.addTab(pose_widget, tr("tab_pose"))
 
@@ -238,10 +260,26 @@ class _PoseEditorPanel(CollapsibleFrame):
     def _on_grid_delete_all_poses(self):
         self.poseDeleteAllRequested.emit()
 
-    def _on_grid_pose_value_changed(self, pose_idx, side,
-                                    flat_idx, value):
-        self.poseValueChanged.emit(
-            int(pose_idx), str(side), int(flat_idx), float(value))
+    def _on_grid_pose_value_changed_v2(self, pose_idx, side,
+                                       source_idx, attr_name, value):
+        # C2 semantic: re-emit at the panel level for main_window.
+        self.poseValueChangedV2.emit(
+            int(pose_idx), str(side),
+            int(source_idx), str(attr_name), float(value))
+
+    def _on_base_pose_value_changed_v2(self, pose_idx, side,
+                                       source_idx, attr_name, value):
+        # BasePose row's pose_idx is the sentinel (-1); main_window
+        # dispatches to write_base_pose_values rather than the regular
+        # pose write path.
+        self.baseValueChangedV2.emit(
+            int(pose_idx), str(side),
+            int(source_idx), str(attr_name), float(value))
+
+    def _on_base_pose_recall_requested(self, _pose_idx):
+        # BasePose's "Go to Pose" semantics: apply the baseline values
+        # to the driven node attrs. main_window slot does the work.
+        self.basePoseRecallRequested.emit()
 
     def reload_pose_grid(self, driver_sources, driven_sources, poses):
         """Public hook for main_window: push the latest source +
@@ -251,6 +289,18 @@ class _PoseEditorPanel(CollapsibleFrame):
         try:
             self._pose_grid.set_data(
                 driver_sources, driven_sources, poses)
+        except AttributeError:
+            pass
+
+    def reload_base_pose(self, driver_sources, driven_sources,
+                         base_values):
+        """Commit 3 (M_BASE_POSE): twin of :meth:`reload_pose_grid`
+        for the BaseDrivenPose tab. ``base_values`` is the flat list
+        of per-output baselines from
+        :func:`core.read_base_pose_values`."""
+        try:
+            self._base_pose_editor.set_data(
+                driver_sources, driven_sources, base_values)
         except AttributeError:
             pass
 
@@ -1066,8 +1116,17 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         pe.poseDeleteRequested.connect(self._on_pose_grid_delete)
         pe.poseDeleteAllRequested.connect(
             self._on_pose_grid_delete_all)
-        pe.poseValueChanged.connect(
-            self._on_pose_grid_value_changed)
+        # Commit 3 (C2 semantic refactor): all 4 pose-grid slots now
+        # carry source_idx + attr_name. flat_attr_idx form removed.
+        pe.poseValueChangedV2.connect(
+            self._on_pose_grid_value_changed_v2)
+        pe.poseRadiusChanged.connect(
+            self._on_pose_grid_radius_changed)
+        # Commit 3 (M_BASE_POSE): BaseDrivenPose tab → core helpers.
+        pe.baseValueChangedV2.connect(
+            self._on_base_pose_value_changed)
+        pe.basePoseRecallRequested.connect(
+            self._on_base_pose_recall)
 
         # Row context-menu callback
         pe._row_action_callback = self._on_pose_row_action
@@ -1429,6 +1488,9 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             poses = []
         self._pose_editor.reload_pose_grid(
             drv_sources, dvn_sources, poses)
+        # Commit 3: BaseDrivenPose tab piggy-backs on the same
+        # cascade so both tabs stay in lockstep with the active node.
+        self._refresh_base_pose_panel()
 
     def _on_pose_grid_recall(self, pose_index):
         """Phase 2: PoseGridEditor row Go to Pose -> recall_pose."""
@@ -1453,31 +1515,113 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._ctrl.delete_pose(r)
         self._refresh_pose_grid()
 
-    def _on_pose_grid_value_changed(self, pose_idx, side, flat_idx,
-                                     value):
-        """Phase 2: live edit of a spinbox in the grid -> push the
-        new value into the pose model. side is 'input' (driver) or
-        'value' (driven); flat_idx is the index in the flat
-        concat across all sources of that side."""
+    # Commit 3 (C2 semantic refactor) ---------------------------------
+
+    def _flat_attr_index(self, sources, source_idx, attr_name):
+        """Map (source_idx, attr_name) -> flat_idx in the side's flat
+        concat. Returns -1 if the lookup fails (caller silently no-ops)."""
+        try:
+            base = sum(len(s.attrs) for s in sources[:int(source_idx)])
+            local = list(sources[int(source_idx)].attrs).index(
+                str(attr_name))
+            return int(base) + int(local)
+        except (IndexError, ValueError, AttributeError, TypeError):
+            return -1
+
+    def _on_pose_grid_value_changed_v2(self, pose_idx, side,
+                                       source_idx, attr_name, value):
+        """C2 semantic slot: live edit of a Pose-tab spinbox. Maps
+        (source_idx, attr_name) onto the flat index expected by
+        ``PoseData.inputs / values``, then pushes through the model."""
+        if int(pose_idx) == -1:
+            # BasePose sentinel — should arrive via baseValueChangedV2,
+            # not here. Defensive: drop silently rather than corrupt
+            # pose[0].
+            return
         try:
             pose = self._ctrl.pose_model.get_pose(int(pose_idx))
         except (AttributeError, Exception):
             return
         if pose is None:
             return
+        try:
+            drv_sources = list(self._ctrl.read_driver_sources())
+            dvn_sources = list(self._ctrl.read_driven_sources())
+        except Exception:
+            drv_sources, dvn_sources = [], []
+        sources = drv_sources if side == "input" else dvn_sources
+        flat_idx = self._flat_attr_index(
+            sources, source_idx, attr_name)
+        if flat_idx < 0:
+            return
         new_inputs = list(pose.inputs)
         new_values = list(pose.values)
-        if side == "input":
-            if 0 <= flat_idx < len(new_inputs):
-                new_inputs[int(flat_idx)] = float(value)
-        elif side == "value":
-            if 0 <= flat_idx < len(new_values):
-                new_values[int(flat_idx)] = float(value)
+        if side == "input" and flat_idx < len(new_inputs):
+            new_inputs[flat_idx] = float(value)
+        elif side == "value" and flat_idx < len(new_values):
+            new_values[flat_idx] = float(value)
         try:
             self._ctrl.pose_model.update_pose_values(
                 int(pose_idx), new_inputs, new_values)
         except AttributeError:
             pass
+
+    def _on_pose_grid_radius_changed(self, pose_idx, new_radius):
+        """Commit 3 (M_PER_POSE_SIGMA): green Radius spin live edit ->
+        ``shape.poseRadius[i]`` plug write + pose_model sync. Closes
+        the loop with the C++ Commit 0/0b vectorised σ math."""
+        try:
+            self._ctrl.set_pose_radius(int(pose_idx), float(new_radius))
+        except (AttributeError, Exception):
+            pass
+
+    def _on_base_pose_value_changed(self, _pose_idx, side,
+                                    source_idx, attr_name, value):
+        """Commit 3 (M_BASE_POSE): BasePose driven-side spinbox edit.
+        Driver-side edits (``side == 'input'``) are filtered out — the
+        BasePose row's driver clusters are disabled but we guard
+        defensively.  Updates ``shape.basePoseValue[flat_idx]`` and
+        the underlying scene attr stays in sync via the C++ post-solve
+        add-back."""
+        if side != "value":
+            return
+        try:
+            dvn_sources = list(self._ctrl.read_driven_sources())
+        except Exception:
+            dvn_sources = []
+        flat_idx = self._flat_attr_index(
+            dvn_sources, source_idx, attr_name)
+        if flat_idx < 0:
+            return
+        try:
+            self._ctrl.set_base_pose_value(flat_idx, float(value))
+        except (AttributeError, Exception):
+            pass
+
+    def _on_base_pose_recall(self):
+        """Commit 3 (M_BASE_POSE): BasePose 'Go to Pose' -> apply
+        baseline values to the active driven node attrs."""
+        try:
+            self._ctrl.recall_base_pose()
+        except (AttributeError, Exception):
+            pass
+
+    def _refresh_base_pose_panel(self):
+        """Push read_base_pose_values into the BasePoseEditor."""
+        try:
+            drv_sources = list(self._ctrl.read_driver_sources())
+        except Exception:
+            drv_sources = []
+        try:
+            dvn_sources = list(self._ctrl.read_driven_sources())
+        except Exception:
+            dvn_sources = []
+        try:
+            base_values = list(self._ctrl.read_base_pose_values())
+        except (AttributeError, Exception):
+            base_values = []
+        self._pose_editor.reload_base_pose(
+            drv_sources, dvn_sources, base_values)
 
     # ----- Phase 3 Utility slot handlers -----------------------------
 

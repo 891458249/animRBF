@@ -114,30 +114,41 @@ class PoseRowWidget(QtWidgets.QWidget):
         [Pose N label] [driver clusters…] [Go] [driven clusters…]
             [Radius spin (green)] [Edit] [Delete]
 
-    Signals
+    Signals (Commit 3 — C2 semantic refactor)
     -------
-    poseValueChanged(int pose_idx, str side, int flat_attr_idx, float)
+    poseValueChangedV2(int pose_idx, str side, int source_idx,
+                       str attr_name, float new_value)
         Spinbox edit. ``side`` is ``"input"`` (driver) or ``"value"``
-        (driven). ``flat_attr_idx`` is the index in the pose's flat
-        ``inputs[]`` / ``values[]`` list (matches Commit 0/1 PoseData
-        contract — Commit 3 will introduce a semantic-signal sibling).
+        (driven). ``source_idx`` indexes into the side's source list;
+        ``attr_name`` is the literal attr (``"rotateX"`` etc.). The
+        legacy flat_attr_idx form was dropped per the user's hard
+        decree — semantic-arg form is the single supported contract.
+        ``pose_idx == -1`` is the BasePose sentinel: the row was
+        constructed with ``is_base_pose=True`` and edits should write
+        to ``shape.basePoseValue[]`` rather than ``shape.poses[]``.
     poseRadiusChanged(int pose_idx, float new_radius)
-        The green Radius spinbox was edited.
+        The green Radius spinbox was edited (suppressed in BasePose
+        mode — radius has no semantic on the rest pose).
     poseRecallRequested(int pose_idx)
-        "Go to Pose" clicked.
+        "Go to Pose" clicked. ``pose_idx == -1`` => recall basePose.
     poseDeleteRequested(int pose_idx)
-        Right-click → Delete (or future Delete button).
+        Right-click → Delete (suppressed in BasePose mode).
     """
 
-    poseValueChanged    = QtCore.Signal(int, str, int, float)
+    # C2 semantic signal — replaces legacy poseValueChanged.
+    poseValueChangedV2  = QtCore.Signal(int, str, int, str, float)
     poseRadiusChanged   = QtCore.Signal(int, float)
     poseRecallRequested = QtCore.Signal(int)
     poseDeleteRequested = QtCore.Signal(int)
 
+    BASE_POSE_SENTINEL = -1
+
     def __init__(self, pose_index, driver_sources, driven_sources,
-                 inputs, values, radius=5.0, parent=None):
+                 inputs, values, radius=5.0, parent=None,
+                 is_base_pose=False):
         super(PoseRowWidget, self).__init__(parent)
         self._pose_index = int(pose_index)
+        self._is_base_pose = bool(is_base_pose)
         self._driver_sources = list(driver_sources or [])
         self._driven_sources = list(driven_sources or [])
 
@@ -146,30 +157,47 @@ class PoseRowWidget(QtWidgets.QWidget):
                              COL_MARGIN, COL_SPACING)
         h.setSpacing(COL_SPACING)
 
-        # Pose label.
-        self._lbl_pose = QtWidgets.QLabel(
-            tr("pose_grid_row_label").format(idx=self._pose_index))
+        # Pose label. BasePose mode: literal "Base Pose" instead of
+        # the indexed format, so the UI is self-explanatory and the
+        # right-click "Delete" affordance is suppressed.
+        if self._is_base_pose:
+            label_text = tr("base_pose_label_fallback")
+        else:
+            label_text = tr("pose_grid_row_label").format(
+                idx=self._pose_index)
+        self._lbl_pose = QtWidgets.QLabel(label_text)
         self._lbl_pose.setFixedWidth(POSE_LABEL_W)
-        self._lbl_pose.setContextMenuPolicy(
-            QtCore.Qt.CustomContextMenu)
-        self._lbl_pose.customContextMenuRequested.connect(
-            self._show_row_menu)
+        if not self._is_base_pose:
+            self._lbl_pose.setContextMenuPolicy(
+                QtCore.Qt.CustomContextMenu)
+            self._lbl_pose.customContextMenuRequested.connect(
+                self._show_row_menu)
         h.addWidget(self._lbl_pose)
 
-        # Driver-side bare clusters. Walk attr offsets so flat_attr_idx
-        # increments correctly across multiple sources.
-        flat = 0
-        for src in self._driver_sources:
+        # Driver-side bare clusters. Each cluster's local valueChanged
+        # is mapped to the C2 semantic signal carrying the source_idx
+        # + attr_name pair (no more flat_attr_idx). In BasePose mode
+        # the driver clusters are visible (so the Header sits over
+        # *something*) but disabled — basePose has no driver semantic;
+        # only the driven-side baseline is meaningful.
+        for src_idx, src in enumerate(self._driver_sources):
             attrs = list(src.attrs)
-            slice_vals = inputs[flat:flat + len(attrs)] if inputs else []
+            attr_offset = sum(
+                len(s.attrs) for s in self._driver_sources[:src_idx])
+            slice_vals = (inputs[attr_offset:attr_offset + len(attrs)]
+                          if inputs else [])
             cluster = BoneRowDataWidget(attrs, slice_vals)
-            cluster.valueChanged.connect(
-                lambda local_i, val, _base=flat:
-                    self.poseValueChanged.emit(
-                        self._pose_index, "input",
-                        _base + int(local_i), float(val)))
+            if self._is_base_pose:
+                cluster.setEnabled(False)
+            else:
+                cluster.valueChanged.connect(
+                    lambda local_i, val, _src=src_idx, _attrs=attrs:
+                        self.poseValueChangedV2.emit(
+                            self._pose_index, "input",
+                            int(_src),
+                            str(_attrs[int(local_i)]),
+                            float(val)))
             h.addWidget(cluster)
-            flat += len(attrs)
 
         # Go to Pose.
         self._btn_go = QtWidgets.QPushButton(tr("pose_grid_go_to_pose"))
@@ -180,21 +208,29 @@ class PoseRowWidget(QtWidgets.QWidget):
                 self.poseRecallRequested.emit(self._pose_index))
         h.addWidget(self._btn_go)
 
-        # Driven-side bare clusters.
-        flat = 0
-        for src in self._driven_sources:
+        # Driven-side bare clusters. Always editable — driven side is
+        # the meaningful axis for both regular poses and the BasePose
+        # baseline.
+        for src_idx, src in enumerate(self._driven_sources):
             attrs = list(src.attrs)
-            slice_vals = values[flat:flat + len(attrs)] if values else []
+            attr_offset = sum(
+                len(s.attrs) for s in self._driven_sources[:src_idx])
+            slice_vals = (values[attr_offset:attr_offset + len(attrs)]
+                          if values else [])
             cluster = BoneRowDataWidget(attrs, slice_vals)
             cluster.valueChanged.connect(
-                lambda local_i, val, _base=flat:
-                    self.poseValueChanged.emit(
+                lambda local_i, val, _src=src_idx, _attrs=attrs:
+                    self.poseValueChangedV2.emit(
                         self._pose_index, "value",
-                        _base + int(local_i), float(val)))
+                        int(_src),
+                        str(_attrs[int(local_i)]),
+                        float(val)))
             h.addWidget(cluster)
-            flat += len(attrs)
 
-        # Green Radius spin (per-pose σ — wired through Commit 0/1 schema).
+        # Green Radius spin (per-pose σ — wired through Commit 0/1
+        # schema). Hidden in BasePose mode per user spec: BasePose has
+        # no influence-radius concept (it is a single fixed baseline,
+        # not a kernel center).
         self._radius_box = QtWidgets.QGroupBox()
         self._radius_box.setStyleSheet(
             "QGroupBox {{ border: 1px solid {color}; border-radius: 3px;"
@@ -218,10 +254,12 @@ class PoseRowWidget(QtWidgets.QWidget):
                 self._pose_index, float(v)))
         rb_l.addWidget(self._spin_radius)
         h.addWidget(self._radius_box)
+        if self._is_base_pose:
+            self._radius_box.setVisible(False)
 
         # Actions: Update (re-capture this pose, semantics match the
-        # legacy "Edit" affordance) + Delete. tr("update") and
-        # tr("delete") already in i18n.
+        # legacy "Edit" affordance) + Delete. Hidden in BasePose mode
+        # per user spec: rest pose is unique and cannot be deleted.
         self._btn_edit = QtWidgets.QPushButton(tr("update"))
         self._btn_edit.setFixedWidth(ACTIONS_W // 2 - 4)
         self._btn_edit.clicked.connect(
@@ -234,6 +272,9 @@ class PoseRowWidget(QtWidgets.QWidget):
             lambda _checked=False:
                 self.poseDeleteRequested.emit(self._pose_index))
         h.addWidget(self._btn_del)
+        if self._is_base_pose:
+            self._btn_edit.setVisible(False)
+            self._btn_del.setVisible(False)
 
         h.addStretch(1)
 

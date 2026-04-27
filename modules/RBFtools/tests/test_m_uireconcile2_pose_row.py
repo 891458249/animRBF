@@ -76,7 +76,8 @@ class TestM_UIRECONCILE2_SourceScan(unittest.TestCase):
         self.assertIn("class PoseRowWidget", self._row)
 
     def test_pose_row_widget_required_signals(self):
-        for sig in ("poseValueChanged", "poseRadiusChanged",
+        # Commit 3 (C2): poseValueChanged dropped in favour of V2.
+        for sig in ("poseValueChangedV2", "poseRadiusChanged",
                     "poseRecallRequested", "poseDeleteRequested"):
             self.assertIn(sig, self._row,
                 "PoseRowWidget missing signal {}".format(sig))
@@ -99,15 +100,22 @@ class TestM_UIRECONCILE2_SourceScan(unittest.TestCase):
             "the user's UX spec).")
         self.assertIn("ScrollBarAsNeeded", self._grid)
 
-    def test_pose_grid_editor_legacy_signal_contract(self):
-        # main_window's existing slots stay valid in Commit 2 —
-        # the C2 semantic-signal refactor is deferred to Commit 3.
+    def test_pose_grid_editor_signal_contract(self):
+        # Commit 3 (C2): poseValueChanged replaced by V2 in lockstep
+        # across PoseRowWidget / PoseGridEditor / _PoseEditorPanel /
+        # main_window slots. legacy 4-arg signal MUST be gone (test
+        # asserts on the absence to prevent regression).
         for sig in ("poseRecallRequested", "poseDeleteRequested",
-                    "poseValueChanged", "addPoseRequested",
-                    "deleteAllPosesRequested"):
+                    "poseValueChangedV2", "addPoseRequested",
+                    "deleteAllPosesRequested",
+                    "poseRadiusChanged"):
             self.assertIn(sig, self._grid,
-                "PoseGridEditor lost legacy signal {} — would "
-                "break main_window backcompat".format(sig))
+                "PoseGridEditor missing required signal {}".format(sig))
+        self.assertNotIn(
+            "poseValueChanged     = QtCore.Signal", self._grid,
+            "PoseGridEditor must NOT define the legacy "
+            "poseValueChanged 4-arg signal — V2 is the single "
+            "supported contract.")
 
     def test_pose_grid_editor_new_radius_signal(self):
         self.assertIn("poseRadiusChanged", self._grid)
@@ -132,7 +140,7 @@ class TestM_UIRECONCILE2_RowSignals(unittest.TestCase):
                   inputs, values, radius=5.0, pose_index=0):
         from RBFtools.ui.widgets.pose_row_widget import PoseRowWidget
         row = PoseRowWidget.__new__(PoseRowWidget)
-        row.poseValueChanged    = mock.MagicMock()
+        row.poseValueChangedV2  = mock.MagicMock()
         row.poseRadiusChanged   = mock.MagicMock()
         row.poseRecallRequested = mock.MagicMock()
         row.poseDeleteRequested = mock.MagicMock()
@@ -141,14 +149,14 @@ class TestM_UIRECONCILE2_RowSignals(unittest.TestCase):
         row._driven_sources = list(drvn_sources)
         return row
 
-    def test_value_changed_signal_signature_preserved(self):
-        # Legacy contract — main_window slot expects exactly these
-        # 4 args. Commit 3 will add a semantic-signal sibling but
-        # MUST NOT break this one in Commit 2.
+    def test_value_changed_signal_signature_v2(self):
+        # Commit 3: V2 is the single contract. Legacy 4-arg form must
+        # be absent so a stale main_window connect would fail loudly.
         from RBFtools.ui.widgets.pose_row_widget import PoseRowWidget
         sig_dict = vars(PoseRowWidget)
-        self.assertIn("poseValueChanged", sig_dict)
+        self.assertIn("poseValueChangedV2", sig_dict)
         self.assertIn("poseRadiusChanged", sig_dict)
+        self.assertNotIn("poseValueChanged", sig_dict)
 
 
 # ----------------------------------------------------------------------
