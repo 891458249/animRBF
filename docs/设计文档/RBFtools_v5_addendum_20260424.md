@@ -5888,6 +5888,124 @@ sources beyond the first.
 
 ---
 
+## §M_QUICKWINS — Default RBF type + Limit label + i18n retranslate coverage
+
+> **STATUS** (2026-04-27): three small UX corrections landing in
+> one commit, addressing user reports filed alongside the Tekken-8
+> AnimaRbfSolver reference. Items 2 / 3 / 4a from the user's
+> 4-item batch; Items 1 / 4b / 4c land in M_UIRECONCILE_PLUS and
+> M_DRIVEN_MULTI follow-on commits.
+
+### §M_QUICKWINS.scope
+
+| Item | Layer | Change | LoC |
+|---|---|---|---|
+| **3** | `core.py:create_node` | `cmds.setAttr(shape + ".type", 1)` immediately after `cmds.createNode` so newly-created nodes default to RBF mode (the C++ schema default of 0 / Vector-Angle is unchanged - this is a Python-orchestrator-only shift). Wrapped in try/except so a future schema rename never blocks node creation. | ~15 |
+| **4a** | `ui/i18n.py` | `clamp_enabled` / `clamp_inflation` EN+ZH labels rephrased to `"Limit Driver to Registered Pose Range"` / `"动作范围限制（超出已注册姿势时停止）"` matching the TD-facing terminology in the user's reference UX. The underlying clampEnabled / clampInflation Maya schema (M1.3 / B5) is untouched - pure surface rename. | ~6 |
+| **2** | `ui/widgets/driver_source_list_editor.py` | New `retranslate()` method on `DriverSourceListEditor` that re-applies header label + empty-hint and walks each row to refresh tooltips; `_DriverSourceRow.retranslate` is monkey-patched onto the existing private class so row-level tooltip i18n gets refreshed without requiring a class rewrite. | ~30 |
+| **2** | `ui/widgets/output_encoding_combo.py` | New `retranslate()` rewrites the three enum item texts + the combo tooltip; preserves the current selection by reading + restoring the encoding value. | ~12 |
+| **2** | `ui/widgets/live_edit_widget.py` | New `retranslate()` rewrites the toggle checkbox label + tooltip + the idle-state status label (dynamic runtime status messages are preserved). | ~15 |
+| **2** | `ui/widgets/profile_widget.py` | New `retranslate()` rewrites the Refresh button label + tooltip + the placeholder when no report has been computed (existing report bodies are preserved). | ~15 |
+| **2** | `ui/main_window.py:_retranslate_all` | Extended to invoke the four new `retranslate()` methods + refresh the Driver Sources `CollapsibleFrame` title + re-run `_reload_driver_sources` so the multi-source banner picks up the new language. Try/skip pattern for the lazy-built live-edit + profile widgets keeps the wiring forward-compatible. | ~30 |
+| `tests/test_m_quickwins.py` (new) | 3 source-scan + 1 e2e mock + 2 i18n parity + 2 retranslate-presence + 3 retranslate-lifecycle = **9 tests** | ~190 |
+| `addendum_20260424.md` | this section | ~80 |
+| **Total** | | **~393** |
+
+Single commit, well under the 800-LoC pure-code red line. Pure-
+Python + mayapy dual-env zero regression at every step.
+
+### §M_QUICKWINS.item-2-retranslate-coverage-rationale
+
+The pre-M_QUICKWINS `_retranslate_all` invoked `retranslate()` on
+five widgets (`node_sel`, `general`, `va_section`, `rbf_section`,
+`pose_editor`). The M_B24b1 / M3.4 / M3.5 widgets - all
+persistent in the inspector - had never been added; consequently
+a TD switching language mid-session saw the Driver Sources
+section header, Output Encoding combo items, Live Edit toggle,
+and Profile widget button stay frozen on the previous language
+until the panel was re-opened.
+
+The fix is a small per-widget `retranslate()` definition that
+re-applies the same `tr(...)` calls the constructor used,
+followed by a one-line addition in `_retranslate_all` to invoke
+each. Transient dialogs (`confirm_dialog`, `import_dialog`,
+`prune_dialog`) are intentionally out of scope - they are
+rebuilt on each open and inherit the active language naturally.
+
+### §M_QUICKWINS.item-3-default-rbf-rationale
+
+The C++ schema initialises `.type = 0` (Vector-Angle solver). In
+the v5 era multi-source / RBF workflow that default forces
+every new-node TD to switch the GeneralSection combo manually -
+a tiny but daily friction point. `core.create_node` now sets
+`.type = 1` (RBF) immediately after `cmds.createNode`, wrapped
+in try/except so an unforeseen schema change can never block
+node creation (the GeneralSection combo can still correct the
+value if the setAttr fails).
+
+The change is Python-orchestrator-only - the C++ schema default
+is unchanged so existing nodes / .ma files round-trip
+identically. Test `test_create_node_setattr_called_with_type_1`
+locks the behaviour at the mock layer.
+
+### §M_QUICKWINS.item-4a-limit-label-rationale
+
+The `clampEnabled` / `clampInflation` Maya attributes (M1.3 /
+B5) implement exactly the "limit driver to registered pose
+range" feature the user asked for - the pre-M_QUICKWINS UI
+labels just used the technical "Clamp Driver to Pose Hull" /
+"驱动钳制到姿态包围盒" terminology that did not match TD
+expectation. The labels are rephrased to "Limit Driver to
+Registered Pose Range" / "动作范围限制（超出已注册姿势时停止）"
+to match the user's reference UX. The underlying schema +
+solver behaviour is 0-modified - this is a pure i18n surface
+rename.
+
+### §M_QUICKWINS.empirical-baseline (2026-04-27)
+
+| Env | Pre (post-M_UIRECONCILE `d9cbeb8`) | Post |
+|---|---|---|
+| Pure-Python | 576 OK (skip 3) | **585 OK (skip 3)** |
+| mayapy 2025 | 576 ran 506 pass 70 skip | **585 ran 511 pass 74 skip** |
+
+mayapy delta: +9 = +5 pass (5 source-scan + 2 i18n parity tests
+that always run) + +4 skip (4 mock-only `@skipIf(_REAL_MAYA)`
+lifecycle / e2e tests). Per the forward-compat-corrected red
+line 13, mock-pattern legitimate skip naturally accumulates.
+
+### §M_QUICKWINS.scope-exclusions
+
+- 0 lines C++ / 0 .mll / 0 CMakeLists / 0 schema
+  (Item 4a is a pure surface rename; Item 3 changes only the
+  Python orchestrator)
+- 0 lines `controller.py` (Item 3 lives in core; Item 2 lives
+  in widgets + main_window)
+- 0 modifications to the M_UIRECONCILE / M_UIPOLISH / M_B24
+  series locked surfaces
+- 0 modifications to `KNOWN_VIOLATIONS` (i18n guard remains
+  green; the new retranslate methods all pass the existing
+  scan)
+- 0 modifications to hotfix 4 files
+
+### §M_QUICKWINS.follow-on-roadmap
+
+The user's 4-item batch (2026-04-27) lands across three
+commits to keep each one small and reviewable:
+
+- **M_QUICKWINS** (this commit): Items 2 + 3 + 4a.
+- **M_UIRECONCILE_PLUS** (next commit): Item 4b - per-driver-
+  source attribute selection face. Closes the M_UIRECONCILE
+  half-completion where `add_driver_source` is invoked with an
+  empty `attrs=[]` list.
+- **M_DRIVEN_MULTI** (third commit): Items 1 + 4c - merge the
+  Driver Sources widget into the pose-editor panel + introduce
+  a multi-driven backend (drivenSource[] equivalent) and a
+  tabbed Driver/Driven editor matching the Tekken-8
+  AnimaRbfSolver paradigm the user referenced. This is the
+  largest of the three and may need C++ schema work.
+
+---
+
 ## §M_HOTFIX_PYSIDE6 — QActionGroup PySide6 migration shim
 
 > **STRUCTURAL LESSON** (2026-04-27):

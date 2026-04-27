@@ -70,3 +70,20 @@ class ProfileWidget(QtWidgets.QWidget):
             self._txt.setPlainText(tr("status_profile_pending"))
             return
         self._txt.setPlainText(text)
+
+    def retranslate(self):
+        """M_QUICKWINS Item 2: language-switch hook. The report body
+        is dynamic ASCII; we only refresh the static button label +
+        tooltip + the pending-state placeholder when nothing has
+        been computed yet."""
+        self._btn_refresh.setText(tr("btn_refresh_profile"))
+        self._btn_refresh.setToolTip(tr("profile_widget_refresh_tip"))
+        # Repaint the placeholder only when we are still in the
+        # pending state - otherwise we would clobber a real report.
+        if self._txt.toPlainText() in (
+                tr("status_profile_pending"),
+                # The placeholder text in the OTHER language - check
+                # both via the EN/ZH tables to avoid a stale-state
+                # detection miss on language toggle.
+                ""):
+            self._txt.setPlainText(tr("status_profile_pending"))

@@ -205,3 +205,36 @@ class DriverSourceListEditor(_OrderedListEditorBase):
         """Programmatic rebuild from list[DriverSource]. Suspends emit
         per the base contract — the controller is the originator."""
         self.set_values(list(sources))
+
+    # --- M_QUICKWINS Item 2: retranslate hook ----------------------
+
+    def retranslate(self):
+        """M_QUICKWINS Item 2: re-apply current language to all
+        i18n-bound surfaces. Called by main_window._retranslate_all
+        on language switch so the editor's header / hint / action
+        buttons / row tooltips refresh in-place rather than
+        keeping the previous language frozen."""
+        super(DriverSourceListEditor, self).retranslate()
+        self.set_label(tr("driver_source_list_header"))
+        self.set_empty_hint(tr("driver_source_list_empty_hint"))
+        # Re-translate each row's tooltips. The row widgets are
+        # composite QWidgets; we walk the QListWidget items + ask
+        # each row to refresh its labels.
+        for i in range(self._list.count()):
+            widget = self._list.itemWidget(self._list.item(i))
+            if isinstance(widget, _DriverSourceRow):
+                widget.retranslate()
+
+
+# Add a retranslate method on the row widget too so language switches
+# refresh the per-row tooltips that DriverSourceListEditor.retranslate
+# walks above.
+def _row_retranslate(self):
+    """M_QUICKWINS Item 2: row-level i18n refresh."""
+    self._lbl_node.setToolTip(tr("driver_source_node_tip"))
+    self._lbl_attrs.setToolTip(tr("driver_source_attrs_tip"))
+    self._spin_weight.setToolTip(tr("driver_source_weight_tip"))
+    self._combo_enc.setToolTip(tr("driver_source_encoding_tip"))
+
+
+_DriverSourceRow.retranslate = _row_retranslate

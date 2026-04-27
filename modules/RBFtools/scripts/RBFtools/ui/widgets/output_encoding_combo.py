@@ -51,3 +51,16 @@ class OutputEncodingCombo(QtWidgets.QComboBox):
                     break
         finally:
             self.blockSignals(False)
+
+    def retranslate(self):
+        """M_QUICKWINS Item 2: refresh combo item labels +
+        tooltip on language switch."""
+        current_value = self.encoding()
+        self.blockSignals(True)
+        try:
+            for i, (tr_key, _value) in enumerate(_OUTPUT_ENCODING_LABELS):
+                self.setItemText(i, tr(tr_key))
+            self.setToolTip(tr("output_encoding_combo_tip"))
+        finally:
+            self.blockSignals(False)
+        self.set_encoding(current_value)

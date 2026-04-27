@@ -255,3 +255,18 @@ class LiveEditWidget(QtWidgets.QWidget):
         self._cb.setChecked(True)
         self._cb.blockSignals(False)
         self._toggle_on()
+
+    # =================================================================
+    #  M_QUICKWINS Item 2: language switch hook
+    # =================================================================
+
+    def retranslate(self):
+        """Refresh i18n-bound surfaces on language switch. Active
+        live-edit state is preserved (we just rewrite labels)."""
+        self._cb.setText(tr("live_edit_toggle_label"))
+        self._cb.setToolTip(tr("live_edit_toggle_tip"))
+        # Status label is set dynamically; only repaint if it is on
+        # one of the well-known idle / armed strings - otherwise we
+        # would clobber a "scripjob N" runtime message.
+        if self._state == core_live.LiveEditState.IDLE:
+            self._status.setText(tr("live_edit_status_idle"))

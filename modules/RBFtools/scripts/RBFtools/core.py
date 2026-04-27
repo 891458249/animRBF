@@ -1448,6 +1448,12 @@ def create_node():
     """Create a new ``RBFtools`` shape and return its **transform** name.
 
     Preserves the user's current selection (createNode side-effect).
+
+    M_QUICKWINS (Item 3, 2026-04-27): the C++ schema default for
+    `.type` is 0 (Vector-Angle); in the v5 era multi-source workflow
+    the RBF mode is the expected default - new nodes are created
+    with `type = 1` so the GeneralSection defaults to RBF without
+    the TD having to switch the combo every time.
     """
     ensure_plugin()
     with undo_chunk("RBFtools: create node"):
@@ -1455,6 +1461,16 @@ def create_node():
         shape = cmds.createNode(NODE_TYPE)
         transform = get_transform(shape)
         transform = cmds.rename(transform, "RBFnode#")
+        # M_QUICKWINS Item 3: default to RBF mode (type=1). Wrapped
+        # in try/except so a future schema rename never blocks node
+        # creation - the existing GeneralSection combo can correct
+        # the value if the setAttr fails.
+        try:
+            cmds.setAttr(get_shape(transform) + ".type", 1)
+        except Exception as exc:
+            cmds.warning(
+                "create_node: defaulting .type to RBF failed: {} "
+                "(node still created)".format(exc))
         if sel:
             cmds.select(sel, replace=True)
     return transform

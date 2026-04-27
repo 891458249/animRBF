@@ -1136,6 +1136,37 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._va_section.retranslate()
         self._rbf_section.retranslate()
         self._pose_editor.retranslate()
+        # M_QUICKWINS Item 2: extend retranslate coverage to every
+        # persistent widget that carries i18n-bound strings. This
+        # closes the language-switch residue gap caught by the
+        # 2026-04-27 user report.
+        try:
+            self._driver_sources_section.set_title(
+                tr("section_driver_sources"))
+        except (AttributeError, TypeError):
+            pass
+        try:
+            self._driver_source_list.retranslate()
+        except AttributeError:
+            pass
+        try:
+            self._output_encoding_combo.retranslate()
+        except AttributeError:
+            pass
+        # The multi-source banner text on the pose editor is set
+        # dynamically by _reload_driver_sources; refresh it now if
+        # the active node is multi-source.
+        self._reload_driver_sources()
+        # Live-edit + profile widgets live inside collapsible
+        # subsections that may not be instantiated yet (lazy build);
+        # try-skip pattern keeps the wiring forward-compatible.
+        for attr in ("_live_edit_widget", "_profile_widget"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    w.retranslate()
+                except AttributeError:
+                    pass
 
     # =================================================================
     #  Status / progress helpers

@@ -82,8 +82,11 @@ _EN = {
     "enc_bendroll":        "BendRoll",
     "enc_expmap":          "ExpMap",
     "enc_swingtwist":      "SwingTwist",
-    "clamp_enabled":       "Clamp Driver to Pose Hull",
-    "clamp_inflation":     "Clamp Inflation:",
+    # M_QUICKWINS Item 4a (2026-04-27): label rephrased to match the
+    # TD-facing term "Limit" - same underlying clampEnabled /
+    # clampInflation schema, more intuitive surface.
+    "clamp_enabled":       "Limit Driver to Registered Pose Range",
+    "clamp_inflation":     "Limit Inflation:",
     # -- M2.4a: per-output scale flag (OutputScaleEditor) --
     "output_is_scale":     "Output Is Scale",
     "output_is_scale_hdr": "Mark scale-channel outputs (M1.2 anchor 1.0)",
@@ -391,8 +394,9 @@ _ZH = {
     "enc_bendroll":        u"\u5f2f\u6eda",
     "enc_expmap":          u"\u6307\u6570\u6620\u5c04",
     "enc_swingtwist":      u"\u6446\u626d",
-    "clamp_enabled":       u"\u9a71\u52a8\u949b\u5236\u5230\u59ff\u6001\u5305\u56f4\u76d2",
-    "clamp_inflation":     u"\u949b\u5236\u81a8\u80c0\u6bd4\u4f8b\uff1a",
+    # M_QUICKWINS Item 4a: \u6807\u7b7e\u66f4\u65b0\u4e3a"\u52a8\u4f5c\u8303\u56f4\u9650\u5236"\uff0c\u4e0e TD \u671f\u671b\u5bf9\u9f50
+    "clamp_enabled":       u"\u52a8\u4f5c\u8303\u56f4\u9650\u5236\uff08\u8d85\u51fa\u5df2\u6ce8\u518c\u59ff\u52bf\u65f6\u505c\u6b62\uff09",
+    "clamp_inflation":     u"\u9650\u5236\u81a8\u80c0\u6bd4\u4f8b\uff1a",
     "output_is_scale":     u"\u8f93\u51fa\u4e3a\u7f29\u653e",
     "output_is_scale_hdr": u"\u6807\u8bb0\u7f29\u653e\u901a\u9053\u8f93\u51fa\uff08M1.2 anchor 1.0\uff09",
     # -- M2.4b: ordered-list editors --
