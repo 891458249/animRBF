@@ -1232,18 +1232,17 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._ctrl.set_driven_source_attrs(int(index), list(attrs))
 
     def _on_driven_source_attrs_clear(self, index):
-        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD: Disconnect on
-        a driven tab. Same nothing-to-disconnect guard as driver
-        side."""
+        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD +
+        M_DISCONNECT_FIX: Disconnect on a driven tab. Direct
+        disconnect through controller.disconnect_driven_source_attrs."""
         if not self._guard_attrs_clear("driven", int(index)):
             return
-        self._ctrl.set_driven_source_attrs(int(index), [])
+        self._ctrl.disconnect_driven_source_attrs(int(index))
 
     def _on_driven_source_select_node(self, index):
-        """M_TABBED_EDITOR: Select button on a driven tab. Rebinds
-        the source's node to the first transform in the current
-        Maya selection."""
-        self._bind_source_node_from_selection("driven", int(index))
+        """M_SELECT_SEMANTIC_FIX driven mirror. Selects the
+        driven source's node in the Maya viewport."""
+        self._select_source_node_in_viewport("driven", int(index))
 
     def _reload_driven_sources(self):
         """M_DRIVEN_MULTI / M_TABBED_EDITOR: reload the tabbed driven
@@ -1299,13 +1298,15 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._ctrl.set_driver_source_attrs(int(index), list(attrs))
 
     def _on_driver_source_attrs_clear(self, index):
-        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD: Disconnect
-        button on a driver tab. Pre-flight check - if the source
-        already has 0 attrs, surface a 'nothing to disconnect'
-        notice instead of triggering a no-op rebuild."""
+        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD +
+        M_DISCONNECT_FIX (2026-04-27 P0): Disconnect button on a
+        driver tab. Pre-flight 'nothing to disconnect' guard +
+        direct-disconnect through controller.
+        disconnect_driver_source_attrs (no remove-all + re-add-all
+        rebuild)."""
         if not self._guard_attrs_clear("driver", int(index)):
             return
-        self._ctrl.set_driver_source_attrs(int(index), [])
+        self._ctrl.disconnect_driver_source_attrs(int(index))
 
     # ----- M_TABBED_CONNECT_GUARD: shared guard helpers --------------
 
@@ -1350,57 +1351,32 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         return True
 
     def _on_driver_source_select_node(self, index):
-        """M_TABBED_EDITOR: Select button on a driver tab. Picks
-        the first transform from the current Maya selection,
-        binds it to the source, and refreshes the tab's
-        available-attrs list via cmds.listAttr."""
-        self._bind_source_node_from_selection("driver", int(index))
+        """M_SELECT_SEMANTIC_FIX (Phase 1, P1 2026-04-27): Select
+        button on a driver tab now selects the source's bone in
+        the Maya viewport (cmds.select replace=True), letting the
+        TD jump to that bone in the scene. The previous behaviour
+        was rebind-from-selection; rebind is now achieved by
+        closing the tab + Add Driver from a fresh selection."""
+        self._select_source_node_in_viewport("driver", int(index))
 
-    def _bind_source_node_from_selection(self, role, index):
-        """M_TABBED_EDITOR shared helper: resolve cmds.ls(selection)
-        -> first transform + rebind it onto the source at *index*
-        on either side. Source attrs / weight / encoding (driver
-        only) are preserved across the rebind."""
-        sel = cmds.ls(selection=True, type="transform") or []
-        if not sel:
-            warn_key = ("warning_driver_source_no_selection"
-                        if role == "driver"
-                        else "warning_driven_source_no_selection")
-            cmds.warning(tr(warn_key))
-            return
-        current = self._ctrl.current_node or ""
-        current_shape = ""
-        if current:
-            try:
-                from RBFtools import core as _core
-                current_shape = _core.get_shape(current) or ""
-            except Exception:
-                current_shape = ""
-        sel_filtered = [
-            n for n in sel if n != current and n != current_shape]
-        if not sel_filtered:
-            cmds.warning(tr("warning_driver_source_self_excluded"))
-            return
-        new_node = sel_filtered[0]
-        # Read the source's current state so we don't lose it on
-        # the node rebind.
+    def _select_source_node_in_viewport(self, role, index):
+        """Shared helper: read the source's node name from the
+        controller's current source list + cmds.select it."""
         if role == "driver":
             sources = self._ctrl.read_driver_sources()
         else:
             sources = self._ctrl.read_driven_sources()
         if not (0 <= index < len(sources)):
             return
-        existing_attrs = list(sources[index].attrs)
-        if role == "driver":
-            weight   = float(getattr(sources[index], "weight", 1.0))
-            encoding = int(getattr(sources[index], "encoding", 0))
-            self._ctrl.remove_driver_source(int(index))
-            self._ctrl.add_driver_source(
-                new_node, existing_attrs,
-                weight=weight, encoding=encoding)
-        else:
-            self._ctrl.remove_driven_source(int(index))
-            self._ctrl.add_driven_source(new_node, existing_attrs)
+        node = sources[index].node or ""
+        if not node:
+            cmds.warning(tr("warning_source_node_empty"))
+            return
+        if not cmds.objExists(node):
+            cmds.warning(tr("warning_source_node_missing").format(
+                node=node))
+            return
+        cmds.select(node, replace=True)
 
     def _reload_driver_sources(self):
         """M_UIRECONCILE / M_TABBED_EDITOR: reload the tabbed driver

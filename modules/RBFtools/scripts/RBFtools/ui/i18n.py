@@ -438,6 +438,12 @@ _EN = {
         "Some selected transforms are already driven targets on "
         "this RBF node and were skipped:\n  {skipped}\n\n"
         "Adding the remaining new targets:\n  {added}",
+    # -- M_SELECT_SEMANTIC_FIX (Phase 1, P1 2026-04-27): Select
+    #    button now selects the source bone in the Maya viewport. --
+    "warning_source_node_empty":
+        "This source has no node assigned yet; nothing to select.",
+    "warning_source_node_missing":
+        "Source node {node!r} no longer exists in the scene.",
 }
 
 _ZH = {
@@ -812,6 +818,10 @@ _ZH = {
     "msg_driven_some_already_added":
         u"\u4ee5\u4e0b\u9009\u4e2d\u7684 transform \u5df2\u662f\u8be5 RBF \u8282\u70b9\u7684\u88ab\u9a71\u52a8\u76ee\u6807\uff0c\u5df2\u8df3\u8fc7\uff1a\n"
         u"  {skipped}\n\n\u7ee7\u7eed\u6dfb\u52a0\u5176\u4f59\u65b0\u76ee\u6807\uff1a\n  {added}",
+    "warning_source_node_empty":
+        u"\u8be5\u6e90\u5c1a\u672a\u6307\u5b9a\u8282\u70b9\uff0c\u65e0\u53ef\u9009\u62e9\u5bf9\u8c61\u3002",
+    "warning_source_node_missing":
+        u"\u6e90\u8282\u70b9 {node!r} \u5df2\u4e0d\u5728\u573a\u666f\u4e2d\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

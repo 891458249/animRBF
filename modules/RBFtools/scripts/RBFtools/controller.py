@@ -253,6 +253,28 @@ class MainController(QtCore.QObject):
         self.driverSourcesChanged.emit()
         return True
 
+    def disconnect_driver_source_attrs(self, index):
+        """M_DISCONNECT_FIX (Phase 1, P0 critical fix 2026-04-27):
+        true Disconnect for a driver source - directly disconnects
+        input[] wires + clears the driverSource_attrs metadata,
+        without rebuilding any other source. Routes through
+        :func:`core.disconnect_driver_source_attrs` and emits
+        :attr:`driverSourcesChanged`."""
+        if not self._current_node:
+            cmds.warning(
+                "disconnect_driver_source_attrs: no current node")
+            return False
+        try:
+            ok = core.disconnect_driver_source_attrs(
+                self._current_node, int(index))
+        except Exception as exc:
+            cmds.warning(
+                "disconnect_driver_source_attrs failed: {}".format(exc))
+            return False
+        if ok:
+            self.driverSourcesChanged.emit()
+        return ok
+
     def set_driver_source_attrs(self, index, new_attrs):
         """M_UIRECONCILE_PLUS (Item 4b): replace the attrs list of
         an existing driverSource[index] entry on the active node.
@@ -326,6 +348,24 @@ class MainController(QtCore.QObject):
             return False
         self.drivenSourcesChanged.emit()
         return True
+
+    def disconnect_driven_source_attrs(self, index):
+        """M_DISCONNECT_FIX driven mirror. Direct disconnect on
+        output[] wires + clear drivenSource_attrs metadata."""
+        if not self._current_node:
+            cmds.warning(
+                "disconnect_driven_source_attrs: no current node")
+            return False
+        try:
+            ok = core.disconnect_driven_source_attrs(
+                self._current_node, int(index))
+        except Exception as exc:
+            cmds.warning(
+                "disconnect_driven_source_attrs failed: {}".format(exc))
+            return False
+        if ok:
+            self.drivenSourcesChanged.emit()
+        return ok
 
     def set_driven_source_attrs(self, index, new_attrs):
         """M_DRIVEN_MULTI: replace attrs on an existing

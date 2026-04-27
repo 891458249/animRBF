@@ -155,6 +155,11 @@ class TestM_TABBED_CONNECT_GUARD_Lifecycle(unittest.TestCase):
         win._ctrl.set_driver_source_attrs.assert_not_called()
 
     def test_driver_clear_proceeds_when_populated(self):
+        """M_DISCONNECT_FIX (Phase 1, 2026-04-27): Disconnect on a
+        populated source now routes through
+        controller.disconnect_driver_source_attrs (direct
+        disconnect) instead of the previous
+        set_driver_source_attrs(idx, []) rebuild path."""
         from RBFtools.ui.main_window import RBFToolsWindow
         win = self._make_window(
             driver_sources=[self._src(["tx", "ty"])])
@@ -163,8 +168,9 @@ class TestM_TABBED_CONNECT_GUARD_Lifecycle(unittest.TestCase):
         ) as mb:
             RBFToolsWindow._on_driver_source_attrs_clear(win, 0)
         mb.information.assert_not_called()
-        win._ctrl.set_driver_source_attrs.assert_called_once_with(
-            0, [])
+        win._ctrl.disconnect_driver_source_attrs.\
+            assert_called_once_with(0)
+        win._ctrl.set_driver_source_attrs.assert_not_called()
 
     # ----- Driven side: same shape ----------------------------------
 

@@ -1382,6 +1382,97 @@ def remove_driver_source(node, index):
                 node, index, exc))
 
 
+def disconnect_driver_source_attrs(node, index):
+    """M_DISCONNECT_FIX (Phase 1, P0 critical fix 2026-04-27): true
+    disconnect for a single driver source - directly disconnects
+    the source's `input[base..base+n]` wires + clears the
+    `driverSource_attrs` MStringArray, without rebuilding any other
+    source.
+
+    Why a dedicated function:
+      - The previous Disconnect path called
+        `set_driver_source_attrs(idx, [])` which goes through the
+        remove-all + re-add-all rebuild orchestrator. That has
+        unintended side effects (remove of driverSource[idx] itself
+        plus re-add of every OTHER source via add_driver_source,
+        which restores their wires correctly but is heavy and
+        depends on `cmds.setAttr(plug, 0, type="stringArray")`
+        round-tripping cleanly across Maya versions).
+      - User report 2026-04-27: under some scenes Disconnect was
+        observed to leave the source's selected attrs WIRED to
+        input[]. The direct-disconnect path eliminates that whole
+        class of failure.
+
+    Implementation:
+      1. Read current sources list (multi).
+      2. Resolve index'th source's node + attrs + base offset
+         (sum of attr counts for sources at logical index < idx).
+      3. For each (attr at offset i): cmds.disconnectAttr(
+           "<src>.<attr>", "<shape>.input[base+i]").
+      4. cmds.setAttr("<shape>.driverSource[idx].driverSource_attrs",
+                      0, type="stringArray").
+
+    Returns True on success, False on out-of-range / failure
+    (with cmds.warning surfacing the cause).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        cmds.warning(
+            "disconnect_driver_source_attrs: shape not found "
+            "for {!r}".format(node))
+        return False
+    sources = read_driver_info_multi(node)
+    if not sources:
+        cmds.warning(
+            "disconnect_driver_source_attrs: no driver sources "
+            "on {!r}".format(node))
+        return False
+    if index < 0 or index >= len(sources):
+        cmds.warning(
+            "disconnect_driver_source_attrs: index {} out of "
+            "range (0..{})".format(index, len(sources) - 1))
+        return False
+    target = sources[index]
+    if not target.attrs:
+        # Already empty - nothing to disconnect. Still treat as
+        # success (idempotent) so the slot guards don't loop.
+        return True
+    # Compute base offset for this source's input[] slice. Matches
+    # the convention add_driver_source uses (sum of attr counts of
+    # all logically-prior sources).
+    base = 0
+    for i, s in enumerate(sources):
+        if i == index:
+            break
+        base += len(s.attrs)
+    # 1) disconnect each input[] wire.
+    src_node = target.node or ""
+    for i, attr in enumerate(target.attrs):
+        if not src_node:
+            break
+        src_plug = "{}.{}".format(src_node, attr)
+        dst_plug = "{}.input[{}]".format(shape, base + i)
+        try:
+            cmds.disconnectAttr(src_plug, dst_plug)
+        except Exception:
+            # Best-effort: a manually-disconnected wire would raise
+            # here; we still want to clear the metadata below.
+            pass
+    # 2) clear driverSource_attrs metadata. The MStringArray empty
+    # form is `setAttr <plug> 0 -type "stringArray"` (length 0 +
+    # zero values).
+    attrs_plug = "{}.driverSource[{}].driverSource_attrs".format(
+        shape, index)
+    try:
+        cmds.setAttr(attrs_plug, 0, type="stringArray")
+    except Exception as exc:
+        cmds.warning(
+            "disconnect_driver_source_attrs: failed to clear "
+            "{}: {}".format(attrs_plug, exc))
+        return False
+    return True
+
+
 def set_driver_source_attrs(node, index, new_attrs):
     """M_UIRECONCILE_PLUS (Item 4b): replace the attrs list of an
     existing driverSource[index] entry.
@@ -1695,6 +1786,64 @@ def remove_driven_source(node, index):
                 node, index, exc))
         return
     _wire_driven_sources(shape, read_driven_info_multi(node))
+
+
+def disconnect_driven_source_attrs(node, index):
+    """M_DISCONNECT_FIX driven mirror of
+    :func:`disconnect_driver_source_attrs`. Direct disconnect on
+    `output[base..base+n]` wires + clear `drivenSource_attrs`
+    metadata. No remove-all + re-add-all rebuild."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        cmds.warning(
+            "disconnect_driven_source_attrs: shape not found "
+            "for {!r}".format(node))
+        return False
+    sources = read_driven_info_multi(node)
+    if not sources:
+        cmds.warning(
+            "disconnect_driven_source_attrs: no driven sources "
+            "on {!r}".format(node))
+        return False
+    if index < 0 or index >= len(sources):
+        cmds.warning(
+            "disconnect_driven_source_attrs: index {} out of "
+            "range (0..{})".format(index, len(sources) - 1))
+        return False
+    target = sources[index]
+    if not target.attrs:
+        return True
+    # Base offset across logically-prior driven sources.
+    base = 0
+    for i, s in enumerate(sources):
+        if i == index:
+            break
+        base += len(s.attrs)
+    # 1) disconnect output[base+i] -> driven_node.attr_i wires.
+    dvn_node = target.node or ""
+    for i, attr in enumerate(target.attrs):
+        if not dvn_node:
+            break
+        src_plug = "{}.output[{}]".format(shape, base + i)
+        dst_plug = "{}.{}".format(dvn_node, attr)
+        try:
+            cmds.disconnectAttr(src_plug, dst_plug)
+        except Exception:
+            pass
+    # 2) clear drivenSource_attrs metadata (the dynamic compound
+    # added by _ensure_driven_source_compound).
+    if cmds.attributeQuery("drivenSource", node=shape, exists=True):
+        attrs_plug = (
+            "{}.drivenSource[{}].drivenSource_attrs".format(
+                shape, index))
+        try:
+            cmds.setAttr(attrs_plug, 0, type="stringArray")
+        except Exception as exc:
+            cmds.warning(
+                "disconnect_driven_source_attrs: failed to clear "
+                "{}: {}".format(attrs_plug, exc))
+            return False
+    return True
 
 
 def set_driven_source_attrs(node, index, new_attrs):
