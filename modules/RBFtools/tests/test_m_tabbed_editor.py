@@ -63,10 +63,12 @@ class TestM_TABBED_EDITOR_SourceScan(unittest.TestCase):
                 "tabbed_source_editor.py missing {}".format(cls_name))
 
     def test_signal_surface(self):
+        # M_TABBED_EDITOR_REWRITE (2026-04-27 strict spec): per-tab
+        # weight + encoding controls are removed; weightChanged /
+        # encodingChanged signals are no longer required.
         for sig in ("addRequested", "removeRequested",
                     "attrsApplyRequested", "attrsClearRequested",
-                    "selectNodeRequested",
-                    "weightChanged", "encodingChanged"):
+                    "selectNodeRequested"):
             self.assertIn(sig, self._editor,
                 "tabbed_source_editor.py missing signal {}".format(sig))
 
@@ -102,29 +104,49 @@ class TestM_TABBED_EDITOR_SourceScan(unittest.TestCase):
 
 @unittest.skipIf(conftest._REAL_MAYA,
     "mock-dependent (PySide signal stubs)")
-class TestM_TABBED_EDITOR_TabContent(unittest.TestCase):
+class TestM_TABBED_EDITOR_PanelConnect(unittest.TestCase):
+    """M_TABBED_EDITOR_REWRITE (2026-04-27 strict spec): the
+    Connect / Disconnect buttons live at the panel level (the
+    QGroupBox-wrapped editor) and operate on the currently-active
+    tab. The per-tab _on_connect_clicked from the previous
+    iteration is gone."""
 
-    def _make_content(self, with_we=False):
+    def _make_panel(self):
         from RBFtools.ui.widgets.tabbed_source_editor import (
-            _SourceTabContent)
-        c = _SourceTabContent.__new__(_SourceTabContent)
-        c._role  = "driver" if with_we else "driven"
-        c._with_we = with_we
-        c.attrsApplyRequested = mock.MagicMock()
-        c.attrsClearRequested = mock.MagicMock()
-        c.weightChanged       = mock.MagicMock()
-        c.encodingChanged     = mock.MagicMock()
-        return c
+            _TabbedSourceEditorBase)
+        panel = _TabbedSourceEditorBase.__new__(_TabbedSourceEditorBase)
+        panel._tabs = mock.MagicMock()
+        panel.attrsApplyRequested = mock.MagicMock()
+        panel.attrsClearRequested = mock.MagicMock()
+        return panel
 
-    def test_connect_emits_apply_with_selected_attrs(self):
+    def test_connect_emits_apply_with_current_tab_attrs(self):
         from RBFtools.ui.widgets.tabbed_source_editor import (
-            _SourceTabContent)
-        c = self._make_content()
-        c.selected_attrs = mock.MagicMock(
-            return_value=["tx", "ty"])
-        _SourceTabContent._on_connect_clicked(c)
-        c.attrsApplyRequested.emit.assert_called_once_with(
-            ["tx", "ty"])
+            _TabbedSourceEditorBase)
+        panel = self._make_panel()
+        panel._tabs.currentIndex.return_value = 1
+        content = mock.MagicMock()
+        content.selected_attrs.return_value = ["tx", "ty"]
+        panel._tabs.widget.return_value = content
+        _TabbedSourceEditorBase._on_connect_clicked(panel)
+        panel.attrsApplyRequested.emit.assert_called_once_with(
+            1, ["tx", "ty"])
+
+    def test_connect_no_active_tab_is_noop(self):
+        from RBFtools.ui.widgets.tabbed_source_editor import (
+            _TabbedSourceEditorBase)
+        panel = self._make_panel()
+        panel._tabs.currentIndex.return_value = -1
+        _TabbedSourceEditorBase._on_connect_clicked(panel)
+        panel.attrsApplyRequested.emit.assert_not_called()
+
+    def test_disconnect_emits_clear_with_current_tab_index(self):
+        from RBFtools.ui.widgets.tabbed_source_editor import (
+            _TabbedSourceEditorBase)
+        panel = self._make_panel()
+        panel._tabs.currentIndex.return_value = 2
+        _TabbedSourceEditorBase._on_disconnect_clicked(panel)
+        panel.attrsClearRequested.emit.assert_called_once_with(2)
 
 
 @unittest.skipIf(conftest._REAL_MAYA,
@@ -148,12 +170,18 @@ class TestM_TABBED_EDITOR_RemoveSignal(unittest.TestCase):
 
 class TestM_TABBED_EDITOR_I18nParity(unittest.TestCase):
 
+    # M_TABBED_EDITOR_REWRITE (2026-04-27): per-tab weight +
+    # encoding labels are obsolete; new keys for the outer
+    # DriverDriven / Pose tab labels + the per-panel Add Driver /
+    # Add Driven buttons are required.
     REQUIRED_KEYS = [
         "source_tab_add_tip",
         "source_tab_connect_tip",
         "source_tab_disconnect_tip",
-        "driver_source_weight_label",
-        "driver_source_encoding_label",
+        "tab_driver_driven",
+        "tab_pose",
+        "btn_add_driver",
+        "btn_add_driven",
     ]
 
     def test_required_keys_present_in_both_languages(self):
@@ -172,26 +200,28 @@ class TestM_TABBED_EDITOR_I18nParity(unittest.TestCase):
 
 
 class TestM_TABBED_EDITOR_SubclassDifferentiation(unittest.TestCase):
-    """The driver subclass exposes per-source weight + encoding;
-    the driven subclass does not (those concepts are driver-only)."""
+    """M_TABBED_EDITOR_REWRITE (2026-04-27 strict spec): the driver
+    and driven subclasses differ only in role / tab-prefix /
+    add-button-key / list-selection mode (single vs extended).
+    Per-source weight + encoding are removed."""
 
-    def test_driver_subclass_has_weight_encoding(self):
+    def test_driver_subclass_role_and_prefix(self):
         from RBFtools.ui.widgets.tabbed_source_editor import (
             TabbedDriverSourceEditor)
         self.assertEqual(TabbedDriverSourceEditor._role, "driver")
-        self.assertTrue(
-            TabbedDriverSourceEditor._with_weight_encoding)
         self.assertEqual(
             TabbedDriverSourceEditor._tab_label_prefix, "Driver")
+        self.assertEqual(
+            TabbedDriverSourceEditor._add_button_key, "btn_add_driver")
 
-    def test_driven_subclass_has_no_weight_encoding(self):
+    def test_driven_subclass_role_and_prefix(self):
         from RBFtools.ui.widgets.tabbed_source_editor import (
             TabbedDrivenSourceEditor)
         self.assertEqual(TabbedDrivenSourceEditor._role, "driven")
-        self.assertFalse(
-            TabbedDrivenSourceEditor._with_weight_encoding)
         self.assertEqual(
             TabbedDrivenSourceEditor._tab_label_prefix, "Driven")
+        self.assertEqual(
+            TabbedDrivenSourceEditor._add_button_key, "btn_add_driven")
 
 
 if __name__ == "__main__":

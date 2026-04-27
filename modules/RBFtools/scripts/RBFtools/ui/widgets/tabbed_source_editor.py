@@ -1,28 +1,30 @@
 # -*- coding: utf-8 -*-
-"""TabbedSourceEditor — QTabWidget paradigm for driver / driven multi-source.
+"""TabbedSourceEditor — strict-spec rewrite (2026-04-27 user directive).
 
-Replaces the M_B24b1 / M_DRIVEN_MULTI list-row editors with a tabbed
-layout matching the Tekken-8 AnimaRbfSolver reference UX (user request
-2026-04-27): each driver / driven entry is a `Driver N` / `Driven N`
-tab, and within each tab the TD picks the source node + selects
-attributes via the same Select-button + multi-select QListWidget
-surface as the legacy `AttributeList` widget.
+Layout per the user's strict UI spec:
 
-Two concrete subclasses are exposed:
+  [QGroupBox / QFrame border]
+    QVBoxLayout:
+      Inner QTabWidget (Driver 0 | Driver 1 | ...)  - per-source tabs
+        per-tab content:
+          Object Selection Row:
+            QLabel "Driver/Driven"   QLineEdit (stretch)   [Select]
+          Attributes Row:
+            QLabel "Attributes"  (top-aligned)   QListWidget
+              - DRIVER:  single-selection
+              - DRIVEN:  extended (multi) selection
+      [Connect]  [Disconnect]   <- panel-level, operates on current tab
+      [Add Driver / Add Driven]  <- panel-level, full width
 
-* :class:`TabbedDriverSourceEditor` - drives `controller.add_driver_source`,
-  `remove_driver_source`, `set_driver_source_attrs`. Per-tab content
-  includes the M_B24b1 weight + encoding combo so a TD can configure
-  per-source weight / encoding without opening another panel.
-* :class:`TabbedDrivenSourceEditor` - drives `controller.add_driven_source`,
-  `remove_driven_source`, `set_driven_source_attrs`. No per-tab weight /
-  encoding (those concepts are driver-only).
+The per-tab weight + encoding controls from the previous iteration
+are removed per user directive (defaults: weight=1.0, encoding=0
+when adding new sources).
 
-MVC red line preserved: the widget never imports `cmds`. The tab
-content emits intent signals (`addRequested`, `removeRequested(int)`,
-`attrsApplyRequested(int, list)`, `selectNodeRequested(int)`,
-`weightChanged(int, float)`, `encodingChanged(int, int)`) that
-`main_window` translates into controller calls.
+MVC red line preserved: the widget never imports `cmds`. The
+panel emits intent signals (`addRequested`, `removeRequested(int)`,
+`attrsApplyRequested(int, list[str])`, `attrsClearRequested(int)`,
+`selectNodeRequested(int)`); main_window owns the cmds.* calls
+and forwards to the controller.
 """
 
 from __future__ import absolute_import
@@ -32,45 +34,28 @@ from RBFtools.ui.i18n import tr
 
 
 # ----------------------------------------------------------------------
-# Encoding labels (mirrors driver_source_list_editor.py)
-# ----------------------------------------------------------------------
-
-_ENCODING_LABELS = [
-    ("Raw",        0),
-    ("Quaternion", 1),
-    ("BendRoll",   2),
-    ("ExpMap",     3),
-    ("SwingTwist", 4),
-]
-
-
-# ----------------------------------------------------------------------
 # Per-tab content widget
 # ----------------------------------------------------------------------
 
 
 class _SourceTabContent(QtWidgets.QWidget):
-    """Content for one tab in either driver or driven editor.
+    """Content for one tab in either driver or driven panel.
 
-    Layout matches the AnimaRbfSolver reference:
+    Per the user's 2026-04-27 strict UI spec the per-tab layout is:
 
       Driver/Driven: <node_field> [Select]
-      Attributes:
-      [QListWidget multi-select]
-      [Connect]      [Disconnect]
-      [optional weight spinbox + encoding combo for driver tabs]
+      Attributes:    [QListWidget]   <- single-sel for driver, multi for driven
+
+    Connect / Disconnect / Add buttons live at the panel level
+    (above the QGroupBox border) - they are NOT part of the per-tab
+    content.
     """
 
     selectNodeRequested = QtCore.Signal()
-    attrsApplyRequested = QtCore.Signal(list)   # list[str] new attrs
-    attrsClearRequested = QtCore.Signal()
-    weightChanged       = QtCore.Signal(float)
-    encodingChanged     = QtCore.Signal(int)
 
-    def __init__(self, role, with_weight_encoding=False, parent=None):
+    def __init__(self, role, parent=None):
         super(_SourceTabContent, self).__init__(parent)
         self._role = role  # "driver" or "driven"
-        self._with_we = with_weight_encoding
         self._build()
 
     def _build(self):
@@ -78,10 +63,11 @@ class _SourceTabContent(QtWidgets.QWidget):
         lay.setContentsMargins(6, 6, 6, 6)
         lay.setSpacing(4)
 
-        # Node row.
+        # Object Selection Row.
         row_node = QtWidgets.QHBoxLayout()
         lbl_key = "driver" if self._role == "driver" else "driven"
         self._lbl_node = QtWidgets.QLabel(tr(lbl_key))
+        self._lbl_node.setMinimumWidth(50)
         self._field_node = QtWidgets.QLineEdit()
         self._field_node.setReadOnly(True)
         self._btn_select = QtWidgets.QPushButton(tr("select"))
@@ -93,64 +79,32 @@ class _SourceTabContent(QtWidgets.QWidget):
         row_node.addWidget(self._btn_select)
         lay.addLayout(row_node)
 
-        # Attrs label + list.
+        # Attributes Row: QLabel left (vertical-align top) + QListWidget
+        # right that fills the remaining vertical space.
+        row_attrs = QtWidgets.QHBoxLayout()
         self._lbl_attrs = QtWidgets.QLabel(tr("attributes"))
-        lay.addWidget(self._lbl_attrs)
+        self._lbl_attrs.setMinimumWidth(50)
+        self._lbl_attrs.setAlignment(
+            QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft)
+        row_attrs.addWidget(self._lbl_attrs)
         self._list = QtWidgets.QListWidget()
-        self._list.setSelectionMode(
-            QtWidgets.QAbstractItemView.ExtendedSelection)
-        lay.addWidget(self._list, 1)
+        # Selection mode per role (user strict spec):
+        #   driver -> single ; driven -> multi (extended).
+        if self._role == "driver":
+            self._list.setSelectionMode(
+                QtWidgets.QAbstractItemView.SingleSelection)
+        else:
+            self._list.setSelectionMode(
+                QtWidgets.QAbstractItemView.ExtendedSelection)
+        self._list.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAsNeeded)
+        self._list.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding,
+            QtWidgets.QSizePolicy.Expanding)
+        row_attrs.addWidget(self._list, 1)
+        lay.addLayout(row_attrs, 1)
 
-        # Connect / Disconnect (apply / clear) button row.
-        row_btn = QtWidgets.QHBoxLayout()
-        self._btn_connect = QtWidgets.QPushButton(tr("connect"))
-        self._btn_connect.setToolTip(tr("source_tab_connect_tip"))
-        self._btn_connect.clicked.connect(self._on_connect_clicked)
-        self._btn_disconnect = QtWidgets.QPushButton(tr("disconnect"))
-        self._btn_disconnect.setToolTip(tr("source_tab_disconnect_tip"))
-        self._btn_disconnect.clicked.connect(
-            self.attrsClearRequested)
-        row_btn.addWidget(self._btn_connect)
-        row_btn.addWidget(self._btn_disconnect)
-        lay.addLayout(row_btn)
-
-        # Optional weight + encoding (driver tabs only).
-        if self._with_we:
-            row_we = QtWidgets.QHBoxLayout()
-            row_we.addWidget(QtWidgets.QLabel(
-                tr("driver_source_weight_label")))
-            self._spin_weight = QtWidgets.QDoubleSpinBox()
-            self._spin_weight.setRange(0.0, 1000.0)
-            self._spin_weight.setDecimals(3)
-            self._spin_weight.setSingleStep(0.1)
-            self._spin_weight.setValue(1.0)
-            self._spin_weight.setToolTip(
-                tr("driver_source_weight_tip"))
-            self._spin_weight.valueChanged.connect(self.weightChanged)
-            row_we.addWidget(self._spin_weight)
-            row_we.addSpacing(8)
-            row_we.addWidget(QtWidgets.QLabel(
-                tr("driver_source_encoding_label")))
-            self._combo_enc = QtWidgets.QComboBox()
-            for label, value in _ENCODING_LABELS:
-                self._combo_enc.addItem(label, value)
-            self._combo_enc.setToolTip(
-                tr("driver_source_encoding_tip"))
-            self._combo_enc.currentIndexChanged.connect(
-                self._on_encoding_changed)
-            row_we.addWidget(self._combo_enc)
-            row_we.addStretch(1)
-            lay.addLayout(row_we)
-
-    # -- signal forwarders --
-
-    def _on_connect_clicked(self):
-        self.attrsApplyRequested.emit(self.selected_attrs())
-
-    def _on_encoding_changed(self, _idx):
-        self.encodingChanged.emit(int(self._combo_enc.currentData()))
-
-    # -- public API --
+    # -- public API used by the panel --
 
     def set_node_name(self, name):
         self._field_node.setText(name or "")
@@ -176,56 +130,38 @@ class _SourceTabContent(QtWidgets.QWidget):
     def selected_attrs(self):
         return [it.text() for it in self._list.selectedItems()]
 
-    def set_weight(self, value):
-        if not self._with_we:
-            return
-        self._spin_weight.blockSignals(True)
-        try:
-            self._spin_weight.setValue(float(value))
-        finally:
-            self._spin_weight.blockSignals(False)
-
-    def set_encoding(self, value):
-        if not self._with_we:
-            return
-        self._combo_enc.blockSignals(True)
-        try:
-            for i in range(self._combo_enc.count()):
-                if int(self._combo_enc.itemData(i)) == int(value):
-                    self._combo_enc.setCurrentIndex(i)
-                    break
-        finally:
-            self._combo_enc.blockSignals(False)
-
     def retranslate(self):
         lbl_key = "driver" if self._role == "driver" else "driven"
         self._lbl_node.setText(tr(lbl_key))
         self._btn_select.setText(tr("select"))
         self._btn_select.setToolTip(tr("attribute_list_select_tip"))
         self._lbl_attrs.setText(tr("attributes"))
-        self._btn_connect.setText(tr("connect"))
-        self._btn_connect.setToolTip(tr("source_tab_connect_tip"))
-        self._btn_disconnect.setText(tr("disconnect"))
-        self._btn_disconnect.setToolTip(tr("source_tab_disconnect_tip"))
 
 
 # ----------------------------------------------------------------------
-# Tabbed editor base
+# Panel base (QGroupBox-wrapped inner QTabWidget + bottom buttons)
 # ----------------------------------------------------------------------
 
 
-class _TabbedSourceEditorBase(QtWidgets.QWidget):
-    """Common QTabWidget shell used by both driver + driven sides.
-
-    Outer widgets:
-      - Header label (set by subclass)
-      - QTabWidget with closable tabs + a "+" corner widget
-      - Empty hint shown when no tabs exist
+class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
+    """One Driver/Driven panel - QGroupBox-wrapped inner QTabWidget +
+    Connect/Disconnect row + full-width Add button.
 
     Subclass virtuals:
-      - _role -> "driver" / "driven"
-      - _with_weight_encoding -> bool
-      - _tab_label_prefix -> "Driver" / "Driven"
+      _role                    -> "driver" / "driven"
+      _tab_label_prefix        -> "Driver" / "Driven"
+      _header_key              -> i18n key for the QGroupBox title
+      _add_button_key          -> i18n key for the Add button label
+      _empty_hint_key          -> i18n key for the empty-state hint
+
+    Signal surface (panel-level; index is the tab index resolved
+    at emit time so reorder operations stay correct):
+
+      addRequested()                              <- bottom Add btn
+      removeRequested(int)                        <- tab close X
+      attrsApplyRequested(int, list[str])         <- Connect btn
+      attrsClearRequested(int)                    <- Disconnect btn
+      selectNodeRequested(int)                    <- per-tab Select
     """
 
     addRequested        = QtCore.Signal()
@@ -233,94 +169,101 @@ class _TabbedSourceEditorBase(QtWidgets.QWidget):
     attrsApplyRequested = QtCore.Signal(int, list)
     attrsClearRequested = QtCore.Signal(int)
     selectNodeRequested = QtCore.Signal(int)
-    weightChanged       = QtCore.Signal(int, float)
-    encodingChanged     = QtCore.Signal(int, int)
 
     _role                 = "driver"
-    _with_weight_encoding = False
     _tab_label_prefix     = "Driver"
     _header_key           = "driver_source_list_header"
+    _add_button_key       = "btn_add_driver"
     _empty_hint_key       = "driver_source_list_empty_hint"
 
     def __init__(self, parent=None):
-        super(_TabbedSourceEditorBase, self).__init__(parent)
+        super(_TabbedSourceEditorBase, self).__init__(
+            tr(self._header_key), parent)
         self._build()
 
     def _build(self):
         lay = QtWidgets.QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(2)
+        lay.setContentsMargins(6, 12, 6, 6)
+        lay.setSpacing(4)
 
-        # Header row: bold label + ALWAYS-visible "+" Add button.
-        # The + button used to live as a QTabWidget corner widget
-        # but corner widgets disappear when the QTabWidget is
-        # itself hidden (empty state) - the TD then sees the empty
-        # hint with no way to add a tab. Pulling + out into a
-        # standalone header button fixes that (2026-04-27 user
-        # report: "you removed my UI updates" - tabs were rendered
-        # but the empty-state hid the Add button).
-        header_row = QtWidgets.QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        self._lbl_header = QtWidgets.QLabel(tr(self._header_key))
-        self._lbl_header.setStyleSheet("font-weight: bold;")
-        header_row.addWidget(self._lbl_header)
-        header_row.addStretch(1)
-        self._btn_add = QtWidgets.QToolButton()
-        self._btn_add.setText("+")
-        self._btn_add.setToolTip(tr("source_tab_add_tip"))
-        self._btn_add.setMinimumWidth(28)
-        self._btn_add.clicked.connect(self.addRequested)
-        header_row.addWidget(self._btn_add)
-        lay.addLayout(header_row)
-
+        # Inner QTabWidget hosting per-source _SourceTabContent.
         self._tabs = QtWidgets.QTabWidget()
         self._tabs.setTabsClosable(True)
         self._tabs.tabCloseRequested.connect(self._on_tab_close)
         lay.addWidget(self._tabs, 1)
 
+        # Empty hint shown below the tab widget when there are no
+        # tabs yet.
         self._lbl_empty_hint = QtWidgets.QLabel(tr(self._empty_hint_key))
         self._lbl_empty_hint.setStyleSheet(
             "color: gray; font-style: italic;")
         self._lbl_empty_hint.setWordWrap(True)
         self._lbl_empty_hint.setVisible(True)
         lay.addWidget(self._lbl_empty_hint)
+
+        # Connect / Disconnect row (panel-level - operates on the
+        # currently-active tab).
+        row_cd = QtWidgets.QHBoxLayout()
+        self._btn_connect = QtWidgets.QPushButton(tr("connect"))
+        self._btn_connect.setToolTip(tr("source_tab_connect_tip"))
+        self._btn_connect.clicked.connect(self._on_connect_clicked)
+        self._btn_disconnect = QtWidgets.QPushButton(tr("disconnect"))
+        self._btn_disconnect.setToolTip(tr("source_tab_disconnect_tip"))
+        self._btn_disconnect.clicked.connect(self._on_disconnect_clicked)
+        row_cd.addWidget(self._btn_connect, 1)
+        row_cd.addWidget(self._btn_disconnect, 1)
+        lay.addLayout(row_cd)
+
+        # Full-width Add Driver / Add Driven button.
+        self._btn_add = QtWidgets.QPushButton(tr(self._add_button_key))
+        self._btn_add.setToolTip(tr("source_tab_add_tip"))
+        self._btn_add.clicked.connect(self.addRequested)
+        lay.addWidget(self._btn_add)
+
         self._update_empty_hint()
 
     # -- internals --
 
-    def _make_tab_content(self):
-        """Override-friendly factory for the per-tab content widget."""
-        return _SourceTabContent(
-            role=self._role,
-            with_weight_encoding=self._with_weight_encoding)
-
     def _on_tab_close(self, index):
         self.removeRequested.emit(int(index))
+
+    def _on_connect_clicked(self):
+        idx = self._tabs.currentIndex()
+        if idx < 0:
+            return
+        content = self._tabs.widget(idx)
+        if content is None:
+            return
+        attrs = content.selected_attrs()
+        self.attrsApplyRequested.emit(idx, list(attrs))
+
+    def _on_disconnect_clicked(self):
+        idx = self._tabs.currentIndex()
+        if idx < 0:
+            return
+        self.attrsClearRequested.emit(idx)
 
     def _update_empty_hint(self):
         empty = (self._tabs.count() == 0)
         self._lbl_empty_hint.setVisible(empty)
-        self._tabs.setVisible(not empty)
+        # Connect / Disconnect are only meaningful with an active
+        # tab - disable them in the empty state but always keep
+        # them visible so the layout stays stable.
+        self._btn_connect.setEnabled(not empty)
+        self._btn_disconnect.setEnabled(not empty)
 
     def _wire_tab_signals(self, content, index_resolver):
-        """Wire a tab content's outbound signals to the editor's
-        index-aware re-emission. ``index_resolver`` is a callable
-        returning the current index (re-resolved on every emit so
-        tab reorder operations stay correct)."""
+        """Wire a tab content's per-tab signals to the panel-level
+        re-emission. ``index_resolver`` is a callable returning the
+        tab's current index (resolved at emit time so tab reorder
+        stays correct)."""
         content.selectNodeRequested.connect(
             lambda: self.selectNodeRequested.emit(index_resolver()))
-        content.attrsApplyRequested.connect(
-            lambda attrs: self.attrsApplyRequested.emit(
-                index_resolver(), list(attrs)))
-        content.attrsClearRequested.connect(
-            lambda: self.attrsClearRequested.emit(index_resolver()))
-        if self._with_weight_encoding:
-            content.weightChanged.connect(
-                lambda v: self.weightChanged.emit(index_resolver(), float(v)))
-            content.encodingChanged.connect(
-                lambda v: self.encodingChanged.emit(index_resolver(), int(v)))
 
     # -- public API --
+
+    def current_index(self):
+        return self._tabs.currentIndex()
 
     def set_sources(self, sources, available_attrs_per_source=None):
         """Programmatic rebuild from list[DriverSource | DrivenSource].
@@ -330,8 +273,6 @@ class _TabbedSourceEditorBase(QtWidgets.QWidget):
         source's attrs without re-clicking Select. If omitted each
         tab will only show the source's *currently-selected* attrs.
         """
-        # Preserve currently-selected tab if the source list still
-        # contains that index.
         prev_idx = self._tabs.currentIndex()
         # Tear down all existing tabs cleanly.
         while self._tabs.count() > 0:
@@ -340,43 +281,34 @@ class _TabbedSourceEditorBase(QtWidgets.QWidget):
             if w is not None:
                 w.deleteLater()
         for i, src in enumerate(sources or []):
-            self._add_source_tab(src, i,
+            self._add_source_tab(
+                src, i,
                 available_attrs=(available_attrs_per_source[i]
                                  if available_attrs_per_source
                                  and i < len(available_attrs_per_source)
                                  else None))
-        # Restore selection if still in range.
         if 0 <= prev_idx < self._tabs.count():
             self._tabs.setCurrentIndex(prev_idx)
         self._update_empty_hint()
 
     def _add_source_tab(self, src, index, available_attrs=None):
-        content = self._make_tab_content()
-        # Populate from the source dataclass.
+        content = _SourceTabContent(role=self._role)
         node = getattr(src, "node", "") or ""
         attrs = list(getattr(src, "attrs", ()) or ())
         content.set_node_name(node)
-        # If we have an available-attrs list (from the controller),
-        # populate the picker; otherwise just show the existing attrs.
         if available_attrs is not None:
             content.set_available_attrs(available_attrs, preselected=attrs)
         else:
             content.set_available_attrs(attrs, preselected=attrs)
-        if self._with_weight_encoding:
-            content.set_weight(getattr(src, "weight", 1.0))
-            content.set_encoding(getattr(src, "encoding", 0))
         label = "{} {}".format(self._tab_label_prefix, index)
         self._tabs.addTab(content, label)
-        # Resolve the current index at signal-emit time so tab
-        # reorder / mid-list removal stays correct.
         self._wire_tab_signals(
             content,
             lambda _content=content: self._tabs.indexOf(_content))
 
     def populate_tab_attrs(self, index, available_attrs, preselected=None):
-        """Public slot for main_window to push the resolved
-        cmds.listAttr result into a tab after the user clicks
-        Select."""
+        """Public slot for main_window to push a fresh cmds.listAttr
+        result into a tab after the user clicks Select."""
         if not (0 <= index < self._tabs.count()):
             return
         content = self._tabs.widget(index)
@@ -396,15 +328,17 @@ class _TabbedSourceEditorBase(QtWidgets.QWidget):
             return
         content.set_node_name(name)
 
-    def current_index(self):
-        return self._tabs.currentIndex()
-
     # -- i18n --
 
     def retranslate(self):
-        self._lbl_header.setText(tr(self._header_key))
+        self.setTitle(tr(self._header_key))
         self._lbl_empty_hint.setText(tr(self._empty_hint_key))
+        self._btn_add.setText(tr(self._add_button_key))
         self._btn_add.setToolTip(tr("source_tab_add_tip"))
+        self._btn_connect.setText(tr("connect"))
+        self._btn_connect.setToolTip(tr("source_tab_connect_tip"))
+        self._btn_disconnect.setText(tr("disconnect"))
+        self._btn_disconnect.setToolTip(tr("source_tab_disconnect_tip"))
         for i in range(self._tabs.count()):
             content = self._tabs.widget(i)
             if hasattr(content, "retranslate"):
@@ -414,25 +348,25 @@ class _TabbedSourceEditorBase(QtWidgets.QWidget):
 
 
 # ----------------------------------------------------------------------
-# Concrete editors
+# Concrete subclasses
 # ----------------------------------------------------------------------
 
 
 class TabbedDriverSourceEditor(_TabbedSourceEditorBase):
-    """Driver-side tabbed editor (M_TABBED_EDITOR)."""
+    """Driver-side tabbed editor (M_TABBED_EDITOR_REWRITE)."""
 
-    _role                 = "driver"
-    _with_weight_encoding = True
-    _tab_label_prefix     = "Driver"
-    _header_key           = "driver_source_list_header"
-    _empty_hint_key       = "driver_source_list_empty_hint"
+    _role             = "driver"
+    _tab_label_prefix = "Driver"
+    _header_key       = "driver_source_list_header"
+    _add_button_key   = "btn_add_driver"
+    _empty_hint_key   = "driver_source_list_empty_hint"
 
 
 class TabbedDrivenSourceEditor(_TabbedSourceEditorBase):
-    """Driven-side tabbed editor (M_TABBED_EDITOR)."""
+    """Driven-side tabbed editor (M_TABBED_EDITOR_REWRITE)."""
 
-    _role                 = "driven"
-    _with_weight_encoding = False
-    _tab_label_prefix     = "Driven"
-    _header_key           = "driven_source_list_header"
-    _empty_hint_key       = "driven_source_list_empty_hint"
+    _role             = "driven"
+    _tab_label_prefix = "Driven"
+    _header_key       = "driven_source_list_header"
+    _add_button_key   = "btn_add_driven"
+    _empty_hint_key   = "driven_source_list_empty_hint"

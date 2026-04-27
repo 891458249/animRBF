@@ -219,6 +219,13 @@ def _build_qtwidgets():
         # M3.0 / M3.2 additions:
         "QMainWindow", "QFormLayout", "QPlainTextEdit",
         "QRadioButton",
+        # M_TABBED_EDITOR_REWRITE additions (2026-04-27): the
+        # tabbed-source-editor base class subclasses QGroupBox
+        # for a real border, and the inner per-source containers
+        # are QTabWidget. Both must be real classes for `class
+        # _TabbedSourceEditorBase(QtWidgets.QGroupBox)` to define
+        # successfully under the mock import shim.
+        "QGroupBox", "QTabWidget", "QSplitter",
     ):
         setattr(qtw, cls_name, type(cls_name, (_Stub,), {}))
 

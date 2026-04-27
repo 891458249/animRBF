@@ -6627,6 +6627,144 @@ assertion). Zero-regression at every step.
 
 ---
 
+## §M_TABBED_EDITOR_REWRITE — Strict-spec rewrite of tabbed editors
+
+> **STATUS** (2026-04-27): full rewrite of `tabbed_source_editor.py`
+> + `_PoseEditorPanel._build` against the user's strict UI spec.
+> Replaces the M_TABBED_EDITOR / M_TABBED_EDITOR_INTEGRATION
+> layout (which still placed Connect / Disconnect inside the
+> per-tab content + carried per-tab weight / encoding controls)
+> with the AnimaRbfSolver-faithful structure: outer
+> `DriverDriven` QTabWidget, each panel a `QGroupBox`-wrapped
+> inner QTabWidget + Connect/Disconnect row + full-width
+> Add Driver / Add Driven button.
+
+### §M_TABBED_EDITOR_REWRITE.scope
+
+| Layer | Change | LoC |
+|---|---|---|
+| `ui/widgets/tabbed_source_editor.py` (full rewrite) | `_SourceTabContent` simplified to 2 rows (Object Selection + Attributes); per-tab Connect / Disconnect / Add buttons + weight / encoding combo all removed. Driver attribute list = SingleSelection; driven = ExtendedSelection (per strict spec). `_TabbedSourceEditorBase` now subclasses `QGroupBox` (border around the panel) + hosts the inner QTabWidget + Connect / Disconnect row + full-width Add button. The Connect button operates on the currently-active tab; Disconnect emits attrsClearRequested for the current tab. The "+" corner widget pattern from M_TABBED_EDITOR is replaced by the bottom Add button so it stays visible regardless of tab count. | ~330 |
+| `ui/main_window.py` `_PoseEditorPanel._build` | Outermost element of the pose editor is now an outer QTabWidget with two tabs: **DriverDriven** (active by default; QHBoxLayout splitting the two panels) and **Pose** (auto-fill toggle + pose label + pose table + pose-level Add/Apply/Connect/Disconnect/Reload action buttons). The auto-fill row + pose table + bottom buttons moved INTO the Pose tab. | ~100 |
+| `ui/main_window.py` `_PoseEditorPanel.retranslate` | Refresh outer tab labels in addition to the embedded editors + bottom buttons. | ~5 |
+| `ui/i18n.py` | 4 new keys EN+ZH (`tab_driver_driven`, `tab_pose`, `btn_add_driver`, `btn_add_driven`). | ~10 |
+| `tests/test_m_tabbed_editor.py` | Drop weight/encoding signal assertions (signals removed); `TestM_TABBED_EDITOR_TabContent` replaced with `TestM_TABBED_EDITOR_PanelConnect` (panel-level Connect / Disconnect tests against the new `_on_connect_clicked` / `_on_disconnect_clicked` slots that read currentTab().selected_attrs()); subclass differentiation tests now check `_add_button_key` instead of removed `_with_weight_encoding`; i18n parity test covers the 4 new keys. | ~50 |
+| `tests/conftest.py` | Add `QGroupBox`, `QTabWidget`, `QSplitter` to the real-class stub list so `class _TabbedSourceEditorBase(QtWidgets.QGroupBox)` defines successfully under the mock import shim. | ~5 |
+| `addendum_20260424.md` | this section. | ~85 |
+| **Total** | | **~585** |
+
+### §M_TABBED_EDITOR_REWRITE.spec-fidelity
+
+The user's 2026-04-27 strict UI spec:
+
+```
+Outer: QTabWidget (active tab = "DriverDriven")
+  Tab "DriverDriven":
+    QHBoxLayout:
+      [Driver Panel - QGroupBox border]
+        QVBoxLayout:
+          Inner QTabWidget (Driver 0 | Driver 1 | ...)
+          per-tab content:
+            [Driver QLabel] [QLineEdit (stretch)] [Select QPushButton]
+            [Attributes QLabel (top-aligned)] [QListWidget single-sel]
+          [Connect QPushButton] [Disconnect QPushButton]   <- equal-width row
+          [Add Driver QPushButton]                         <- full width
+      [Driven Panel - QGroupBox border]
+        QVBoxLayout:
+          Inner QTabWidget (Driven 0 | Driven 1 | ...)
+          per-tab content:
+            [Driven QLabel] [QLineEdit (stretch)] [Select QPushButton]
+            [Attributes QLabel (top-aligned)] [QListWidget extended-sel]
+          [Connect QPushButton] [Disconnect QPushButton]
+          [Add Driven QPushButton]
+```
+
+Implementation differences from spec (intentional):
+
+- The pose editor also gets a second outer tab "Pose" hosting the
+  auto-fill toggle + pose table + Add/Apply/Connect/Disconnect/Reload
+  action buttons. The user's spec only describes the DriverDriven
+  tab content, but the AnimaRbfSolver reference image shows multiple
+  outer tabs ("DriverDriven | BaseDrivenPose | Pose") and the pose
+  table needs to live somewhere in the new structure - the Pose tab
+  is the natural home.
+- Tab close (X) buttons stay enabled on each per-source tab so the
+  TD can remove sources without going through a separate menu (the
+  previous M_TABBED_EDITOR behaviour preserved).
+
+### §M_TABBED_EDITOR_REWRITE.driver-vs-driven-selection-mode
+
+User spec (verbatim):
+
+- Driver attributes - "**仅支持单选（Single Selection）**"
+- Driven attributes - "**必须支持多选（Extended Selection /
+  Multiple Selection）**"
+
+Implementation (`_SourceTabContent._build`):
+
+```python
+if self._role == "driver":
+    self._list.setSelectionMode(
+        QtWidgets.QAbstractItemView.SingleSelection)
+else:
+    self._list.setSelectionMode(
+        QtWidgets.QAbstractItemView.ExtendedSelection)
+```
+
+This is a behavioural divergence from the AnimaRbfSolver
+reference image (which highlights multiple driver attrs
+simultaneously) - we follow the user's strict spec, not the
+reference visual.
+
+### §M_TABBED_EDITOR_REWRITE.signal-surface
+
+The panel exposes:
+
+```
+addRequested()                              <- bottom Add Driver/Driven btn
+removeRequested(int)                        <- tab close X (preserved)
+attrsApplyRequested(int, list[str])         <- panel-level Connect btn
+attrsClearRequested(int)                    <- panel-level Disconnect btn
+selectNodeRequested(int)                    <- per-tab Select btn
+```
+
+main_window's existing slot signatures
+(`_on_*_source_attrs_apply` / `_attrs_clear` /
+`_select_node`) are unchanged; the Connect / Disconnect signals
+just fire from a different button location now.
+
+The previous `weightChanged` / `encodingChanged` driver-only
+signals are removed. Per-source weight + encoding still exist
+on the underlying DriverSource dataclass; they default to 1.0 +
+Raw on every `add_driver_source` call. Future per-source
+weight / encoding mutation without an attrs round-trip can be
+added back via a separate inspector control if a TD requests
+it.
+
+### §M_TABBED_EDITOR_REWRITE.empirical-baseline (2026-04-27)
+
+| Env | Pre (post-M_TABBED_EDITOR_HOTFIX `7605514`) | Post |
+|---|---|---|
+| Pure-Python | 627 OK (skip 3) | **629 OK (skip 3)** |
+| mayapy 2025 | 627 ran 531 pass 96 skip | **629 ran 531 pass 98 skip** |
+
+mayapy delta: +2 = +0 pass + +2 skip (the rewritten panel-
+level Connect / Disconnect mock tests are mock-only so they
+land in the skip pool).
+
+### §M_TABBED_EDITOR_REWRITE.scope-exclusions
+
+- 0 lines C++ / 0 .mll / 0 CMakeLists / 0 schema modifications
+- 0 lines `controller.py` / `core.py` business logic
+- 0 modifications to the legacy widget files
+  (`AttributeList`, `DriverSourceListEditor`,
+  `DrivenSourceListEditor`, `pose_editor.PoseEditor`)
+- 0 modifications to hotfix 4 files
+- The M_TABBED_EDITOR `weightChanged` / `encodingChanged`
+  signals + per-tab weight / encoding controls are removed
+  (intentional per strict spec)
+
+---
+
 ## §M_HOTFIX_PYSIDE6 — QActionGroup PySide6 migration shim
 
 > **STRUCTURAL LESSON** (2026-04-27):

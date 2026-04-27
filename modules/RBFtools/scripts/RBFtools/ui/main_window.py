@@ -100,50 +100,49 @@ class _PoseEditorPanel(CollapsibleFrame):
     def _build(self):
         lay = self.content_layout()
 
-        # Auto-fill
+        # M_TABBED_EDITOR_REWRITE (user strict spec 2026-04-27):
+        # Outermost element is a QTabWidget. The active tab is
+        # "DriverDriven" containing two QGroupBox-wrapped panels
+        # (Driver / Driven side-by-side). The second tab "Pose"
+        # hosts the auto-fill toggle + per-driven scale flags +
+        # the pose table + the Add/Apply/Connect/Disconnect/Reload
+        # action buttons.
+        self._outer_tabs = QtWidgets.QTabWidget()
+        lay.addWidget(self._outer_tabs, 1)
+
+        # ---- Tab 1: DriverDriven ---------------------------------
+        dd_widget = QtWidgets.QWidget()
+        dd_layout = QtWidgets.QHBoxLayout(dd_widget)
+        dd_layout.setContentsMargins(4, 4, 4, 4)
+        dd_layout.setSpacing(6)
+        self._driver_editor = TabbedDriverSourceEditor()
+        self._driven_editor = TabbedDrivenSourceEditor()
+        dd_layout.addWidget(self._driver_editor, 1)
+        dd_layout.addWidget(self._driven_editor, 1)
+        self._outer_tabs.addTab(dd_widget, tr("tab_driver_driven"))
+
+        # ---- Tab 2: Pose -----------------------------------------
+        pose_widget = QtWidgets.QWidget()
+        pose_layout = QtWidgets.QVBoxLayout(pose_widget)
+        pose_layout.setContentsMargins(4, 4, 4, 4)
+        pose_layout.setSpacing(4)
+
+        # Auto-fill row.
         row_auto = QtWidgets.QHBoxLayout()
         self._cb_auto = QtWidgets.QCheckBox(tr("auto_fill_bs"))
         self._cb_auto.toggled.connect(self.autoFillChanged)
         row_auto.addWidget(self._cb_auto)
         row_auto.addStretch()
         row_auto.addWidget(HelpButton("auto_fill_bs"))
-        lay.addLayout(row_auto)
+        pose_layout.addLayout(row_auto)
+        pose_layout.addWidget(_hline())
 
-        lay.addWidget(_hline())
-
-        # M_TABBED_EDITOR_INTEGRATION (user directive 2026-04-27):
-        # The standalone Driver Sources + Driven Targets sections
-        # outside the pose editor are removed; the multi-source
-        # tabbed editors live HERE inside the pose editor as the
-        # primary driver / driven UI. Single-source nodes show as a
-        # single "Driver 0" / "Driven 0" tab; multi-source nodes get
-        # one tab per source.
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        self._driver_editor = TabbedDriverSourceEditor()
-        self._driven_editor = TabbedDrivenSourceEditor()
-        splitter.addWidget(self._driver_editor)
-        splitter.addWidget(self._driven_editor)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        lay.addWidget(splitter)
-        # Legacy single-source AttributeList widgets used to live
-        # here. They are removed under the user's 2026-04-27 strict
-        # paradigm directive ("驱动源这一栏UI删除"). Slots that
-        # previously read pose_editor.driver_list.node_name() etc.
-        # now derive from controller.read_driver_sources() /
-        # read_driven_sources() (multi-source aggregate). The
-        # selectNodeRequested + filtersChanged signal definitions
-        # remain on this panel for downstream-consumer backcompat
-        # but are no longer wired to any internal child widget.
-
-        lay.addWidget(_hline())
-
-        # Pose label
+        # Pose label.
         self._lbl_poses = QtWidgets.QLabel(tr("poses"))
         self._lbl_poses.setStyleSheet("font-weight: bold;")
-        lay.addWidget(self._lbl_poses)
+        pose_layout.addWidget(self._lbl_poses)
 
-        # QTableView (bound to PoseTableModel by the window)
+        # QTableView (bound to PoseTableModel by the window).
         self._table = QtWidgets.QTableView()
         self._table.setAlternatingRowColors(True)
         self._table.setSelectionBehavior(
@@ -155,17 +154,18 @@ class _PoseEditorPanel(CollapsibleFrame):
         hdr.setStretchLastSection(True)
         hdr.setDefaultSectionSize(70)
         self._table.setMinimumHeight(160)
-        lay.addWidget(self._table, 1)
+        pose_layout.addWidget(self._table, 1)
 
-        # Per-row action buttons are handled by the delegate / context
-        # menu rather than embedded widgets — keeps the model clean.
-        # Context menu on right-click:
+        # Per-row action buttons are handled by the delegate /
+        # context menu rather than embedded widgets - keeps the
+        # model clean. Context menu on right-click:
         self._table.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        self._table.customContextMenuRequested.connect(self._show_row_menu)
+        self._table.customContextMenuRequested.connect(
+            self._show_row_menu)
 
-        lay.addWidget(_hline())
+        pose_layout.addWidget(_hline())
 
-        # Bottom buttons
+        # Bottom action buttons (pose-level Add/Apply/Connect/etc.).
         btn_row = QtWidgets.QHBoxLayout()
         self._btn_add        = QtWidgets.QPushButton(tr("add_pose"))
         self._btn_apply      = QtWidgets.QPushButton(tr("apply"))
@@ -188,7 +188,12 @@ class _PoseEditorPanel(CollapsibleFrame):
         self._btn_connect.clicked.connect(self.connectRequested)
         self._btn_disconnect.clicked.connect(self.disconnectRequested)
         self._btn_reload.clicked.connect(self.reloadRequested)
-        lay.addLayout(btn_row)
+        pose_layout.addLayout(btn_row)
+
+        self._outer_tabs.addTab(pose_widget, tr("tab_pose"))
+
+        # Default to the DriverDriven tab being active.
+        self._outer_tabs.setCurrentIndex(0)
 
     # -- public --
 
@@ -228,9 +233,13 @@ class _PoseEditorPanel(CollapsibleFrame):
         self.set_title(tr("rbf_pose_editor"))
         self._cb_auto.setText(tr("auto_fill_bs"))
         self._lbl_poses.setText(tr("poses"))
-        # M_TABBED_EDITOR_INTEGRATION: the legacy driver_list /
-        # driven_list AttributeList widgets are gone; the tabbed
-        # editors carry their own retranslate.
+        # M_TABBED_EDITOR_REWRITE: refresh outer tab labels +
+        # delegate to embedded tabbed editors.
+        try:
+            self._outer_tabs.setTabText(0, tr("tab_driver_driven"))
+            self._outer_tabs.setTabText(1, tr("tab_pose"))
+        except (AttributeError, TypeError):
+            pass
         try:
             self._driver_editor.retranslate()
         except AttributeError:

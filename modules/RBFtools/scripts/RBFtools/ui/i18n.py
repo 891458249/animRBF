@@ -397,6 +397,12 @@ _EN = {
     #    Driver Sources / Driven Targets sections are removed; the
     #    output-encoding combo gets its own slim collapsible header. --
     "section_output_encoding":         "Output Encoding",
+    # -- M_TABBED_EDITOR_REWRITE (2026-04-27 strict spec): outer
+    #    DriverDriven tab + per-panel Add Driver / Add Driven btns. --
+    "tab_driver_driven":               "DriverDriven",
+    "tab_pose":                        "Pose",
+    "btn_add_driver":                  "Add Driver",
+    "btn_add_driven":                  "Add Driven",
 }
 
 _ZH = {
@@ -741,6 +747,11 @@ _ZH = {
     "driver_source_weight_label":      u"\u6743\u91cd\uff1a",
     "driver_source_encoding_label":    u"\u7f16\u7801\uff1a",
     "section_output_encoding":         u"\u8f93\u51fa\u7f16\u7801",
+    # M_TABBED_EDITOR_REWRITE (2026-04-27 strict spec)
+    "tab_driver_driven":               u"\u9a71\u52a8/\u88ab\u9a71\u52a8",
+    "tab_pose":                        u"\u59ff\u52bf",
+    "btn_add_driver":                  u"\u6dfb\u52a0\u9a71\u52a8",
+    "btn_add_driven":                  u"\u6dfb\u52a0\u88ab\u9a71\u52a8",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}
