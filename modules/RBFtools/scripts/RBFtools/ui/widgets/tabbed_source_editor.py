@@ -251,20 +251,31 @@ class _TabbedSourceEditorBase(QtWidgets.QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
 
+        # Header row: bold label + ALWAYS-visible "+" Add button.
+        # The + button used to live as a QTabWidget corner widget
+        # but corner widgets disappear when the QTabWidget is
+        # itself hidden (empty state) - the TD then sees the empty
+        # hint with no way to add a tab. Pulling + out into a
+        # standalone header button fixes that (2026-04-27 user
+        # report: "you removed my UI updates" - tabs were rendered
+        # but the empty-state hid the Add button).
+        header_row = QtWidgets.QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
         self._lbl_header = QtWidgets.QLabel(tr(self._header_key))
         self._lbl_header.setStyleSheet("font-weight: bold;")
-        lay.addWidget(self._lbl_header)
+        header_row.addWidget(self._lbl_header)
+        header_row.addStretch(1)
+        self._btn_add = QtWidgets.QToolButton()
+        self._btn_add.setText("+")
+        self._btn_add.setToolTip(tr("source_tab_add_tip"))
+        self._btn_add.setMinimumWidth(28)
+        self._btn_add.clicked.connect(self.addRequested)
+        header_row.addWidget(self._btn_add)
+        lay.addLayout(header_row)
 
         self._tabs = QtWidgets.QTabWidget()
         self._tabs.setTabsClosable(True)
         self._tabs.tabCloseRequested.connect(self._on_tab_close)
-        # "+" corner widget acts as Add button.
-        self._btn_add = QtWidgets.QToolButton()
-        self._btn_add.setText("+")
-        self._btn_add.setToolTip(tr("source_tab_add_tip"))
-        self._btn_add.clicked.connect(self.addRequested)
-        self._tabs.setCornerWidget(
-            self._btn_add, QtCore.Qt.TopRightCorner)
         lay.addWidget(self._tabs, 1)
 
         self._lbl_empty_hint = QtWidgets.QLabel(tr(self._empty_hint_key))
