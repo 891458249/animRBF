@@ -537,6 +537,27 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # ---- Node selector ----
         self._node_sel = NodeSelector()
         root.addWidget(self._node_sel)
+        # Phase 3 (2026-04-27): header naming-mode radio group +
+        # the LongName/ShortName/NiceName labels surfaced by the
+        # AnimaRbfSolver reference. The picked mode drives how
+        # node names render in the embedded tabbed editors +
+        # pose grid headers via core.format_node_for_display.
+        name_mode_row = QtWidgets.QHBoxLayout()
+        name_mode_row.setContentsMargins(4, 0, 4, 0)
+        self._rb_name_long = QtWidgets.QRadioButton(tr("name_long"))
+        self._rb_name_short = QtWidgets.QRadioButton(tr("name_short"))
+        self._rb_name_nice = QtWidgets.QRadioButton(tr("name_nice"))
+        self._rb_name_long.setChecked(True)
+        self._name_mode_group = QtWidgets.QButtonGroup(self)
+        self._name_mode_group.addButton(self._rb_name_long, 0)
+        self._name_mode_group.addButton(self._rb_name_short, 1)
+        self._name_mode_group.addButton(self._rb_name_nice, 2)
+        for rb in (self._rb_name_long,
+                   self._rb_name_short,
+                   self._rb_name_nice):
+            name_mode_row.addWidget(rb)
+        name_mode_row.addStretch(1)
+        root.addLayout(name_mode_row)
         root.addWidget(_hline())
 
         # ---- Scrollable sections ----
@@ -581,11 +602,44 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         _oe_row.addWidget(self._output_encoding_combo, 1)
         self._output_encoding_section.add_layout(_oe_row)
 
+        # Phase 3 (Utility section 2026-04-27): below the pose
+        # editor, expose the AnimaRbfSolver "Utility" panel -
+        # Split RBFSolver For Each Joint + cleanup tools (Remove
+        # Connectionless Input/Output, Remove Redundant Pose).
+        self._utility_section = CollapsibleFrame(
+            tr("section_utility"), collapsed=True)
+        self._btn_split_solver = QtWidgets.QPushButton(
+            tr("btn_split_solver_per_joint"))
+        self._btn_split_solver.setToolTip(
+            tr("btn_split_solver_per_joint_tip"))
+        self._utility_section.add_widget(self._btn_split_solver)
+        # Cleanup mode radio group + execute button.
+        cleanup_row = QtWidgets.QHBoxLayout()
+        self._rb_cleanup_in = QtWidgets.QRadioButton(
+            tr("rb_remove_connectionless_input"))
+        self._rb_cleanup_out = QtWidgets.QRadioButton(
+            tr("rb_remove_connectionless_output"))
+        self._rb_cleanup_pose = QtWidgets.QRadioButton(
+            tr("rb_remove_redundant_pose"))
+        self._rb_cleanup_in.setChecked(True)
+        self._cleanup_group = QtWidgets.QButtonGroup(self)
+        self._cleanup_group.addButton(self._rb_cleanup_in, 0)
+        self._cleanup_group.addButton(self._rb_cleanup_out, 1)
+        self._cleanup_group.addButton(self._rb_cleanup_pose, 2)
+        cleanup_row.addWidget(self._rb_cleanup_in)
+        cleanup_row.addWidget(self._rb_cleanup_out)
+        cleanup_row.addWidget(self._rb_cleanup_pose)
+        self._utility_section.add_layout(cleanup_row)
+        self._btn_run_cleanup = QtWidgets.QPushButton(
+            tr("btn_remove_unnecessary_datas"))
+        self._utility_section.add_widget(self._btn_run_cleanup)
+
         self._sections.addWidget(self._general)
         self._sections.addWidget(self._va_section)
         self._sections.addWidget(self._rbf_section)
         self._sections.addWidget(self._output_encoding_section)
         self._sections.addWidget(self._pose_editor)
+        self._sections.addWidget(self._utility_section)
         self._sections.addStretch()
 
         scroll.setWidget(scroll_widget)
@@ -1060,6 +1114,29 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         ctrl.nodesRefreshed.connect(
             lambda _names: self._reload_driven_sources())
 
+        # ---- Phase 3: Header naming radios + Utility section -------
+        # Header naming radios drive controller.set_name_display_mode;
+        # the controller emits nameDisplayModeChanged which causes a
+        # source reload cascade so the tabbed editors + pose grid
+        # re-render node labels through core.format_node_for_display.
+        self._rb_name_long.toggled.connect(
+            lambda checked: checked
+            and ctrl.set_name_display_mode("long"))
+        self._rb_name_short.toggled.connect(
+            lambda checked: checked
+            and ctrl.set_name_display_mode("short"))
+        self._rb_name_nice.toggled.connect(
+            lambda checked: checked
+            and ctrl.set_name_display_mode("nice"))
+        ctrl.nameDisplayModeChanged.connect(
+            lambda _mode: (self._reload_driver_sources(),
+                           self._reload_driven_sources()))
+        # Utility section buttons.
+        self._btn_split_solver.clicked.connect(
+            self._on_split_solver_clicked)
+        self._btn_run_cleanup.clicked.connect(
+            self._on_run_cleanup_clicked)
+
     # =================================================================
     #  Deferred init
     # =================================================================
@@ -1400,6 +1477,36 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._ctrl.pose_model.update_pose_values(
                 int(pose_idx), new_inputs, new_values)
         except AttributeError:
+            pass
+
+    # ----- Phase 3 Utility slot handlers -----------------------------
+
+    def _on_split_solver_clicked(self):
+        """Phase 3 Utility: forward to controller stub which surfaces
+        a 'deferred' warning. UI is wired so the AnimaRbfSolver
+        layout matches the reference; the splitter logic itself
+        lands separately."""
+        self._ctrl.split_solver_for_each_joint()
+
+    def _on_run_cleanup_clicked(self):
+        """Phase 3 Utility: dispatch to the active cleanup radio's
+        controller method + surface a status message with the count
+        removed."""
+        idx = self._cleanup_group.checkedId()
+        if idx == 0:
+            n = self._ctrl.cleanup_remove_connectionless_inputs()
+            key = "status_cleanup_input_removed"
+        elif idx == 1:
+            n = self._ctrl.cleanup_remove_connectionless_outputs()
+            key = "status_cleanup_output_removed"
+        elif idx == 2:
+            n = self._ctrl.cleanup_remove_redundant_poses()
+            key = "status_cleanup_pose_removed"
+        else:
+            return
+        try:
+            self._show_status(tr(key).format(n=int(n or 0)))
+        except (AttributeError, KeyError):
             pass
 
     def _resolve_available_attrs_per_source(self, sources):

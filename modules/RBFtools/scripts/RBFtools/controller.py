@@ -70,12 +70,21 @@ class MainController(QtCore.QObject):
     # driven side. Emitted after every add_driven_source /
     # remove_driven_source / set_driven_source_attrs mutation.
     drivenSourcesChanged = QtCore.Signal()
+    # Phase 3 (Header naming radio 2026-04-27): emitted whenever
+    # the TD picks a different LongName / ShortName / NiceName mode.
+    # Subscribers re-render any displayed node names through
+    # core.format_node_for_display.
+    nameDisplayModeChanged = QtCore.Signal(str)
 
     def __init__(self, parent=None):
         super(MainController, self).__init__(parent)
 
         self._current_node = ""
         self._auto_fill    = False
+        # Phase 3: TD-controlled node-name display mode for the
+        # inspector. Pure UI concern - the underlying scene names
+        # are unchanged; only the surface representation toggles.
+        self._name_display_mode = "long"
 
         # The single pose data model — shared with the QTableView
         self._pose_model = PoseTableModel(self)
@@ -383,6 +392,91 @@ class MainController(QtCore.QObject):
         if ok:
             self.drivenSourcesChanged.emit()
         return ok
+
+    # ------------------------------------------------------------------
+    # Phase 3 - Header naming display mode + Utility cleanup
+    # ------------------------------------------------------------------
+
+    @property
+    def name_display_mode(self):
+        return self._name_display_mode
+
+    def set_name_display_mode(self, mode):
+        """Phase 3 (Header naming radio 2026-04-27): pick the active
+        LongName / ShortName / NiceName mode. Emits
+        :attr:`nameDisplayModeChanged` for inspector subscribers."""
+        if mode not in ("long", "short", "nice"):
+            cmds.warning(
+                "set_name_display_mode: unknown mode {!r}".format(mode))
+            return
+        if self._name_display_mode == mode:
+            return
+        self._name_display_mode = mode
+        self.nameDisplayModeChanged.emit(mode)
+
+    def cleanup_remove_connectionless_inputs(self):
+        """Phase 3 (Utility - cleanup tools): forward to
+        core helper. Returns the number of input[] indices removed."""
+        if not self._current_node:
+            cmds.warning(
+                "cleanup_remove_connectionless_inputs: no current node")
+            return 0
+        try:
+            n = core.cleanup_remove_connectionless_inputs(
+                self._current_node)
+        except Exception as exc:
+            cmds.warning(
+                "cleanup_remove_connectionless_inputs failed: "
+                "{}".format(exc))
+            return 0
+        # Source list may have shifted - re-emit so the editor
+        # rebuilds.
+        self.driverSourcesChanged.emit()
+        return n
+
+    def cleanup_remove_connectionless_outputs(self):
+        if not self._current_node:
+            cmds.warning(
+                "cleanup_remove_connectionless_outputs: no current node")
+            return 0
+        try:
+            n = core.cleanup_remove_connectionless_outputs(
+                self._current_node)
+        except Exception as exc:
+            cmds.warning(
+                "cleanup_remove_connectionless_outputs failed: "
+                "{}".format(exc))
+            return 0
+        self.drivenSourcesChanged.emit()
+        return n
+
+    def cleanup_remove_redundant_poses(self):
+        if not self._current_node:
+            cmds.warning(
+                "cleanup_remove_redundant_poses: no current node")
+            return 0
+        try:
+            n = core.cleanup_remove_redundant_poses(
+                self._current_node)
+        except Exception as exc:
+            cmds.warning(
+                "cleanup_remove_redundant_poses failed: "
+                "{}".format(exc))
+            return 0
+        return n
+
+    def split_solver_for_each_joint(self):
+        """Phase 3 (Utility - Split RBFSolver For Each Joint): the
+        core implementation is non-trivial (decomposing a multi-
+        driven node into per-joint copies) and is out of scope for
+        the Phase 3 commit. Surfaced as a warning so the TD knows
+        the button is wired but execution is deferred."""
+        cmds.warning(
+            "Split RBFSolver For Each Joint: implementation "
+            "deferred to a follow-up sub-task. The button is "
+            "registered + wired; the solver decomposition logic "
+            "lands separately.")
+        return False
 
     def read_driven_sources(self):
         """Read current node's driven sources (multi). Returns

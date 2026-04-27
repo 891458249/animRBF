@@ -1382,6 +1382,122 @@ def remove_driver_source(node, index):
                 node, index, exc))
 
 
+def format_node_for_display(name, mode):
+    """Phase 3 (Header naming radio 2026-04-27): format a Maya node
+    name for display in the inspector per the active naming mode.
+
+      mode == "long"  -> long name with full DAG path
+      mode == "short" -> last-component short name
+      mode == "nice"  -> last-component name with leading
+                          namespace stripped
+
+    Pure string transformation - never queries Maya. Returns the
+    input name unchanged if the mode is unknown or transformation
+    fails.
+    """
+    if not name:
+        return ""
+    try:
+        if mode == "short":
+            # Last DAG component (everything after final '|').
+            return name.rsplit("|", 1)[-1]
+        if mode == "nice":
+            short = name.rsplit("|", 1)[-1]
+            return short.rsplit(":", 1)[-1]   # strip namespace
+        # default + "long"
+        return name
+    except Exception:
+        return name
+
+
+def cleanup_remove_connectionless_inputs(node):
+    """Phase 3 (Utility - cleanup tools): walk shape.input[] and
+    remove every multi-index whose plug has no incoming connection.
+
+    Returns the number of indices removed; 0 on no-op or failure.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+    try:
+        indices = cmds.getAttr(
+            shape + ".input", multiIndices=True) or []
+    except Exception:
+        return 0
+    removed = 0
+    for d in list(indices):
+        plug = "{}.input[{}]".format(shape, d)
+        try:
+            srcs = cmds.listConnections(
+                plug, source=True, destination=False) or []
+        except Exception:
+            srcs = []
+        if not srcs:
+            try:
+                cmds.removeMultiInstance(plug, b=True)
+                removed += 1
+            except Exception:
+                pass
+    return removed
+
+
+def cleanup_remove_connectionless_outputs(node):
+    """Phase 3: walk shape.output[] and remove every multi-index
+    whose plug has no outgoing connection."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+    try:
+        indices = cmds.getAttr(
+            shape + ".output", multiIndices=True) or []
+    except Exception:
+        return 0
+    removed = 0
+    for d in list(indices):
+        plug = "{}.output[{}]".format(shape, d)
+        try:
+            dests = cmds.listConnections(
+                plug, source=False, destination=True) or []
+        except Exception:
+            dests = []
+        if not dests:
+            try:
+                cmds.removeMultiInstance(plug, b=True)
+                removed += 1
+            except Exception:
+                pass
+    return removed
+
+
+def cleanup_remove_redundant_poses(node):
+    """Phase 3: walk shape.poses[] and remove poses whose inputs
+    AND values exactly match an earlier pose. This is the
+    'same pose data / same value in all poses' cleanup the
+    AnimaRbfSolver reference exposes."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+    poses = read_all_poses(node)
+    seen = []
+    to_remove = []
+    for p in poses:
+        sig = (tuple(p.inputs), tuple(p.values))
+        if sig in seen:
+            to_remove.append(p.index)
+        else:
+            seen.append(sig)
+    removed = 0
+    # High-to-low so logical indices stay valid as we go.
+    for idx in sorted(to_remove, reverse=True):
+        plug = "{}.poses[{}]".format(shape, idx)
+        try:
+            cmds.removeMultiInstance(plug, b=True)
+            removed += 1
+        except Exception:
+            pass
+    return removed
+
+
 def disconnect_driver_source_attrs(node, index):
     """M_DISCONNECT_FIX (Phase 1, P0 critical fix 2026-04-27): true
     disconnect for a single driver source - directly disconnects

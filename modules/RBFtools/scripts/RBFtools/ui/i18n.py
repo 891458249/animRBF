@@ -459,6 +459,28 @@ _EN = {
     "pose_grid_delete_all_tip":
         "Remove every pose entry from the active node.",
     "delete_poses":                    "Delete Poses",
+    # -- Phase 3: Header naming radio + Utility section --
+    "name_long":                       "LongName",
+    "name_short":                      "ShortName",
+    "name_nice":                       "NiceName",
+    "section_utility":                 "Utility",
+    "btn_split_solver_per_joint":      "Split RBFSolver For Each Joint",
+    "btn_split_solver_per_joint_tip":
+        "Decompose this multi-driven RBF node into one node per "
+        "driven joint (deferred to a follow-up sub-task).",
+    "rb_remove_connectionless_input":
+        "Remove Connectionless Input",
+    "rb_remove_connectionless_output":
+        "Remove Connectionless Output",
+    "rb_remove_redundant_pose":
+        "Remove Pose (Same Pose Data / Same Value In All Poses)",
+    "btn_remove_unnecessary_datas":    "Remove Unnecessary Datas",
+    "status_cleanup_input_removed":
+        "Removed {n} connectionless input slot(s).",
+    "status_cleanup_output_removed":
+        "Removed {n} connectionless output slot(s).",
+    "status_cleanup_pose_removed":
+        "Removed {n} redundant pose entry/entries.",
 }
 
 _ZH = {
@@ -851,6 +873,22 @@ _ZH = {
     "pose_grid_delete_all_tip":
         u"\u6e05\u7a7a\u8be5\u8282\u70b9\u7684\u5168\u90e8\u59ff\u52bf\u9879\u3002",
     "delete_poses":                    u"\u5220\u9664\u59ff\u52bf",
+    # Phase 3 Header naming + Utility \u6bb5
+    "name_long":                       u"\u957f\u540d\u79f0",
+    "name_short":                      u"\u77ed\u540d\u79f0",
+    "name_nice":                       u"\u53cb\u597d\u540d\u79f0",
+    "section_utility":                 u"\u5de5\u5177",
+    "btn_split_solver_per_joint":      u"\u6309\u9aa8\u9abc\u62c6\u5206 RBF \u6c42\u89e3\u5668",
+    "btn_split_solver_per_joint_tip":
+        u"\u5c06\u8be5\u591a\u88ab\u9a71\u52a8\u7684 RBF \u8282\u70b9\u62c6\u5206\u4e3a\u6bcf\u88ab\u9a71\u52a8\u9aa8\u9abc\u4e00\u4e2a\u8282\u70b9"
+        u"\uff08\u529f\u80fd\u63a8\u8fdf\u5230\u540e\u7eed\u5b50\u4efb\u52a1\uff09\u3002",
+    "rb_remove_connectionless_input":  u"\u6e05\u7406\u672a\u8fde\u63a5\u7684\u8f93\u5165",
+    "rb_remove_connectionless_output": u"\u6e05\u7406\u672a\u8fde\u63a5\u7684\u8f93\u51fa",
+    "rb_remove_redundant_pose":        u"\u6e05\u7406\u5197\u4f59\u59ff\u52bf\uff08\u6570\u636e\u5b8c\u5168\u76f8\u540c\uff09",
+    "btn_remove_unnecessary_datas":    u"\u6267\u884c\u6e05\u7406",
+    "status_cleanup_input_removed":    u"\u5df2\u6e05\u7406 {n} \u4e2a\u672a\u8fde\u63a5\u7684\u8f93\u5165\u69fd\u3002",
+    "status_cleanup_output_removed":   u"\u5df2\u6e05\u7406 {n} \u4e2a\u672a\u8fde\u63a5\u7684\u8f93\u51fa\u69fd\u3002",
+    "status_cleanup_pose_removed":     u"\u5df2\u6e05\u7406 {n} \u4e2a\u5197\u4f59\u59ff\u52bf\u9879\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}
