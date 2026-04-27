@@ -1514,21 +1514,25 @@ class MainController(QtCore.QObject):
         self.statusMessage.emit("Routed connect complete.")
 
     def disconnect_routed(self, driver_targets, driven_targets):
-        """Tab-aware Disconnect — symmetric to connect_routed. Logs
-        cmds.warning when a target plug is not actually connected to
-        the solver (no silent failure)."""
+        """Tab-aware Disconnect — Scene A/B/C dispatch.
+
+        Returns ``{"disconnected_count": int}`` straight from
+        :func:`core.disconnect_routed` so main_window can surface a
+        Scene-C UI dialog when the scope produced zero disconnects."""
         node = self._current_node
         if not node or not cmds.objExists(node):
             cmds.warning(
                 "disconnect_routed: no active RBFtools node.")
-            return
+            return {"disconnected_count": 0}
         if not driver_targets and not driven_targets:
             cmds.warning(
                 "disconnect_routed: empty scope on both sides; "
                 "nothing to disconnect.")
-            return
-        core.disconnect_routed(node, driver_targets, driven_targets)
+            return {"disconnected_count": 0}
+        result = core.disconnect_routed(
+            node, driver_targets, driven_targets)
         self.statusMessage.emit("Routed disconnect complete.")
+        return result
 
     def _validate_apply_args(self, driver_node, driven_node,
                              driver_attrs, driven_attrs):

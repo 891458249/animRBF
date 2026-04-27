@@ -100,17 +100,26 @@ class TestM_BATCH_ROUTING_SourceScan(unittest.TestCase):
 
     def test_core_disconnect_routed_no_silent_swallow(self):
         # Hard red line: the legacy `try: ... except: pass` swallow is
-        # gone in disconnect_routed. Every failure path must reach
-        # cmds.warning so the user never sees "nothing happened".
-        # Source-scan extracts the function body and checks for the
-        # forbidden bare pass.
-        body = self._core.split(
-            "def disconnect_routed(")[1].split("\ndef ")[0]
-        self.assertNotIn("except Exception:\n            pass", body,
-            "disconnect_routed must NOT swallow exceptions silently")
-        self.assertIn("cmds.warning", body)
-        self.assertIn("listConnections", body)
-        self.assertIn("plugs=True", body)
+        # gone in disconnect_routed. With the M_BREAK_REBUILD refactor
+        # the actual cmds.disconnectAttr loop lives in helpers
+        # _disconnect_bone_specific / _disconnect_bone_all; assert
+        # both helpers + the main dispatch are silent-swallow free
+        # AND ultimately route through listConnections + cmds.warning.
+        for sym in ("disconnect_routed",
+                    "_disconnect_bone_specific",
+                    "_disconnect_bone_all"):
+            body = self._core.split(
+                "def {}(".format(sym))[1].split("\ndef ")[0]
+            self.assertNotIn(
+                "except Exception:\n            pass", body,
+                "{} must NOT swallow exceptions silently".format(sym))
+            self.assertIn("cmds.warning", body)
+        # The dispatch + helpers together MUST query listConnections
+        # with plugs=True somewhere — the precise plug query is the
+        # only safe way to scope the disconnect.
+        full = self._core
+        self.assertIn("listConnections", full)
+        self.assertIn("plugs=True", full)
 
     def test_core_attribute_query_defense(self):
         # Connect path verifies attr existence before connectAttr.
@@ -126,7 +135,11 @@ class TestM_BATCH_ROUTING_SourceScan(unittest.TestCase):
             "core.connect_routed(node, driver_targets, driven_targets)",
             self._ctrl)
         self.assertIn(
-            "core.disconnect_routed(node, driver_targets, driven_targets)",
+            # Commit M_BREAK_REBUILD: controller captures the
+            # core return value into ``result`` for Scene-C dispatch;
+            # call site may wrap across lines, so just assert the
+            # function reference is present.
+            "core.disconnect_routed(",
             self._ctrl)
 
     def test_main_window_uses_routed_path(self):

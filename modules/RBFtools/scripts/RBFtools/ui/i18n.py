@@ -492,6 +492,9 @@ _EN = {
     "source_tab_batch_tip":
         "When unchecked, panel Connect / Disconnect operate ONLY on "
         "the active tab. When checked, every tab is included.",
+    "disconnect_no_connections_found":
+        "The selected target has no attributes connected to this "
+        "RBF node.",
 }
 
 _ZH = {
@@ -912,6 +915,8 @@ _ZH = {
     "source_tab_batch_tip":
         u"\u672a\u52fe\u9009\uff1a\u9762\u677f\u7684\u8fde\u63a5/\u65ad\u5f00\u4ec5\u5bf9\u5f53\u524d\u6fc0\u6d3b\u6807\u7b7e\u9875\u751f\u6548\uff1b"
         u"\u5df2\u52fe\u9009\uff1a\u904d\u5386\u6240\u6709\u6807\u7b7e\u9875\u3002",
+    "disconnect_no_connections_found":
+        u"\u8be5\u76ee\u6807\u6ca1\u6709\u4efb\u4f55\u5c5e\u6027\u8fde\u63a5\u5230\u6b64\u8282\u70b9",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

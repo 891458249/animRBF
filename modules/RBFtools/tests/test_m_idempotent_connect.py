@@ -44,17 +44,23 @@ class TestM_IDEMPOTENT_SourceScan(unittest.TestCase):
         self.assertIn("def _src_already_drives_node", self._core)
         self.assertIn("def _node_already_drives_dst", self._core)
 
-    def test_connect_routed_uses_dedup(self):
+    def test_connect_routed_uses_break_then_rebuild(self):
+        # M_BREAK_REBUILD (2026-04-28) supersedes the old
+        # _src_already_drives_node / next_input_idx scheme. The new
+        # primitive is per-attr "if existing subscript -> disconnect
+        # -> reconnect to next free slot". Source-scan asserts the
+        # new helpers are referenced and the explicit
+        # cmds.disconnectAttr appears inside connect_routed.
         body = self._core.split(
             "def connect_routed(")[1].split("\ndef ")[0]
-        self.assertIn("_src_already_drives_node(src, node)", body)
-        self.assertIn("_node_already_drives_dst(node, dst)", body)
-        # Skip path must `continue` so the input[i] cursor does NOT
-        # advance for skipped sources — otherwise a sparse-cursor
-        # scenario would leak an empty slot.
-        self.assertIn("continue", body)
-        self.assertIn("next_input_idx", body)
-        self.assertIn("next_output_idx", body)
+        self.assertIn("_subscript_of_existing_input", body)
+        self.assertIn("_subscript_of_existing_output", body)
+        self.assertIn("_next_free_subscript", body)
+        self.assertIn("cmds.disconnectAttr", body,
+            "connect_routed must explicitly break the prior wire "
+            "before re-binding to the next free slot — break-then-"
+            "rebuild is the ONLY safe path against multi-array "
+            "stacking.")
 
     def test_dedup_walks_listConnections(self):
         body = self._core.split(

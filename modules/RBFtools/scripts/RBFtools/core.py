@@ -23,6 +23,7 @@ from __future__ import absolute_import
 
 import contextlib
 import math
+import re
 import warnings
 from dataclasses import dataclass
 
@@ -3494,6 +3495,79 @@ def connect_poses(node, driver_node, driven_node,
         cmds.setAttr(shape + ".evaluate", 1)
 
 
+_RBF_SUBSCRIPT_RE = re.compile(r"\[(\d+)\]$")
+
+
+def _occupied_input_subscripts(shape):
+    """Return the set of subscripts where ``shape.input[i]`` currently
+    has an incoming connection. Walked via ``cmds.listConnections``
+    on the parent multi-attr with ``connections=True, plugs=True``;
+    pairs come back as ``[shape.input[i], src_plug, ...]``."""
+    conns = cmds.listConnections(
+        shape + ".input", source=True, destination=False,
+        plugs=True, connections=True) or []
+    out = set()
+    for k in range(0, len(conns), 2):
+        m = _RBF_SUBSCRIPT_RE.search(conns[k])
+        if m:
+            out.add(int(m.group(1)))
+    return out
+
+
+def _occupied_output_subscripts(shape):
+    """Twin of :func:`_occupied_input_subscripts` for the driven side
+    — ``shape.output[i]`` driving an external attr."""
+    conns = cmds.listConnections(
+        shape + ".output", source=False, destination=True,
+        plugs=True, connections=True) or []
+    out = set()
+    for k in range(0, len(conns), 2):
+        m = _RBF_SUBSCRIPT_RE.search(conns[k])
+        if m:
+            out.add(int(m.group(1)))
+    return out
+
+
+def _next_free_subscript(occupied):
+    """Return the smallest non-negative int not in ``occupied``."""
+    i = 0
+    while i in occupied:
+        i += 1
+    return i
+
+
+def _subscript_of_existing_input(bone_plug, shape):
+    """If ``bone_plug`` is already connected to some
+    ``shape.input[i]``, return ``i``; else None. Only the FIRST
+    matching subscript is returned — break-then-rebuild guarantees
+    only one wire per source anyway."""
+    conns = cmds.listConnections(
+        bone_plug, source=False, destination=True,
+        plugs=True) or []
+    prefix = "{}.input[".format(shape)
+    for plug in conns:
+        if plug.startswith(prefix):
+            m = _RBF_SUBSCRIPT_RE.search(plug)
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def _subscript_of_existing_output(shape, dst_plug):
+    """Twin: if ``dst_plug`` is driven by some ``shape.output[i]``,
+    return ``i``; else None."""
+    conns = cmds.listConnections(
+        dst_plug, source=True, destination=False,
+        plugs=True) or []
+    prefix = "{}.output[".format(shape)
+    for plug in conns:
+        if plug.startswith(prefix):
+            m = _RBF_SUBSCRIPT_RE.search(plug)
+            if m:
+                return int(m.group(1))
+    return None
+
+
 def _src_already_drives_node(src_plug, target_node):
     """2026-04-28 (M_IDEMPOTENT_CONNECT): True iff ``src_plug`` is
     already connected (in any form) to ANY plug on the RBF target.
@@ -3630,39 +3704,64 @@ def connect_routed(node, driver_targets, driven_targets):
 
     with undo_chunk("RBFtools: connect routed"), \
          _node_state_frozen(shape):
-        # M_IDEMPOTENT_CONNECT (2026-04-28): per-source dedup so a
-        # fresh Connect click is a strict no-op when the wire already
-        # exists. Same source MUST NEVER feed two RBF input slots
-        # — caller is expected to Disconnect first if they want to
-        # relocate an existing connection.
-        next_input_idx = 0
+        # M_BREAK_REBUILD (2026-04-28): per-attr per-bone
+        # break-then-rebuild. For every (bone, attr) in the
+        # blueprint scope:
+        #   1. If bone.attr is already wired to shape.input[X],
+        #      cmds.warning + disconnect it (frees slot X).
+        #   2. Find the lowest-numbered free subscript on
+        #      shape.input[].
+        #   3. Connect bone.attr -> shape.input[free].
+        # The "break" step eliminates cross-click stacking
+        # (the same source CANNOT end up driving two slots);
+        # the "next free slot" step keeps the wires packed
+        # contiguously and matches user blueprint order.
         for src in drv_plugs:
-            if _src_already_drives_node(src, node):
+            existing = _subscript_of_existing_input(src, shape)
+            if existing is not None:
                 cmds.warning(
-                    "connect_routed: {} already drives the RBF node "
-                    "{}; skipping (Disconnect first to relocate)."
-                    .format(src, node))
-                continue
-            dst = "{}.input[{}]".format(shape, next_input_idx)
+                    "connect_routed: {} already at {}.input[{}]; "
+                    "resetting...".format(src, shape, existing))
+                try:
+                    cmds.disconnectAttr(
+                        src,
+                        "{}.input[{}]".format(shape, existing))
+                except Exception as exc:
+                    cmds.warning(
+                        "connect_routed: pre-reset disconnect "
+                        "failed at input[{}]: {}".format(
+                            existing, exc))
+            occupied = _occupied_input_subscripts(shape)
+            free_idx = _next_free_subscript(occupied)
+            dst = "{}.input[{}]".format(shape, free_idx)
             try:
                 cmds.connectAttr(src, dst, force=True)
-                next_input_idx += 1
             except Exception as exc:
                 cmds.warning(
                     "connect_routed: {} → {} failed: {}".format(
                         src, dst, exc))
-        next_output_idx = 0
+
         for dst in dvn_plugs:
-            if _node_already_drives_dst(node, dst):
+            existing = _subscript_of_existing_output(shape, dst)
+            if existing is not None:
                 cmds.warning(
-                    "connect_routed: {} is already driven by RBF "
-                    "node {}; skipping (Disconnect first to "
-                    "relocate).".format(dst, node))
-                continue
-            src = "{}.output[{}]".format(shape, next_output_idx)
+                    "connect_routed: {} already driven by "
+                    "{}.output[{}]; resetting...".format(
+                        dst, shape, existing))
+                try:
+                    cmds.disconnectAttr(
+                        "{}.output[{}]".format(shape, existing),
+                        dst)
+                except Exception as exc:
+                    cmds.warning(
+                        "connect_routed: pre-reset disconnect "
+                        "failed at output[{}]: {}".format(
+                            existing, exc))
+            occupied = _occupied_output_subscripts(shape)
+            free_idx = _next_free_subscript(occupied)
+            src = "{}.output[{}]".format(shape, free_idx)
             try:
                 cmds.connectAttr(src, dst, force=True)
-                next_output_idx += 1
             except Exception as exc:
                 cmds.warning(
                     "connect_routed: {} → {} failed: {}".format(
@@ -3680,90 +3779,149 @@ def connect_routed(node, driver_targets, driven_targets):
             "{}".format(exc))
 
 
-def disconnect_routed(node, driver_targets, driven_targets):
-    """2026-04-28 (M_BATCH_ROUTING): tab-aware Disconnect — symmetric
-    to :func:`connect_routed`.
+def _disconnect_bone_specific(shape, bone, attr, side):
+    """Disconnect ``bone.attr`` from ``shape.<side>[]`` if such a wire
+    exists. ``side`` is ``"input"`` (driver-side) or ``"output"``
+    (driven-side). Returns the count of edges actually broken."""
+    if not _exists(bone):
+        cmds.warning(
+            "disconnect: bone {!r} missing; skipping".format(bone))
+        return 0
+    if not cmds.attributeQuery(attr, node=bone, exists=True):
+        cmds.warning(
+            "disconnect: {}.{} does not exist; skipping".format(
+                bone, attr))
+        return 0
+    bone_plug = "{}.{}".format(bone, attr)
+    if side == "input":
+        conns = cmds.listConnections(
+            bone_plug, source=False, destination=True,
+            plugs=True, connections=True) or []
+        prefix = "{}.input[".format(shape)
+    else:
+        conns = cmds.listConnections(
+            bone_plug, source=True, destination=False,
+            plugs=True, connections=True) or []
+        prefix = "{}.output[".format(shape)
+    count = 0
+    for k in range(0, len(conns), 2):
+        a, b = conns[k], conns[k + 1]
+        if side == "input":
+            src_plug, dst_plug = a, b
+            if not dst_plug.startswith(prefix):
+                continue
+        else:
+            dst_plug, src_plug = a, b
+            if not src_plug.startswith(prefix):
+                continue
+        cmds.warning(
+            "disconnect: trying {} -> {}".format(
+                src_plug, dst_plug))
+        try:
+            cmds.disconnectAttr(src_plug, dst_plug)
+            count += 1
+        except Exception as exc:
+            cmds.warning(
+                "disconnect: {} -> {} FAILED: {}".format(
+                    src_plug, dst_plug, exc))
+    return count
 
-    For each ``(bone, attr)`` in scope:
-      * Query incoming/outgoing connections at the precise plug via
-        :func:`cmds.listConnections` with ``plugs=True``.
-      * Disconnect ONLY the pair that actually involves the solver
-        ``shape.input[]`` / ``shape.output[]`` (so unrelated rig
-        connections survive).
-      * No silent ``try/except: pass`` — every failure becomes
-        :func:`cmds.warning` output. Plugs without a connection log
-        an informational warning so the user never sees "nothing
-        happened".
+
+def _disconnect_bone_all(shape, bone, side):
+    """Disconnect EVERY wire between ``bone`` and ``shape.<side>[]``
+    — implements the empty-blueprint "clear this bone" Scene B.
+    Returns the count of edges actually broken."""
+    if not _exists(bone):
+        cmds.warning(
+            "disconnect: bone {!r} missing; skipping".format(bone))
+        return 0
+    if side == "input":
+        # Walk shape.input multi connections, keep pairs whose
+        # OTHER end lives on this bone.
+        conns = cmds.listConnections(
+            shape + ".input", source=True, destination=False,
+            plugs=True, connections=True) or []
+    else:
+        conns = cmds.listConnections(
+            shape + ".output", source=False, destination=True,
+            plugs=True, connections=True) or []
+    count = 0
+    for k in range(0, len(conns), 2):
+        shape_plug = conns[k]
+        other_plug = conns[k + 1]
+        other_node = other_plug.split(".")[0]
+        if other_node != bone:
+            continue
+        if side == "input":
+            src_plug, dst_plug = other_plug, shape_plug
+        else:
+            src_plug, dst_plug = shape_plug, other_plug
+        cmds.warning(
+            "disconnect: trying {} -> {}".format(
+                src_plug, dst_plug))
+        try:
+            cmds.disconnectAttr(src_plug, dst_plug)
+            count += 1
+        except Exception as exc:
+            cmds.warning(
+                "disconnect: {} -> {} FAILED: {}".format(
+                    src_plug, dst_plug, exc))
+    return count
+
+
+def disconnect_routed(node, driver_targets, driven_targets):
+    """2026-04-28 (M_BREAK_REBUILD): tab-aware Disconnect — Scene
+    A / B / C dispatch.
+
+      * Scene A — ``attrs`` is non-empty: precision-disconnect each
+        listed (bone, attr) pair from the RBF input/output multi.
+      * Scene B — ``attrs`` is empty: clear EVERY wire between this
+        bone and the RBF input/output multi (the "select tab, hit
+        Disconnect with no attrs highlighted" UX = clear the bone).
+      * Scene C — across the entire scope, zero wires are broken:
+        return ``{"disconnected_count": 0}`` so main_window can
+        surface a confirmDialog informing the user.
+
+    Returns ``{"disconnected_count": int}`` so callers can dispatch
+    the Scene-C UI dialog without coupling core to Qt.
     """
     shape = get_shape(node)
     if not _exists(shape):
-        cmds.warning("disconnect_routed: solver shape missing for "
-                     "{!r}".format(node))
-        return
+        cmds.warning(
+            "disconnect_routed: solver shape missing for "
+            "{!r}".format(node))
+        return {"disconnected_count": 0}
 
-    drv_plugs = _flatten_targets(driver_targets)
-    dvn_plugs = _flatten_targets(driven_targets)
-
+    total = 0
     with undo_chunk("RBFtools: disconnect routed"), \
          _node_state_frozen(shape):
-        # M_CRASH_FIX defense 2 (2026-04-28): same nodeState freeze
-        # as connect_routed — disconnectAttr also dirties the DG and
-        # can re-fire compute() while the array is shrinking.
-        # Driver side: bone.attr → shape.input[i]. List the OUTGOING
-        # connections of bone.attr; keep only those targeting THIS
-        # solver's input[] subscript.
-        for plug in drv_plugs:
-            conns = cmds.listConnections(
-                plug, source=False, destination=True,
-                plugs=True, connections=True) or []
-            hit = False
-            for k in range(0, len(conns), 2):
-                src_plug = conns[k]
-                dst_plug = conns[k + 1]
-                if not dst_plug.startswith(shape + ".input["):
-                    continue
-                hit = True
-                cmds.warning(
-                    "disconnect_routed: trying {} -> {}".format(
-                        src_plug, dst_plug))
-                try:
-                    cmds.disconnectAttr(src_plug, dst_plug)
-                except Exception as exc:
-                    cmds.warning(
-                        "disconnect_routed: {} -> {} FAILED: "
-                        "{}".format(src_plug, dst_plug, exc))
-            if not hit:
-                cmds.warning(
-                    "disconnect_routed: no input[] connection found "
-                    "for {} (skipped)".format(plug))
+        for bone, attrs in (driver_targets or []):
+            if not bone:
+                continue
+            if attrs:
+                for attr in attrs:
+                    total += _disconnect_bone_specific(
+                        shape, bone, attr, "input")
+            else:
+                total += _disconnect_bone_all(
+                    shape, bone, "input")
 
-        # Driven side: shape.output[i] → bone.attr. List the INCOMING
-        # connections of bone.attr; keep only those originating from
-        # THIS solver's output[] subscript.
-        for plug in dvn_plugs:
-            conns = cmds.listConnections(
-                plug, source=True, destination=False,
-                plugs=True, connections=True) or []
-            hit = False
-            for k in range(0, len(conns), 2):
-                dst_plug = conns[k]
-                src_plug = conns[k + 1]
-                if not src_plug.startswith(shape + ".output["):
-                    continue
-                hit = True
-                cmds.warning(
-                    "disconnect_routed: trying {} -> {}".format(
-                        src_plug, dst_plug))
-                try:
-                    cmds.disconnectAttr(src_plug, dst_plug)
-                except Exception as exc:
-                    cmds.warning(
-                        "disconnect_routed: {} -> {} FAILED: "
-                        "{}".format(src_plug, dst_plug, exc))
-            if not hit:
-                cmds.warning(
-                    "disconnect_routed: no output[] connection found "
-                    "for {} (skipped)".format(plug))
+        for bone, attrs in (driven_targets or []):
+            if not bone:
+                continue
+            if attrs:
+                for attr in attrs:
+                    total += _disconnect_bone_specific(
+                        shape, bone, attr, "output")
+            else:
+                total += _disconnect_bone_all(
+                    shape, bone, "output")
+
+    if total == 0:
+        cmds.warning(
+            "disconnect_routed: scope produced 0 disconnects "
+            "(Scene C — caller should surface a UI hint).")
+    return {"disconnected_count": int(total)}
 
 
 def connect_node(node, driver_node, driven_node,

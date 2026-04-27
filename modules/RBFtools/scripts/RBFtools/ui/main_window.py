@@ -1986,13 +1986,27 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._gather_routed_targets())
         self._set_interaction_enabled(False)
         self._is_updating = True
+        result = {"disconnected_count": 0}
         try:
-            self._ctrl.disconnect_routed(
-                driver_targets, driven_targets)
+            result = self._ctrl.disconnect_routed(
+                driver_targets, driven_targets) or result
         finally:
             self._is_updating = False
             self._set_interaction_enabled(True)
         self._refresh_pose_grid()
+        # M_BREAK_REBUILD Scene C (2026-04-28): zero disconnects
+        # surface a UI dialog so the user never sees "nothing
+        # happened". cmds.confirmDialog is layered above Qt so it
+        # survives any Qt event-loop quirk.
+        if int(result.get("disconnected_count", 0)) == 0:
+            try:
+                cmds.confirmDialog(
+                    title="RBFtools",
+                    message=tr("disconnect_no_connections_found"),
+                    button=["OK"], defaultButton="OK")
+            except Exception:
+                cmds.warning(tr(
+                    "disconnect_no_connections_found"))
 
     def _on_reload(self):
         """M_TABBED_EDITOR_INTEGRATION: reload the tabbed driver +
