@@ -3494,6 +3494,38 @@ def connect_poses(node, driver_node, driven_node,
         cmds.setAttr(shape + ".evaluate", 1)
 
 
+def _src_already_drives_node(src_plug, target_node):
+    """2026-04-28 (M_IDEMPOTENT_CONNECT): True iff ``src_plug`` is
+    already connected (in any form) to ANY plug on the RBF target.
+    Walks ``cmds.listConnections(src, destination=True, plugs=True)``
+    and matches both the transform and shape names so an existing
+    wire to ``shape.input[X]`` blocks a fresh wire to
+    ``shape.input[Y]`` — same source must NEVER feed two slots."""
+    target_shape = get_shape(target_node) or target_node
+    conns = cmds.listConnections(
+        src_plug, source=False, destination=True, plugs=True) or []
+    for dst_plug in conns:
+        dst_node = dst_plug.split(".")[0]
+        if dst_node == target_node or dst_node == target_shape:
+            return True
+    return False
+
+
+def _node_already_drives_dst(target_node, dst_plug):
+    """2026-04-28 (M_IDEMPOTENT_CONNECT): True iff ``dst_plug``
+    (a driven attribute, e.g. ``boneX.rotateY``) is already driven
+    by ANY ``output[i]`` on the RBF target. Symmetric to
+    :func:`_src_already_drives_node` for the driven side."""
+    target_shape = get_shape(target_node) or target_node
+    conns = cmds.listConnections(
+        dst_plug, source=True, destination=False, plugs=True) or []
+    for src_plug in conns:
+        src_node = src_plug.split(".")[0]
+        if src_node == target_node or src_node == target_shape:
+            return True
+    return False
+
+
 def _flatten_targets(targets):
     """Normalise ``[(node, [attr, ...]), ...]`` → flat list of
     ``"node.attr"`` plug strings, **dropping pairs where the node /
@@ -3598,18 +3630,39 @@ def connect_routed(node, driver_targets, driven_targets):
 
     with undo_chunk("RBFtools: connect routed"), \
          _node_state_frozen(shape):
-        for i, src in enumerate(drv_plugs):
-            dst = "{}.input[{}]".format(shape, i)
+        # M_IDEMPOTENT_CONNECT (2026-04-28): per-source dedup so a
+        # fresh Connect click is a strict no-op when the wire already
+        # exists. Same source MUST NEVER feed two RBF input slots
+        # — caller is expected to Disconnect first if they want to
+        # relocate an existing connection.
+        next_input_idx = 0
+        for src in drv_plugs:
+            if _src_already_drives_node(src, node):
+                cmds.warning(
+                    "connect_routed: {} already drives the RBF node "
+                    "{}; skipping (Disconnect first to relocate)."
+                    .format(src, node))
+                continue
+            dst = "{}.input[{}]".format(shape, next_input_idx)
             try:
                 cmds.connectAttr(src, dst, force=True)
+                next_input_idx += 1
             except Exception as exc:
                 cmds.warning(
                     "connect_routed: {} → {} failed: {}".format(
                         src, dst, exc))
-        for i, dst in enumerate(dvn_plugs):
-            src = "{}.output[{}]".format(shape, i)
+        next_output_idx = 0
+        for dst in dvn_plugs:
+            if _node_already_drives_dst(node, dst):
+                cmds.warning(
+                    "connect_routed: {} is already driven by RBF "
+                    "node {}; skipping (Disconnect first to "
+                    "relocate).".format(dst, node))
+                continue
+            src = "{}.output[{}]".format(shape, next_output_idx)
             try:
                 cmds.connectAttr(src, dst, force=True)
+                next_output_idx += 1
             except Exception as exc:
                 cmds.warning(
                     "connect_routed: {} → {} failed: {}".format(

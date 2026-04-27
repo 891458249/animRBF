@@ -56,6 +56,13 @@ class _SourceTabContent(QtWidgets.QWidget):
     def __init__(self, role, parent=None):
         super(_SourceTabContent, self).__init__(parent)
         self._role = role  # "driver" or "driven"
+        # M_BLUEPRINT_BROADCAST.bone-cache (2026-04-28): bone name
+        # held in a plain Python attribute alongside the QLineEdit
+        # display. Reading the cache is independent of any Qt
+        # rendering / lazy-init state; node_name() returns this
+        # cache, never the LineEdit text. set_node_name() updates
+        # both in lockstep so the visible field stays accurate.
+        self._node_name = ""
         self._build()
 
     def _build(self):
@@ -107,10 +114,17 @@ class _SourceTabContent(QtWidgets.QWidget):
     # -- public API used by the panel --
 
     def set_node_name(self, name):
-        self._field_node.setText(name or "")
+        # Python cache + LineEdit display kept in lockstep. The
+        # cache is the source of truth read by _tab_node().
+        self._node_name = str(name or "")
+        self._field_node.setText(self._node_name)
 
     def node_name(self):
-        return self._field_node.text()
+        # Read from the Python cache, NOT _field_node.text() — the
+        # cache is populated synchronously at addTab time and is
+        # immune to any Qt lazy-render / visibility-coupled state
+        # the LineEdit might exhibit on non-active tabs.
+        return getattr(self, "_node_name", "") or ""
 
     def set_available_attrs(self, attrs, preselected=None):
         """Repopulate the attribute list and optionally pre-select
