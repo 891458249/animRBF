@@ -188,7 +188,13 @@ class TestM_BATCH_ROUTING_RoutedTargets(unittest.TestCase):
         targets = ed.routed_targets()
         self.assertEqual(targets, [("boneB", ["rx"])])
 
-    def test_all_tabs_when_batch_on(self):
+    def test_all_tabs_when_batch_on_broadcasts_blueprint(self):
+        # M_BLUEPRINT_BROADCAST: the active tab's selected attrs
+        # become the blueprint applied to every tab's bone — even
+        # if the non-active tabs' QListWidget shows different
+        # (or empty) selection state. Active=tab0 has ["tx","ty"]
+        # selected, tab1 has ["rx"] selected -> with batch ON the
+        # broadcast result is ["tx","ty"] on BOTH bones.
         ed = self._make_editor(
             tabs=[("boneA", ["tx", "ty"]),
                   ("boneB", ["rx"])],
@@ -196,8 +202,49 @@ class TestM_BATCH_ROUTING_RoutedTargets(unittest.TestCase):
         targets = ed.routed_targets()
         self.assertEqual(targets, [
             ("boneA", ["tx", "ty"]),
+            ("boneB", ["tx", "ty"]),
+        ], "Batch ON must broadcast the active tab's blueprint "
+           "to every tab's bone (the prior per-tab-selection "
+           "variant silently skipped non-active tabs).")
+
+    def test_blueprint_broadcast_when_non_active_tabs_empty(self):
+        # The exact bug repro: only the active tab has a
+        # selection; non-active tabs the user never touched return
+        # []. Pre-fix this caused batch Connect to skip every bone
+        # except the active one — tested as a regression guard.
+        ed = self._make_editor(
+            tabs=[("boneA", ["rotateX", "rotateY", "rotateZ"]),
+                  ("boneB", []),
+                  ("boneC", [])],
+            active_idx=0, batch=True)
+        targets = ed.routed_targets()
+        self.assertEqual(targets, [
+            ("boneA", ["rotateX", "rotateY", "rotateZ"]),
+            ("boneB", ["rotateX", "rotateY", "rotateZ"]),
+            ("boneC", ["rotateX", "rotateY", "rotateZ"]),
+        ])
+
+    def test_blueprint_taken_from_active_not_first_tab(self):
+        # Active tab is tab1 (boneB / ["rx"]); blueprint must be
+        # ["rx"], NOT boneA's selection.
+        ed = self._make_editor(
+            tabs=[("boneA", ["tx", "ty"]),
+                  ("boneB", ["rx"])],
+            active_idx=1, batch=True)
+        targets = ed.routed_targets()
+        self.assertEqual(targets, [
+            ("boneA", ["rx"]),
             ("boneB", ["rx"]),
         ])
+
+    def test_blueprint_attrs_api(self):
+        # Public API: blueprint_attrs() returns the active tab's
+        # selection regardless of batch state.
+        ed = self._make_editor(
+            tabs=[("boneA", ["tx"]),
+                  ("boneB", ["rx", "ry"])],
+            active_idx=1, batch=False)
+        self.assertEqual(ed.blueprint_attrs(), ["rx", "ry"])
 
     def test_empty_when_no_tabs(self):
         ed = self._make_editor(tabs=[], active_idx=-1, batch=True)

@@ -277,11 +277,20 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
     def current_index(self):
         return self._tabs.currentIndex()
 
-    # 2026-04-28 (M_BATCH_ROUTING): scope queries for the panel-level
-    # Connect / Disconnect routed flow. ``is_batch_mode()`` reads the
-    # bottom-of-panel checkbox; ``tab_targets`` returns
-    # ``[(node_name, [attr, ...]), ...]`` either limited to the
-    # active tab or covering all tabs depending on the flag.
+    # 2026-04-28 (M_BATCH_ROUTING) + (M_BLUEPRINT_BROADCAST): scope
+    # queries for the panel-level Connect / Disconnect routed flow.
+    # is_batch_mode() reads the bottom-of-panel checkbox.
+    #
+    # routed_targets() implements **Blueprint Broadcast**: the
+    # selection comes EXCLUSIVELY from the currently-active tab
+    # (the "blueprint"); when batch is checked, that same blueprint
+    # is broadcast onto every tab's bone name. The earlier
+    # per-tab-selection variant was broken — non-active tabs whose
+    # QListWidget the user never touched return [] from
+    # selectedItems(), so the batch loop silently skipped every bone
+    # except the active one. The fix preserves the per-bone
+    # attributeQuery defense in core._flatten_targets so a bone
+    # genuinely lacking the blueprint attr is still filtered.
 
     def is_batch_mode(self):
         try:
@@ -289,35 +298,51 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         except AttributeError:
             return False
 
-    def _tab_target(self, idx):
+    def _tab_node(self, idx):
+        """Return the bone name for tab ``idx``, or ``""`` if missing."""
         if not (0 <= idx < self._tabs.count()):
-            return None
+            return ""
         content = self._tabs.widget(idx)
         if content is None:
-            return None
-        node = ""
+            return ""
         try:
-            node = str(content.node_name() or "")
+            return str(content.node_name() or "")
         except AttributeError:
             try:
-                node = str(getattr(content, "_node_name", "") or "")
+                return str(getattr(content, "_node_name", "") or "")
             except Exception:
-                node = ""
-        attrs = []
+                return ""
+
+    def _tab_attrs(self, idx):
+        """Return the **own** selected attrs of tab ``idx`` (not the
+        blueprint). Used by tab_targets() / diagnostics, not by the
+        routed Connect path."""
+        if not (0 <= idx < self._tabs.count()):
+            return []
+        content = self._tabs.widget(idx)
+        if content is None:
+            return []
         try:
-            attrs = list(content.selected_attrs() or [])
+            return [str(a) for a in (content.selected_attrs() or [])]
         except AttributeError:
-            attrs = []
-        return (node, attrs)
+            return []
+
+    def _tab_target(self, idx):
+        node = self._tab_node(idx)
+        attrs = self._tab_attrs(idx)
+        return (node, attrs) if (node or attrs) else None
 
     def active_tab_target(self):
         """Return ``(node, attrs)`` for the active tab, or ``None`` if
-        no tab is active."""
+        no tab is active. Used by routed_targets()'s non-batch path
+        and by external diagnostics."""
         return self._tab_target(self._tabs.currentIndex())
 
     def tab_targets(self):
-        """Return a list of ``(node, attrs)`` for every tab. Empty
-        list when there are no tabs."""
+        """Return a list of ``(node, own_selected_attrs)`` for every
+        tab. NOTE: this surfaces each tab's INDIVIDUAL selection, not
+        the blueprint — kept for diagnostics. The routed Connect
+        path uses :py:meth:`routed_targets` which broadcasts."""
         out = []
         for i in range(self._tabs.count()):
             t = self._tab_target(i)
@@ -325,14 +350,44 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
                 out.append(t)
         return out
 
+    def blueprint_attrs(self):
+        """The attrs of the currently-active tab's QListWidget
+        selection — the single source of truth used by
+        :py:meth:`routed_targets` to drive both batch and non-batch
+        flows. Returns a fresh list[str]; never None."""
+        return self._tab_attrs(self._tabs.currentIndex())
+
     def routed_targets(self):
-        """Convenience: ``tab_targets()`` if batch checked, else a
-        single-element list with the active tab. Empty list when no
-        tabs are present at all."""
-        if self.is_batch_mode():
-            return self.tab_targets()
-        active = self.active_tab_target()
-        return [active] if active is not None else []
+        """Blueprint-broadcast scope for the routed Connect /
+        Disconnect path.
+
+        The blueprint is ALWAYS the currently-active tab's selected
+        attrs. When batch is OFF, the result is a single
+        ``[(active_bone, blueprint)]`` pair. When batch is ON, the
+        SAME blueprint is broadcast onto every tab's bone name,
+        producing ``[(tab_0_bone, blueprint), (tab_1_bone, blueprint),
+        ...]``.
+
+        Empty list when there are no tabs at all (so the panel was
+        never populated). Per-bone existence filtering happens later
+        in :func:`core._flatten_targets` via cmds.attributeQuery, so
+        a bone genuinely missing one of the blueprint attrs gets a
+        cmds.warning + skip rather than a hard error.
+        """
+        n = self._tabs.count()
+        if n == 0:
+            return []
+        blueprint = self.blueprint_attrs()
+        active_idx = self._tabs.currentIndex()
+        if not self.is_batch_mode():
+            active_node = self._tab_node(active_idx)
+            return [(active_node, list(blueprint))]
+        # Batch ON — broadcast the blueprint onto every tab's bone.
+        out = []
+        for i in range(n):
+            node = self._tab_node(i)
+            out.append((node, list(blueprint)))
+        return out
 
     def set_sources(self, sources, available_attrs_per_source=None):
         """Programmatic rebuild from list[DriverSource | DrivenSource].
