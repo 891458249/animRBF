@@ -66,6 +66,10 @@ class MainController(QtCore.QObject):
     # reload its multi-source widgets from the new node state. Widgets
     # never talk to each other directly - they all subscribe here.
     driverSourcesChanged = QtCore.Signal()
+    # M_DRIVEN_MULTI (Item 4c, 2026-04-27): symmetric signal for the
+    # driven side. Emitted after every add_driven_source /
+    # remove_driven_source / set_driven_source_attrs mutation.
+    drivenSourcesChanged = QtCore.Signal()
 
     def __init__(self, parent=None):
         super(MainController, self).__init__(parent)
@@ -278,6 +282,78 @@ class MainController(QtCore.QObject):
         except Exception as exc:
             cmds.warning(
                 "read_driver_sources failed: {}".format(exc))
+            return []
+
+    # ------------------------------------------------------------------
+    # M_DRIVEN_MULTI - multi-driven path A wiring (Item 4c)
+    # ------------------------------------------------------------------
+
+    def add_driven_source(self, driven_node, driven_attrs):
+        """Path A entry-point for adding a driven source on the active
+        node (M_DRIVEN_MULTI). Wraps :func:`core.add_driven_source` +
+        emits :attr:`drivenSourcesChanged`."""
+        if not self._current_node:
+            cmds.warning("add_driven_source: no current node")
+            return None
+        try:
+            idx = core.add_driven_source(
+                self._current_node, driven_node, list(driven_attrs))
+        except Exception as exc:
+            cmds.warning(
+                "add_driven_source failed: {}".format(exc))
+            return None
+        self.drivenSourcesChanged.emit()
+        return idx
+
+    def remove_driven_source(self, index):
+        """Path A entry-point for removing a driven source. Walks
+        ``ask_confirm`` because removal disconnects scene plugs."""
+        if not self._current_node:
+            cmds.warning("remove_driven_source: no current node")
+            return False
+        from RBFtools.ui.i18n import tr
+        proceed = self.ask_confirm(
+            action_id="remove_driven_source",
+            title=tr("title_remove_driven_source"),
+            summary=tr("summary_remove_driven_source"))
+        if not proceed:
+            return False
+        try:
+            core.remove_driven_source(self._current_node, int(index))
+        except Exception as exc:
+            cmds.warning(
+                "remove_driven_source failed: {}".format(exc))
+            return False
+        self.drivenSourcesChanged.emit()
+        return True
+
+    def set_driven_source_attrs(self, index, new_attrs):
+        """M_DRIVEN_MULTI: replace attrs on an existing
+        drivenSource[index] entry."""
+        if not self._current_node:
+            cmds.warning("set_driven_source_attrs: no current node")
+            return False
+        try:
+            ok = core.set_driven_source_attrs(
+                self._current_node, int(index), list(new_attrs))
+        except Exception as exc:
+            cmds.warning(
+                "set_driven_source_attrs failed: {}".format(exc))
+            return False
+        if ok:
+            self.drivenSourcesChanged.emit()
+        return ok
+
+    def read_driven_sources(self):
+        """Read current node's driven sources (multi). Returns
+        list[DrivenSource] or empty list."""
+        if not self._current_node:
+            return []
+        try:
+            return list(core.read_driven_info_multi(self._current_node))
+        except Exception as exc:
+            cmds.warning(
+                "read_driven_sources failed: {}".format(exc))
             return []
 
     def reset_auto_neutral_default(self):

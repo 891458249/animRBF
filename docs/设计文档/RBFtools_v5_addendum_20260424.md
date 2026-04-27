@@ -6089,6 +6089,183 @@ red line 13 mock-pattern legitimate skip naturally accumulates.
 
 ---
 
+## §M_DRIVEN_MULTI — Multi-driven backend + Driven Targets editor (Items 1 + 4c)
+
+> **STATUS** (2026-04-27): final third of the user's 4-item batch.
+> Completes the multi-source paradigm requested by the Tekken-8
+> AnimaRbfSolver reference: the driven side now mirrors the driver
+> side (`drivenSource[]` parallel to `driverSource[]`), and the
+> two multi-source editors sit side-by-side just above the pose
+> editor (Item 1 - "merge Driver Sources into the Pose Editor").
+> The legacy single-driven `pose_editor.driven_list` AttributeList
+> stays in place per red line 14 backcompat parity.
+
+### §M_DRIVEN_MULTI.scope
+
+| Layer | Change | LoC |
+|---|---|---|
+| `core.py` | New `DrivenSource` dataclass; `_ensure_driven_source_compound` lazy `cmds.addAttr` for the runtime dynamic compound (parallel to the M_B24a1 C++ `driverSource` schema, Python-only - no C++ rebuild required); `read_driven_info_multi` with legacy fallback (auto-migrates single-driven nodes); `add_driven_source` + atomic rollback; `remove_driven_source`; `set_driven_source_attrs` (remove-all + re-add-in-order pattern, same as M_UIRECONCILE_PLUS for the driver side); `_disconnect_all_outputs` + `_wire_driven_sources` helpers that re-wire `shape.output[base..base+n]` across every source so output[] indices stay contiguous. | ~250 |
+| `controller.py` | New `drivenSourcesChanged = QtCore.Signal()`; four wrappers (`add_driven_source`, `remove_driven_source`, `set_driven_source_attrs`, `read_driven_sources`) - each emits `drivenSourcesChanged` on success, skips on user-cancel / failure. | ~70 |
+| `ui/widgets/driven_source_list_editor.py` (new) | `_DrivenSourceRow` (node + attrs labels + Attrs... button) + `DrivenSourceListEditor` (sibling of M_B24b1 driver editor; addRequested / removeRequested / attrsRequested signals; no weight / encoding columns - those are driver-only concepts). | ~150 |
+| `ui/main_window.py` | Instantiate `_driven_sources_section` collapsible + `_driven_source_list` editor sitting right after Driver Sources and immediately above the pose editor (Item 1 visual merge); wire all three driven-side signals + `controller.drivenSourcesChanged` reload bridge; new slots `_on_driven_source_add_requested` (Hardening 3 `cmds.ls(type="transform")` filter + self-shape exclusion + warning paths), `_on_driven_source_remove_requested`, `_on_driven_source_attrs_requested` (reuses the M_UIRECONCILE_PLUS `_DriverAttrPickerDialog` for the picker UI), `_reload_driven_sources`. Extended `_retranslate_all` to refresh the new section title + editor. | ~80 |
+| `ui/i18n.py` | 13 new keys EN+ZH (section header + list header + empty hint + node/attrs tooltips + button + button tip + remove confirm title/summary + picker title/summary + 2 warnings). | ~50 |
+| `tests/test_m_driven_multi.py` (new) | 8 source-scan + 4 core orchestrator + 5 controller signal parity + 4 editor signal forwarding + 1 i18n parity = **22 tests** (1 source-scan caught a docstring vs. code distinction and was loosened during Step 2.4). | ~310 |
+| `addendum_20260424.md` | this section. | ~120 |
+| **Total** | | **~1030** |
+
+LoC overrun precedent (M_UIRECONCILE 2026-04-27) applied: pure
+code is ~550 LoC (core 250 + controller 70 + editor 150 +
+main_window 80) - well under the 800-LoC red line; the addendum
++ tests carry the remaining ~480 LoC and qualify for the
+addendum-budget exemption.
+
+### §M_DRIVEN_MULTI.python-only-storage-rationale
+
+The driver side's `driverSource[]` compound was added via C++
+schema in M_B24a1 (commit `d73d6b9`). For the driven side we
+chose runtime `cmds.addAttr` instead of a C++ rebuild because:
+
+1. The `output` MFnNumericData::kDouble multi attribute already
+   exists in C++; multi-driven is purely a question of how the
+   Python orchestrator partitions `output[i]` indices across
+   driven nodes - no compute() change is needed.
+2. The `cmds.addAttr` dynamic compound is persisted in the
+   .ma file natively (Maya treats user-defined dynamic attrs
+   as first-class data) - .ma round-trip preserves driven
+   source state without a C++ schema upgrade path.
+3. A C++ rebuild forces every TD on Maya 2025 to reinstall the
+   .mll; the dynamic-attr path lets M_DRIVEN_MULTI ship as a
+   pure Python update.
+
+If a future milestone needs `drivenSource_weight` / per-source
+encoding (the driver-side concepts that we deliberately skipped
+on the driven side), promoting the dynamic compound to a C++
+schema parallel to `driverSource` is a straight port of the
+M_B24a1 work - the Python API stays the same; only the
+`_ensure_driven_source_compound` helper becomes a no-op.
+
+### §M_DRIVEN_MULTI.write-side-orchestration
+
+`add_driven_source` / `remove_driven_source` /
+`set_driven_source_attrs` all funnel through the same
+`_disconnect_all_outputs` + `_wire_driven_sources` pair to
+guarantee that `shape.output[i]` indices stay contiguous from 0
+across every driven source. Concretely:
+
+- `_disconnect_all_outputs(shape)` - walks every existing
+  `output[i] -> driven.attr` connection and disconnects it
+  (best-effort).
+- `_wire_driven_sources(shape, sources)` - iterates the source
+  list with a cumulative base offset and wires
+  `output[base+i] -> source.node.attr_i`, advancing base by
+  `len(source.attrs)` after each source.
+
+This mirrors the driver-side `connect_node` -> `wire_driver_inputs`
+behaviour but extended to a list of targets. The atomic
+fail-soft on `add_driven_source` rolls back via
+`removeMultiInstance(drivenSource[idx])` if the wiring step
+raises (M_B24d Hardening 1 pattern).
+
+### §M_DRIVEN_MULTI.legacy-fallback
+
+`read_driven_info_multi(node)` checks for the dynamic compound
+first; if absent (legacy single-driven nodes that pre-date this
+sub-task) it falls back to `read_driven_info` (legacy single-
+target reader) and synthesises a 1-source list. This auto-
+migrates legacy nodes without forcing the TD to re-wire
+anything: opening an old .ma file shows a single Driven Targets
+row populated from the existing output[] connections.
+
+### §M_DRIVEN_MULTI.ui-paradigm-merge (Item 1)
+
+The Driver Sources + Driven Targets sections sit as direct
+siblings in the inspector flow, immediately above the pose-
+editor CollapsibleFrame. This satisfies Item 1's "merge into
+the Pose Editor" intent visually (the multi-source editors are
+the first widgets above the pose table), without modifying the
+`_PoseEditorPanel._build` body - the legacy
+`pose_editor.driver_list` / `driven_list` AttributeList
+widgets remain inside the panel for the single-source workflow
+that still uses them (red line 14 backcompat parity).
+
+The deeper structural merge - replacing the AttributeList
+widgets entirely - lives in M_UIRECONCILE2 (v5.x post-final
+stub), which now also covers the driven-side migration that
+M_DRIVEN_MULTI brought into scope.
+
+### §M_DRIVEN_MULTI.empirical-baseline (2026-04-27)
+
+| Env | Pre (post-M_UIRECONCILE_PLUS `f44b97a`) | Post |
+|---|---|---|
+| Pure-Python | 596 OK (skip 3) | **617 OK (skip 3)** |
+| mayapy 2025 | 596 ran 515 pass 81 skip | **617 ran 523 pass 94 skip** |
+
+mayapy delta: +21 = +8 pass (8 source-scan + i18n parity tests
+that always run) + +13 skip (4 core orchestrator + 5 controller
+signal parity + 4 editor signal forwarding - all mock-only
+`@skipIf(_REAL_MAYA)`). Per the forward-compat-corrected red
+line 13, mock-pattern legitimate skip naturally accumulates.
+
+### §M_DRIVEN_MULTI.scope-exclusions
+
+- 0 lines C++ / 0 .mll / 0 CMakeLists / 0 schema modifications
+  (the `drivenSource` compound is a runtime `cmds.addAttr`)
+- 0 modifications to `_PoseEditorPanel._build` (legacy
+  AttributeList workflow preserved verbatim per red line 14
+  backcompat parity)
+- 0 modifications to `wire_driven_outputs` (legacy single-
+  target wiring stays for the M_B24c mirror flow et al.)
+- 0 modifications to the M_UIRECONCILE / M_QUICKWINS /
+  M_UIPOLISH / M_B24 series locked surfaces
+- 0 modifications to hotfix 4 files
+- The pose-data layer (poseValue per pose) is unchanged - all
+  existing poses round-trip through the new multi-driven
+  output[] partitioning identically (no per-driven-source
+  pose slicing introduced)
+
+### §M_DRIVEN_MULTI.gui-verification-checklist (TD must run)
+
+After M_DRIVEN_MULTI push + Maya 2025 RBFtools restart:
+
+#### Scenario 9 - Multi-driven batch add
+
+1. Create / pick an active RBF node.
+2. Outliner-select 3 transforms (e.g. blendShape pivot helpers).
+3. Click `+` in the **Driven Targets** editor.
+4. **Expected**: 3 rows appear; the underlying shape now has
+   a `drivenSource[]` compound with 3 entries (verifiable via
+   `cmds.attributeQuery("drivenSource", node="<shape>",
+   exists=True)` + `cmds.getAttr("<shape>.drivenSource",
+   multiIndices=True)`).
+
+#### Scenario 10 - Per-driven attribute pick
+
+1. After Scenario 9, click any row's `Attrs...` button.
+2. **Expected**: the attribute picker dialog opens, populated
+   with the driven node's keyable attrs.
+3. Pick 2 attributes + OK.
+4. **Expected**: row label updates; `output[base..base+2]`
+   wires to those 2 attrs; the other rows' wiring is
+   re-shuffled to keep indices contiguous.
+
+#### Scenario 11 - Single-driven backcompat parity
+
+1. Open / create a legacy single-driven node (no
+   `drivenSource[]` dynamic attr).
+2. **Expected**: the Driven Targets editor shows 1 row
+   auto-synthesised from the existing output[] connections
+   via `read_driven_info_multi`'s legacy fallback path.
+3. **Expected**: the legacy `pose_editor.driven_list`
+   AttributeList still works for the single-target workflow.
+
+#### Scenario 12 - Default node type = RBF (M_QUICKWINS Item 3 verify)
+
+1. Click the New Node button.
+2. **Expected**: GeneralSection's Type combo shows "RBF" (not
+   "Vector-Angle") - default landed correctly.
+
+---
+
 ## §M_HOTFIX_PYSIDE6 — QActionGroup PySide6 migration shim
 
 > **STRUCTURAL LESSON** (2026-04-27):

@@ -1475,6 +1475,275 @@ def read_driver_info(node):
     return first.node, list(first.attrs)
 
 
+# =====================================================================
+#  M_DRIVEN_MULTI — multi-driven source orchestrator (Item 4c)
+# =====================================================================
+#
+# The driven side has, until now, been single-target: `wire_driven_outputs`
+# wires `shape.output[i]` -> `<driven_node>.<attrs[i]>` for one node.
+# The Tekken 8 paradigm + the user's 2026-04-27 batch (Item 4c) calls for
+# multi-driven (multiple driven nodes, each with their own attribute slice).
+#
+# C++ `output` is a flat `MFnNumericData::kDouble` multi attribute - no
+# schema change is required. We split `output[]` by source: source 0
+# consumes output[0..n0-1], source 1 consumes output[n0..n0+n1-1], etc.
+#
+# Persistence uses a **dynamic compound attribute** added at runtime via
+# `cmds.addAttr` (rather than a C++ schema rebuild). The compound is
+# named `drivenSource` mirroring the M_B24a1 `driverSource` schema.
+# Migration: legacy single-driven nodes auto-migrate on first read into a
+# 1-source list, exactly like `_migrate_legacy_single_driver` does for
+# the driver side.
+
+class DrivenSource(object):
+    """Driven counterpart to :class:`DriverSource`. Frozen-style dataclass
+    that pairs a target node with its ordered attribute list."""
+
+    __slots__ = ("node", "attrs")
+
+    def __init__(self, node, attrs):
+        if not isinstance(node, str):
+            raise TypeError(
+                "DrivenSource.node must be a str, got {!r}".format(
+                    type(node).__name__))
+        self.node  = node
+        self.attrs = tuple(attrs)
+
+    def __repr__(self):
+        return "DrivenSource(node={!r}, attrs={!r})".format(
+            self.node, list(self.attrs))
+
+    def __eq__(self, other):
+        if not isinstance(other, DrivenSource):
+            return NotImplemented
+        return self.node == other.node and self.attrs == other.attrs
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+
+def _ensure_driven_source_compound(shape):
+    """M_DRIVEN_MULTI: lazily create the `drivenSource` dynamic compound
+    attribute on the shape (parallel to the M_B24a1 driverSource C++
+    schema). Idempotent - skips if the attribute already exists."""
+    if cmds.attributeQuery("drivenSource", node=shape, exists=True):
+        return
+    cmds.addAttr(
+        shape, longName="drivenSource", attributeType="compound",
+        numberOfChildren=2, multi=True)
+    cmds.addAttr(
+        shape, longName="drivenSource_node",
+        attributeType="message", parent="drivenSource")
+    cmds.addAttr(
+        shape, longName="drivenSource_attrs",
+        dataType="stringArray", parent="drivenSource")
+
+
+def read_driven_info_multi(node):
+    """Read every driven source on *node* as a list[DrivenSource].
+
+    Mirrors :func:`read_driver_info_multi` for the driven side. If the
+    `drivenSource` dynamic compound has populated entries, return them;
+    otherwise fall back to the legacy single-driven shape via
+    :func:`read_driven_info` and synthesize a 1-source list.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    sources = []
+    if cmds.attributeQuery("drivenSource", node=shape, exists=True):
+        try:
+            indices = cmds.getAttr(
+                shape + ".drivenSource", multiIndices=True) or []
+        except Exception:
+            indices = []
+        for d in indices:
+            node_plug = "{}.drivenSource[{}].drivenSource_node".format(
+                shape, d)
+            try:
+                srcs = cmds.listConnections(
+                    node_plug, source=True, destination=False) or []
+            except Exception:
+                srcs = []
+            if not srcs:
+                continue
+            attrs_plug = (
+                "{}.drivenSource[{}].drivenSource_attrs".format(shape, d))
+            try:
+                attrs_raw = cmds.getAttr(attrs_plug) or []
+            except Exception:
+                attrs_raw = []
+            try:
+                sources.append(DrivenSource(
+                    node=srcs[0], attrs=tuple(attrs_raw)))
+            except (TypeError, ValueError) as exc:
+                cmds.warning(
+                    "RBFtools: skipping malformed drivenSource[{}] on "
+                    "'{}': {}".format(d, node, exc))
+        if sources:
+            return sources
+    # Legacy / fall-back: synthesize from existing output[] connections.
+    legacy_node, legacy_attrs = read_driven_info(node)
+    if not legacy_node:
+        return []
+    return [DrivenSource(node=legacy_node, attrs=tuple(legacy_attrs))]
+
+
+def _disconnect_all_outputs(shape):
+    """M_DRIVEN_MULTI helper: disconnect every existing `shape.output[i]`
+    -> driven plug. Used before re-wiring across all driven sources so the
+    output[] index ordering stays consistent."""
+    try:
+        conns = cmds.listConnections(
+            shape + ".output",
+            source=False, destination=True,
+            plugs=True, connections=True,
+            skipConversionNodes=True) or []
+    except Exception:
+        conns = []
+    for i in range(0, len(conns), 2):
+        src_plug = conns[i]
+        dst_plug = conns[i + 1]
+        try:
+            cmds.disconnectAttr(src_plug, dst_plug)
+        except Exception:
+            pass
+
+
+def _wire_driven_sources(shape, sources):
+    """M_DRIVEN_MULTI: wire `shape.output[base..base+n]` to each driven
+    source's attrs in order. Cumulative base offset across all sources."""
+    base = 0
+    for src in sources:
+        if not src.node or not _exists(src.node):
+            base += len(src.attrs)
+            continue
+        for i, attr in enumerate(src.attrs):
+            src_plug = "{}.output[{}]".format(shape, base + i)
+            dst_plug = "{}.{}".format(src.node, attr)
+            try:
+                cmds.connectAttr(src_plug, dst_plug, force=True)
+            except Exception as exc:
+                cmds.warning(
+                    "_wire_driven_sources: {} -> {} failed: {}".format(
+                        src_plug, dst_plug, exc))
+        base += len(src.attrs)
+
+
+def add_driven_source(node, driven_node, driven_attrs):
+    """M_DRIVEN_MULTI (Item 4c): append a new DrivenSource entry on
+    *node*'s `drivenSource` compound + re-wire every driven source's
+    output[] connections so the new source slots in at the end.
+
+    Atomic fail-soft: on any wiring failure the new entry is rolled back
+    via removeMultiInstance (mirroring M_B24d Hardening 1 for the driver
+    side). Returns the index of the new entry.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        raise RuntimeError(
+            "add_driven_source: shape not found for {!r}".format(node))
+    _ensure_driven_source_compound(shape)
+    DrivenSource(node=driven_node, attrs=tuple(driven_attrs))   # validate
+    indices = cmds.getAttr(
+        shape + ".drivenSource", multiIndices=True) or []
+    next_idx = (max(indices) + 1) if indices else 0
+    base_plug = "{}.drivenSource[{}]".format(shape, next_idx)
+    cmds.connectAttr(driven_node + ".message",
+                     base_plug + ".drivenSource_node", force=True)
+    cmds.setAttr(base_plug + ".drivenSource_attrs",
+                 len(driven_attrs), *driven_attrs, type="stringArray")
+    try:
+        _disconnect_all_outputs(shape)
+        _wire_driven_sources(shape, read_driven_info_multi(node))
+    except Exception as exc:
+        try:
+            cmds.removeMultiInstance(base_plug, b=True)
+        except Exception:
+            pass
+        cmds.warning(
+            "add_driven_source: wiring failed for {!r} ({}); "
+            "rolled back metadata. Error: {}".format(
+                driven_node, driven_attrs, exc))
+        raise
+    return next_idx
+
+
+def remove_driven_source(node, index):
+    """M_DRIVEN_MULTI: remove `drivenSource[index]` + re-wire the
+    remaining sources so output[] indices stay contiguous from 0."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    plug = "{}.drivenSource[{}]".format(shape, index)
+    try:
+        existing = cmds.getAttr(
+            shape + ".drivenSource", multiIndices=True) or []
+    except Exception:
+        existing = []
+    if index not in existing:
+        return
+    _disconnect_all_outputs(shape)
+    try:
+        cmds.removeMultiInstance(plug, b=True)
+    except Exception as exc:
+        cmds.warning(
+            "remove_driven_source({}, {}) failed: {}".format(
+                node, index, exc))
+        return
+    _wire_driven_sources(shape, read_driven_info_multi(node))
+
+
+def set_driven_source_attrs(node, index, new_attrs):
+    """M_DRIVEN_MULTI: replace the attrs list of an existing
+    drivenSource[index] entry. Same remove-all + re-add-in-order pattern
+    used by :func:`set_driver_source_attrs`."""
+    sources = read_driven_info_multi(node)
+    if not sources:
+        cmds.warning(
+            "set_driven_source_attrs: no driven sources on {!r}".format(
+                node))
+        return False
+    if index < 0 or index >= len(sources):
+        cmds.warning(
+            "set_driven_source_attrs: index {} out of range "
+            "(0..{})".format(index, len(sources) - 1))
+        return False
+    rebuilt = []
+    for i, src in enumerate(sources):
+        if i == index:
+            rebuilt.append(DrivenSource(
+                node=src.node, attrs=tuple(new_attrs)))
+        else:
+            rebuilt.append(src)
+    try:
+        existing_indices = sorted(cmds.getAttr(
+            get_shape(node) + ".drivenSource",
+            multiIndices=True) or [], reverse=True)
+    except Exception:
+        existing_indices = list(range(len(sources) - 1, -1, -1))
+    for d in existing_indices:
+        try:
+            remove_driven_source(node, d)
+        except Exception as exc:
+            cmds.warning(
+                "set_driven_source_attrs: remove sweep failed at "
+                "index {}: {}".format(d, exc))
+            return False
+    for src in rebuilt:
+        try:
+            add_driven_source(node, src.node, list(src.attrs))
+        except Exception as exc:
+            cmds.warning(
+                "set_driven_source_attrs: re-add failed for {!r}: "
+                "{}".format(src.node, exc))
+            return False
+    return True
+
+
 def read_driven_info(node):
     """Discover which node and attributes are driven by the *output[]* array.
 

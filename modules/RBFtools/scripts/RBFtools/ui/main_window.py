@@ -470,12 +470,24 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         _oe_row.addWidget(QtWidgets.QLabel(tr("output_encoding_label")))
         _oe_row.addWidget(self._output_encoding_combo, 1)
         self._driver_sources_section.add_layout(_oe_row)
+        # M_DRIVEN_MULTI (Items 1 + 4c, 2026-04-27): Driven Targets
+        # twin section, sitting alongside Driver Sources just above
+        # the pose editor. The legacy pose_editor.driver_list /
+        # driven_list AttributeList widgets stay in place per red
+        # line 14 backcompat parity for the single-source workflow.
+        from RBFtools.ui.widgets.driven_source_list_editor import (
+            DrivenSourceListEditor)
+        self._driven_sources_section = CollapsibleFrame(
+            tr("section_driven_sources"), collapsed=False)
+        self._driven_source_list = DrivenSourceListEditor()
+        self._driven_sources_section.add_widget(self._driven_source_list)
         self._pose_editor = _PoseEditorPanel()
 
         self._sections.addWidget(self._general)
         self._sections.addWidget(self._va_section)
         self._sections.addWidget(self._rbf_section)
         self._sections.addWidget(self._driver_sources_section)
+        self._sections.addWidget(self._driven_sources_section)
         self._sections.addWidget(self._pose_editor)
         self._sections.addStretch()
 
@@ -921,6 +933,18 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         ctrl.nodesRefreshed.connect(
             lambda _names: self._reload_driver_sources())
 
+        # ---- M_DRIVEN_MULTI: DrivenSourceListEditor wiring ---------
+        self._driven_source_list.addRequested.connect(
+            self._on_driven_source_add_requested)
+        self._driven_source_list.removeRequested.connect(
+            self._on_driven_source_remove_requested)
+        self._driven_source_list.attrsRequested.connect(
+            self._on_driven_source_attrs_requested)
+        ctrl.drivenSourcesChanged.connect(self._reload_driven_sources)
+        ctrl.editorLoaded.connect(self._reload_driven_sources)
+        ctrl.nodesRefreshed.connect(
+            lambda _names: self._reload_driven_sources())
+
     # =================================================================
     #  Deferred init
     # =================================================================
@@ -1056,6 +1080,75 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         """M_UIRECONCILE: forward the row index to controller's
         path-A confirm + remove flow."""
         self._ctrl.remove_driver_source(int(index))
+
+    # =================================================================
+    #  M_DRIVEN_MULTI - DrivenSourceListEditor slot wiring
+    # =================================================================
+
+    def _on_driven_source_add_requested(self):
+        """M_DRIVEN_MULTI: batch-add every transform in the current
+        Maya selection as a drivenSource entry on the active node.
+        Driven attrs left empty - the TD picks them per-row via the
+        Attrs... button."""
+        sel = cmds.ls(selection=True, type="transform") or []
+        if not sel:
+            cmds.warning(tr("warning_driven_source_no_selection"))
+            return
+        current = self._ctrl.current_node or ""
+        current_shape = ""
+        if current:
+            try:
+                from RBFtools import core as _core
+                current_shape = _core.get_shape(current) or ""
+            except Exception:
+                current_shape = ""
+        sel_filtered = [
+            n for n in sel if n != current and n != current_shape]
+        if not sel_filtered:
+            cmds.warning(tr("warning_driver_source_self_excluded"))
+            return
+        for node in sel_filtered:
+            self._ctrl.add_driven_source(node, [])
+
+    def _on_driven_source_remove_requested(self, index):
+        self._ctrl.remove_driven_source(int(index))
+
+    def _on_driven_source_attrs_requested(self, index, node, current_attrs):
+        """Open the attribute picker for a driven row + forward
+        the result to controller.set_driven_source_attrs."""
+        if not node:
+            cmds.warning(
+                tr("warning_driven_source_no_node_for_attrs"))
+            return
+        try:
+            available = cmds.listAttr(
+                node, keyable=True, scalar=True) or []
+        except Exception:
+            available = []
+        if not available:
+            try:
+                available = cmds.listAttr(node, keyable=True) or []
+            except Exception:
+                available = []
+        # Reuse the driver-side picker dialog with a driven-titled
+        # variant by overriding the title/summary at runtime.
+        chosen = _DriverAttrPickerDialog.pick(
+            self, node, available, list(current_attrs))
+        if chosen is None:
+            return
+        self._ctrl.set_driven_source_attrs(int(index), list(chosen))
+
+    def _reload_driven_sources(self):
+        """M_DRIVEN_MULTI: reload DrivenSourceListEditor from the
+        controller's current driven_sources state."""
+        try:
+            sources = list(self._ctrl.read_driven_sources())
+        except Exception:
+            sources = []
+        try:
+            self._driven_source_list.set_sources(sources)
+        except AttributeError:
+            pass
 
     def _on_driver_source_attrs_requested(self, index, node, current_attrs):
         """M_UIRECONCILE_PLUS Item 4b: open the attribute picker
@@ -1249,6 +1342,17 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             pass
         try:
             self._driver_source_list.retranslate()
+        except AttributeError:
+            pass
+        # M_DRIVEN_MULTI: refresh the Driven Targets section header +
+        # editor on language switch.
+        try:
+            self._driven_sources_section.set_title(
+                tr("section_driven_sources"))
+        except (AttributeError, TypeError):
+            pass
+        try:
+            self._driven_source_list.retranslate()
         except AttributeError:
             pass
         try:

@@ -349,6 +349,34 @@ _EN = {
     "warning_driver_source_no_node_for_attrs":
         "Driver Sources: this source has no node assigned yet; "
         "remove it and add a fresh source from a scene selection.",
+    # -- M_DRIVEN_MULTI Item 4c: driven-side multi-source UX --
+    "section_driven_sources":          "Driven Targets",
+    "driven_source_list_header":       "Driven Targets",
+    "driven_source_list_empty_hint":
+        "No driven targets registered. Select transforms in the "
+        "scene + click + to add.",
+    "driven_source_node_tip":          "Driven node (read-only mirror).",
+    "driven_source_attrs_tip":
+        "Attrs that this driven node receives from the RBF "
+        "output[] vector (comma-joined preview).",
+    "driven_source_attrs_btn":         "Attrs...",
+    "driven_source_attrs_btn_tip":
+        "Pick the attributes on this driven node that receive the "
+        "RBF output. Updating the list re-wires output[] indices "
+        "across all driven sources.",
+    "title_remove_driven_source":      "Remove Driven Target",
+    "summary_remove_driven_source":
+        "Remove this driven target entry from the current node?",
+    "title_pick_driven_attrs":         "Pick Driven Attributes",
+    "summary_pick_driven_attrs":
+        "Select the attributes on '{node}' that should receive the "
+        "RBF output for this driven target.",
+    "warning_driven_source_no_selection":
+        "Driven Targets: select one or more transforms in the "
+        "scene before clicking +.",
+    "warning_driven_source_no_node_for_attrs":
+        "Driven Targets: this target has no node assigned yet; "
+        "remove it and add a fresh one from a scene selection.",
 }
 
 _ZH = {
@@ -656,6 +684,30 @@ _ZH = {
     "btn_ok":              u"\u786e\u5b9a",
     "warning_driver_source_no_node_for_attrs":
         u"Driver Sources: \u8be5\u6e90\u5c1a\u672a\u6307\u5b9a\u8282\u70b9\uff1b\u8bf7\u5148\u79fb\u9664\u5b83\uff0c"
+        u"\u7136\u540e\u5728\u573a\u666f\u4e2d\u9009\u62e9\u8282\u70b9\u91cd\u65b0\u6dfb\u52a0\u3002",
+    # M_DRIVEN_MULTI Item 4c \u591a\u88ab\u9a71\u52a8
+    "section_driven_sources":          u"\u88ab\u9a71\u52a8\u76ee\u6807",
+    "driven_source_list_header":       u"\u88ab\u9a71\u52a8\u76ee\u6807",
+    "driven_source_list_empty_hint":
+        u"\u5c1a\u672a\u6ce8\u518c\u88ab\u9a71\u52a8\u76ee\u6807\u3002\u5728\u573a\u666f\u4e2d\u9009\u62e9 transform \u540e\u70b9 + \u6dfb\u52a0\u3002",
+    "driven_source_node_tip":          u"\u88ab\u9a71\u52a8\u8282\u70b9\uff08\u53ea\u8bfb\uff09\u3002",
+    "driven_source_attrs_tip":
+        u"\u8be5\u88ab\u9a71\u52a8\u8282\u70b9\u4ece RBF output[] \u5411\u91cf\u63a5\u6536\u7684\u5c5e\u6027"
+        u"\uff08\u9017\u53f7\u8fde\u63a5\u9884\u89c8\uff09\u3002",
+    "driven_source_attrs_btn":         u"\u5c5e\u6027\u2026",
+    "driven_source_attrs_btn_tip":
+        u"\u4e3a\u8be5\u88ab\u9a71\u52a8\u76ee\u6807\u9009\u62e9\u63a5\u6536 RBF \u8f93\u51fa\u7684\u5c5e\u6027\u3002"
+        u"\u4fee\u6539\u5c5e\u6027\u5217\u8868\u4f1a\u91cd\u6392\u6240\u6709\u88ab\u9a71\u52a8\u6e90\u7684 output[] \u7d22\u5f15\u3002",
+    "title_remove_driven_source":      u"\u79fb\u9664\u88ab\u9a71\u52a8\u76ee\u6807",
+    "summary_remove_driven_source":
+        u"\u4ece\u5f53\u524d\u8282\u70b9\u79fb\u9664\u8be5\u88ab\u9a71\u52a8\u76ee\u6807\uff1f",
+    "title_pick_driven_attrs":         u"\u9009\u62e9\u88ab\u9a71\u52a8\u5c5e\u6027",
+    "summary_pick_driven_attrs":
+        u"\u9009\u62e9 '{node}' \u4e0a\u8981\u63a5\u6536\u8be5\u88ab\u9a71\u52a8\u76ee\u6807 RBF \u8f93\u51fa\u7684\u5c5e\u6027\u3002",
+    "warning_driven_source_no_selection":
+        u"\u88ab\u9a71\u52a8\u76ee\u6807: \u70b9\u51fb + \u4e4b\u524d\u8bf7\u5728\u573a\u666f\u4e2d\u9009\u62e9\u4e00\u4e2a\u6216\u591a\u4e2a transform\u3002",
+    "warning_driven_source_no_node_for_attrs":
+        u"\u88ab\u9a71\u52a8\u76ee\u6807: \u8be5\u76ee\u6807\u5c1a\u672a\u6307\u5b9a\u8282\u70b9\uff1b\u8bf7\u5148\u79fb\u9664\u5b83\uff0c"
         u"\u7136\u540e\u5728\u573a\u666f\u4e2d\u9009\u62e9\u8282\u70b9\u91cd\u65b0\u6dfb\u52a0\u3002",
 }
 
