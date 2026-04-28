@@ -374,16 +374,21 @@ class T_PATH_A_ATOMIC_PROTOCOL_REUSE(unittest.TestCase):
         self.assertIn(
             "_sweep_empty_subscripts(shape, \"output\")", body)
 
-    def test_path_A_set_drivers_pre_cleans_overlap_via_purge(self):
+    def test_path_A_set_drivers_uses_purge(self):
+        # M_REBUILD_REFACTOR (2026-04-28): the overlap pre-clean
+        # was replaced by a full single-source repack (disconnect
+        # source[index..end] + reconnect with new_attrs at the
+        # shifted base). _disconnect_or_purge is still invoked
+        # for every existing wire, just in the unified loop now —
+        # which is strictly STRONGER than the old overlap-only
+        # pre-clean (covers removed attrs too).
         body = self._core.split(
             "def set_driver_source_attrs")[1].split("\ndef ")[0]
-        self.assertIn("overlapping", body)
         self.assertIn("_disconnect_or_purge", body)
 
-    def test_path_A_set_driven_pre_cleans_overlap_via_purge(self):
+    def test_path_A_set_driven_uses_purge(self):
         body = self._core.split(
             "def set_driven_source_attrs")[1].split("\ndef ")[0]
-        self.assertIn("overlapping", body)
         self.assertIn("_disconnect_or_purge", body)
 
 

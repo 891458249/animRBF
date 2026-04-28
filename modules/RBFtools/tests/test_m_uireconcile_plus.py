@@ -139,10 +139,14 @@ class TestM_UIRECONCILE_PLUS_CoreOrchestrator(unittest.TestCase):
         self.assertFalse(ok,
             "empty source list must yield False (Item 4b)")
 
-    def test_in_range_index_calls_remove_and_readd(self):
-        """Happy path: read_multi returns 2 sources; we modify
-        index 1; orchestrator must remove both then re-add both
-        in order with the modified attrs on the second re-add."""
+    def test_in_range_index_uses_incremental_diff(self):
+        """M_REBUILD_REFACTOR (2026-04-28): the legacy "remove all
+        + re-add all" flow was Bug B's root cause (input[]
+        accumulation + duplicate connections). The new path uses
+        incremental diff — disconnect source[index..end] via
+        _disconnect_or_purge, reconnect at base. NO
+        remove_driver_source / add_driver_source calls inside
+        set_driver_source_attrs."""
         from RBFtools import core
         sources = [
             core.DriverSource(node="drv0", attrs=("tx",),
@@ -152,30 +156,26 @@ class TestM_UIRECONCILE_PLUS_CoreOrchestrator(unittest.TestCase):
         ]
         import maya.cmds as cmds
         cmds.reset_mock()
-        # Ensure no stale side_effect from neighbouring tests interferes
-        # with our return_value setup.
-        cmds.getAttr.side_effect = None
-        cmds.getAttr.return_value = [0, 1]
+        cmds.attributeQuery.return_value = True
         with mock.patch.object(
                 core, "read_driver_info_multi",
                 return_value=list(sources)), \
              mock.patch.object(core, "get_shape",
                                return_value="RBF1Shape"), \
+             mock.patch.object(core, "_exists",
+                               return_value=True), \
+             mock.patch.object(core, "_subscript_of_existing_input",
+                               return_value=None), \
+             mock.patch.object(core, "_disconnect_or_purge"), \
+             mock.patch.object(core, "_sweep_empty_subscripts"), \
              mock.patch.object(core, "remove_driver_source") as rm, \
              mock.patch.object(core, "add_driver_source") as add:
             ok = core.set_driver_source_attrs(
                 "RBF1", 1, ["ty", "tz"])
         self.assertTrue(ok)
-        # Two removes (one per source).
-        self.assertEqual(rm.call_count, 2)
-        # Two re-adds; the second one must carry the new attrs.
-        self.assertEqual(add.call_count, 2)
-        first_add = add.call_args_list[0]
-        second_add = add.call_args_list[1]
-        self.assertEqual(first_add[0][2], ["tx"],
-            "first source re-added with original attrs")
-        self.assertEqual(second_add[0][2], ["ty", "tz"],
-            "second source re-added with the modified attrs")
+        # Bug B regression check.
+        rm.assert_not_called()
+        add.assert_not_called()
 
 
 # ----------------------------------------------------------------------

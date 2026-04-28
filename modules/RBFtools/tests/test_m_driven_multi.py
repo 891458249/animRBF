@@ -212,7 +212,15 @@ class TestM_DRIVEN_MULTI_CoreOrchestrator(unittest.TestCase):
             ok = core.set_driven_source_attrs("RBF1", 5, ["tx"])
         self.assertFalse(ok)
 
-    def test_set_driven_source_attrs_calls_remove_then_readd(self):
+    def test_set_driven_source_attrs_uses_incremental_diff(self):
+        # M_REBUILD_REFACTOR (2026-04-28): the legacy "remove all
+        # then re-add all" flow was the Bug B root cause (input[]
+        # accumulation + duplicate connections). The new path is
+        # an incremental diff: disconnect source[index..end] via
+        # _disconnect_or_purge, reconnect source[index] with
+        # new_attrs at base, re-wire downstream sources at the
+        # shifted base. NO remove_driven_source / add_driven_source
+        # calls inside set_driven_source_attrs.
         from RBFtools import core
         sources = [
             core.DrivenSource(node="d0", attrs=("tx",)),
@@ -220,24 +228,27 @@ class TestM_DRIVEN_MULTI_CoreOrchestrator(unittest.TestCase):
         ]
         import maya.cmds as cmds
         cmds.reset_mock()
-        cmds.getAttr.side_effect = None
-        cmds.getAttr.return_value = [0, 1]
+        cmds.attributeQuery.return_value = True
         with mock.patch.object(
                 core, "read_driven_info_multi",
                 return_value=list(sources)), \
              mock.patch.object(core, "get_shape",
                                return_value="RBF1Shape"), \
+             mock.patch.object(core, "_exists",
+                               return_value=True), \
+             mock.patch.object(core, "_subscript_of_existing_output",
+                               return_value=None), \
+             mock.patch.object(core, "_disconnect_or_purge"), \
+             mock.patch.object(core, "_sweep_empty_subscripts"), \
              mock.patch.object(core, "remove_driven_source") as rm, \
              mock.patch.object(core, "add_driven_source") as add:
             ok = core.set_driven_source_attrs(
                 "RBF1", 1, ["ty", "tz"])
         self.assertTrue(ok)
-        self.assertEqual(rm.call_count, 2)
-        self.assertEqual(add.call_count, 2)
-        first_add = add.call_args_list[0]
-        second_add = add.call_args_list[1]
-        self.assertEqual(first_add[0][2], ["tx"])
-        self.assertEqual(second_add[0][2], ["ty", "tz"])
+        # Bug B regression check: the old call-remove-then-add
+        # storm is GONE.
+        rm.assert_not_called()
+        add.assert_not_called()
 
 
 # ----------------------------------------------------------------------
