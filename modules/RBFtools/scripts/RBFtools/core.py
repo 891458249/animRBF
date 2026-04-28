@@ -3676,6 +3676,50 @@ def _disconnect_or_purge(shape, side, idx, other_plug):
     return severed
 
 
+def _sweep_empty_subscripts(shape, side):
+    """M_SWEEP_EMPTY (2026-04-28): post-disconnect sweep.
+
+    Walks every allocated subscript of ``shape.<side>[]`` (via
+    ``cmds.getAttr(..., multiIndices=True)``) and compares against
+    the occupied set (subscripts that currently carry a wire). Any
+    subscript that exists in the multi-array but has NO connection
+    is a stale empty index — likely left behind by Maya's internal
+    bookkeeping after ``cmds.delete`` on a unitConversion or by a
+    prior tool's incomplete teardown. Each such subscript is
+    physically removed via ``cmds.removeMultiInstance(..., b=True)``.
+
+    Idempotent: safe to call any number of times. Returns the count
+    of subscripts cleaned for telemetry / status-bar reporting.
+    """
+    plug_root = "{}.{}".format(shape, side)
+    try:
+        all_indices = cmds.getAttr(plug_root, multiIndices=True) or []
+    except Exception as exc:
+        cmds.warning(
+            "_sweep_empty_subscripts: getAttr({} multiIndices) "
+            "failed: {}".format(plug_root, exc))
+        return 0
+    if side == "input":
+        occupied = _occupied_input_subscripts(shape)
+    else:
+        occupied = _occupied_output_subscripts(shape)
+    count = 0
+    for idx in all_indices:
+        if idx in occupied:
+            continue
+        target = "{}.{}[{}]".format(shape, side, idx)
+        try:
+            cmds.removeMultiInstance(target, b=True)
+            cmds.warning(
+                "sweep: removed empty subscript {}".format(target))
+            count += 1
+        except Exception as exc:
+            cmds.warning(
+                "sweep: removeMultiInstance({}) failed: {}".format(
+                    target, exc))
+    return count
+
+
 def _resolved_pairs_at(shape, side):
     """For Scene-B "clear all wires for this bone": return
     ``[(idx, other_node, other_plug), ...]`` for every occupied
@@ -4002,6 +4046,14 @@ def disconnect_routed(node, driver_targets, driven_targets):
             else:
                 total += _disconnect_bone_all(
                     shape, bone, "output")
+
+        # M_SWEEP_EMPTY (2026-04-28): final pass over both sides of
+        # the multi-array. Catches any orphan subscripts left behind
+        # by prior tools / unitConversion-delete bookkeeping that
+        # the per-slot cleanup in _disconnect_or_purge could miss.
+        # Idempotent — empty when there are no orphans.
+        _sweep_empty_subscripts(shape, "input")
+        _sweep_empty_subscripts(shape, "output")
 
     if total == 0:
         cmds.warning(
