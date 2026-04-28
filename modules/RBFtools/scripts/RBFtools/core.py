@@ -2301,6 +2301,30 @@ def create_node():
             cmds.warning(
                 "create_node: defaulting .type to RBF failed: {} "
                 "(node still created)".format(exc))
+        # M_BLOCKING_DEFAULT (2026-04-29): force shape.nodeState=2
+        # (Blocking) on creation so the freshly-wired driven node
+        # is NOT immediately driven by an untrained RBF compute()
+        # — without this, connecting driver/driven attrs before
+        # registering a single pose would let the solver write
+        # garbage initial values into the driven channels.
+        # AnimaRbfSolver reference behavior: out-of-the-box
+        # nodeState=2; first pose Apply flips it to 0 (Normal)
+        # via apply_poses below. cmds.warning surfaces the
+        # informational notice once per creation.
+        try:
+            cmds.setAttr(get_shape(transform) + ".nodeState", 2)
+            cmds.warning(
+                "RBFtools: new node created with nodeState=2 "
+                "(Blocking). Driven outputs are inactive until "
+                "the first pose is registered + Apply is "
+                "clicked, at which point the node auto-flips "
+                "to nodeState=0 (Normal).")
+        except Exception as exc:
+            cmds.warning(
+                "create_node: failed to set nodeState=2 "
+                "(Blocking): {} (node still created — TD must "
+                "set Blocking manually until first Apply)".format(
+                    exc))
         if sel:
             cmds.select(sel, replace=True)
     return transform
@@ -3647,6 +3671,31 @@ def apply_poses(node, driver_node, driven_node,
         # 7 — trigger evaluation cycle
         cmds.setAttr(shape + ".evaluate", 0)
         cmds.setAttr(shape + ".evaluate", 1)
+
+        # 8 — M_BLOCKING_DEFAULT (2026-04-29): unblock the node so
+        # compute() outputs reach driven channels. create_node()
+        # forces nodeState=2 (Blocking) on creation so an
+        # untrained RBF cannot misdrive the rig; the FIRST Apply
+        # is the contract point that flips it to nodeState=0
+        # (Normal). Idempotent on subsequent Applies — already-
+        # Normal nodes stay Normal. cmds.warning fires only on the
+        # 2->0 transition so the TD knows the node went live.
+        try:
+            current_state = cmds.getAttr(shape + ".nodeState")
+        except Exception:
+            current_state = 0
+        if int(current_state) != 0:
+            try:
+                cmds.setAttr(shape + ".nodeState", 0)
+                cmds.warning(
+                    "RBFtools: nodeState 2 (Blocking) -> 0 "
+                    "(Normal). RBF outputs now active on the "
+                    "driven channels.")
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses: failed to flip nodeState to 0: "
+                    "{} (TD must set Normal manually).".format(
+                        exc))
 
 
 def connect_poses(node, driver_node, driven_node,
