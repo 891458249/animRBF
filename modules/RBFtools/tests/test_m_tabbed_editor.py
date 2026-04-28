@@ -111,13 +111,20 @@ class TestM_TABBED_EDITOR_PanelConnect(unittest.TestCase):
     tab. The per-tab _on_connect_clicked from the previous
     iteration is gone."""
 
-    def _make_panel(self):
+    def _make_panel(self, batch=False):
         from RBFtools.ui.widgets.tabbed_source_editor import (
             _TabbedSourceEditorBase)
         panel = _TabbedSourceEditorBase.__new__(_TabbedSourceEditorBase)
         panel._tabs = mock.MagicMock()
         panel.attrsApplyRequested = mock.MagicMock()
         panel.attrsClearRequested = mock.MagicMock()
+        # M_BATCH_PATH_A_WIRE: stub batch signals + _chk_batch.
+        # Tests default to batch-off so the single-tab signals are
+        # the assertion target; pass batch=True to flip.
+        panel.attrsApplyBatchRequested = mock.MagicMock()
+        panel.attrsClearBatchRequested = mock.MagicMock()
+        panel._chk_batch = mock.MagicMock()
+        panel._chk_batch.isChecked.return_value = bool(batch)
         return panel
 
     def test_connect_emits_apply_with_current_tab_attrs(self):

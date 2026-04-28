@@ -193,6 +193,14 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
     # attrsApplyRequested so the disconnect path can be just as
     # expressive as connect (Scene A/B dispatch at main_window).
     attrsClearRequested = QtCore.Signal(int, list)
+    # M_BATCH_PATH_A_WIRE (2026-04-28): cross-tab broadcast signals.
+    # Emitted by _on_connect_clicked / _on_disconnect_clicked when
+    # the bottom-of-panel "Batch All * Tabs" checkbox is checked.
+    # Carries ONLY the selected attrs (no tab index — every tab in
+    # the panel is the target). main_window iterates the panel's
+    # source list and applies the same attrs to each.
+    attrsApplyBatchRequested = QtCore.Signal(list)
+    attrsClearBatchRequested = QtCore.Signal(list)
     selectNodeRequested = QtCore.Signal(int)
 
     _role                 = "driver"
@@ -265,30 +273,42 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         self.removeRequested.emit(int(index))
 
     def _on_connect_clicked(self):
+        # M_BATCH_PATH_A_WIRE (2026-04-28): consult the batch
+        # checkbox to decide single-tab vs cross-tab broadcast.
+        # The legacy path simply emitted attrsApplyRequested for
+        # the active tab — Bug repro: prior behaviour ignored
+        # _chk_batch entirely so checking it had zero effect on
+        # path-A button clicks (vs the path-B pose-editor flow
+        # which DID consult it via _gather_routed_targets).
         idx = self._tabs.currentIndex()
         if idx < 0:
             return
         content = self._tabs.widget(idx)
         if content is None:
             return
-        attrs = content.selected_attrs()
-        self.attrsApplyRequested.emit(idx, list(attrs))
+        attrs = list(content.selected_attrs())
+        if self.is_batch_mode():
+            self.attrsApplyBatchRequested.emit(attrs)
+        else:
+            self.attrsApplyRequested.emit(idx, attrs)
 
     def _on_disconnect_clicked(self):
-        # M_CONNECT_DISCONNECT_FIX Bug 2 + 加固 3 (2026-04-28):
-        # mirror _on_connect_clicked exactly — read the same
-        # selected_attrs() snapshot and emit the same shape of
-        # payload. The downstream main_window slot then dispatches
-        # Scene A (attrs non-empty -> precise disconnect) vs Scene
-        # B (attrs empty -> full source disconnect).
+        # M_CONNECT_DISCONNECT_FIX Bug 2 + M_BATCH_PATH_A_WIRE:
+        # mirror _on_connect_clicked. Batch flag dispatches the
+        # cross-tab broadcast signal; otherwise the single-tab
+        # signal carries (idx, attrs) for Scene A/B dispatch in
+        # main_window.
         idx = self._tabs.currentIndex()
         if idx < 0:
             return
         content = self._tabs.widget(idx)
         if content is None:
             return
-        attrs = content.selected_attrs()
-        self.attrsClearRequested.emit(idx, list(attrs))
+        attrs = list(content.selected_attrs())
+        if self.is_batch_mode():
+            self.attrsClearBatchRequested.emit(attrs)
+        else:
+            self.attrsClearRequested.emit(idx, attrs)
 
     def _update_empty_hint(self):
         empty = (self._tabs.count() == 0)

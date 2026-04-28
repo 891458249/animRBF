@@ -505,6 +505,23 @@ _EN = {
     "msg_disconnect_precise":
         "Disconnected the selected attributes only; other "
         "attributes on this source remain wired.",
+    # M_BATCH_PATH_A_WIRE (2026-04-28) — confirm dialogs for the
+    # cross-tab broadcast Connect / Disconnect.
+    "title_batch_apply_confirm":      "Batch apply across all tabs?",
+    "msg_batch_apply_confirm":
+        "Apply attributes [{attrs}] to ALL {count} tabs?\n\n"
+        "Per-tab Connect will run in incremental-diff mode "
+        "(removed wires are torn down + new wires appended). "
+        "This is multi-tab destructive — confirm before "
+        "proceeding.",
+    "title_batch_clear_confirm":      "Batch clear across all tabs?",
+    "msg_batch_clear_confirm":
+        "Disconnect [{attrs}] from ALL {count} tabs?\n\n"
+        "Per-tab Disconnect will run in precise (Scene A) mode "
+        "when an attr list is given, or full (Scene B) mode "
+        "when empty. This is multi-tab destructive — confirm "
+        "before proceeding.",
+    "all_attrs":                      "all attributes",
 }
 
 _ZH = {
@@ -934,6 +951,18 @@ _ZH = {
     "title_disconnect_precise":       u"\u7cbe\u786e\u65ad\u5f00",
     "msg_disconnect_precise":
         u"\u4ec5\u65ad\u5f00\u6240\u9009\u5c5e\u6027;\u6b64\u76ee\u6807\u7684\u5176\u4ed6\u5c5e\u6027\u4fdd\u6301\u8fde\u63a5\u3002",
+    # M_BATCH_PATH_A_WIRE (2026-04-28)
+    "title_batch_apply_confirm":      u"\u8de8\u6240\u6709\u6807\u7b7e\u9875\u6279\u91cf\u8fde\u63a5?",
+    "msg_batch_apply_confirm":
+        u"\u5c06\u5c5e\u6027 [{attrs}] \u5e94\u7528\u5230\u6240\u6709 {count} \u4e2a\u6807\u7b7e\u9875?\n\n"
+        u"\u6bcf\u4e2a\u6807\u7b7e\u9875\u5c06\u4ee5\u589e\u91cf diff \u6a21\u5f0f\u8fde\u63a5(\u5df2\u79fb\u9664\u7684\u8fde\u7ebf\u4f1a\u65ad\u5f00,"
+        u"\u65b0\u8fde\u7ebf\u8ffd\u52a0)\u3002\u6b64\u64cd\u4f5c\u5f71\u54cd\u591a\u4e2a\u6807\u7b7e\u9875,\u8bf7\u786e\u8ba4\u3002",
+    "title_batch_clear_confirm":      u"\u8de8\u6240\u6709\u6807\u7b7e\u9875\u6279\u91cf\u65ad\u5f00?",
+    "msg_batch_clear_confirm":
+        u"\u4ece\u6240\u6709 {count} \u4e2a\u6807\u7b7e\u9875\u65ad\u5f00 [{attrs}]?\n\n"
+        u"\u6bcf\u4e2a\u6807\u7b7e\u9875\u5c06\u4ee5\u7cbe\u786e(\u573a\u666f A)\u6216\u5168\u6e05(\u573a\u666f B)\u6a21\u5f0f\u65ad\u5f00\u3002"
+        u"\u6b64\u64cd\u4f5c\u5f71\u54cd\u591a\u4e2a\u6807\u7b7e\u9875,\u8bf7\u786e\u8ba4\u3002",
+    "all_attrs":                      u"\u5168\u90e8\u5c5e\u6027",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

@@ -1169,6 +1169,13 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._on_driver_source_attrs_apply)
         self._driver_source_list.attrsClearRequested.connect(
             self._on_driver_source_attrs_clear)
+        # M_BATCH_PATH_A_WIRE (2026-04-28): cross-tab broadcast
+        # slots. Fired only when _chk_batch on the panel is
+        # checked at click time.
+        self._driver_source_list.attrsApplyBatchRequested.connect(
+            self._on_driver_source_attrs_apply_batch)
+        self._driver_source_list.attrsClearBatchRequested.connect(
+            self._on_driver_source_attrs_clear_batch)
         self._driver_source_list.selectNodeRequested.connect(
             self._on_driver_source_select_node)
         ctrl.driverSourcesChanged.connect(self._reload_driver_sources)
@@ -1185,6 +1192,11 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._on_driven_source_attrs_apply)
         self._driven_source_list.attrsClearRequested.connect(
             self._on_driven_source_attrs_clear)
+        # M_BATCH_PATH_A_WIRE driven mirror.
+        self._driven_source_list.attrsApplyBatchRequested.connect(
+            self._on_driven_source_attrs_apply_batch)
+        self._driven_source_list.attrsClearBatchRequested.connect(
+            self._on_driven_source_attrs_clear_batch)
         self._driven_source_list.selectNodeRequested.connect(
             self._on_driven_source_select_node)
         ctrl.drivenSourcesChanged.connect(self._reload_driven_sources)
@@ -1779,6 +1791,113 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             int(index), target_attrs)
 
     # ----- M_CONNECT_DISCONNECT_FIX: shared guard helpers ------------
+
+    # ----- M_BATCH_PATH_A_WIRE: cross-tab broadcast slots ------------
+    # 2026-04-28 — fired by tabbed_source_editor when its bottom-
+    # of-panel _chk_batch is checked. The slot iterates every tab
+    # in the panel and applies the same attrs (a "blueprint"
+    # broadcast — same pattern the path-B PoseGridEditor flow
+    # already uses via _gather_routed_targets). Reuses the
+    # M_REBUILD_REFACTOR-locked controller APIs (incremental diff +
+    # _disconnect_or_purge atomic protocol — no path-A logic to
+    # duplicate here).
+
+    def _batch_apply(self, role, attrs):
+        """Shared driver/driven Connect-batch implementation.
+
+        ``role`` is ``"driver"`` or ``"driven"``; ``attrs`` is the
+        blueprint attr list captured from the active tab. Empty
+        attrs -> info dialog (parity with single-tab path).
+        Otherwise surfaces a confirm dialog (batch is multi-tab
+        destructive, must be explicit) before iterating sources.
+        """
+        if not attrs:
+            QtWidgets.QMessageBox.information(
+                self,
+                tr("title_no_attrs_selected"),
+                tr("msg_no_attrs_selected"))
+            return
+        sources = (self._ctrl.read_driver_sources()
+                   if role == "driver"
+                   else self._ctrl.read_driven_sources())
+        if not sources:
+            return
+        proceed = QtWidgets.QMessageBox.question(
+            self,
+            tr("title_batch_apply_confirm"),
+            tr("msg_batch_apply_confirm").format(
+                count=len(sources),
+                attrs=", ".join(attrs)),
+            QtWidgets.QMessageBox.Yes |
+            QtWidgets.QMessageBox.No)
+        if proceed != QtWidgets.QMessageBox.Yes:
+            return
+        for idx in range(len(sources)):
+            try:
+                if role == "driver":
+                    self._ctrl.set_driver_source_attrs(
+                        idx, list(attrs))
+                else:
+                    self._ctrl.set_driven_source_attrs(
+                        idx, list(attrs))
+            except Exception as exc:
+                cmds.warning(
+                    "_batch_apply ({}[{}]): {}".format(
+                        role, idx, exc))
+
+    def _batch_clear(self, role, attrs):
+        """Shared driver/driven Disconnect-batch implementation.
+
+        attrs non-empty -> Scene A precise; empty -> Scene B full
+        per-source clear. Confirm dialog gates the multi-tab
+        destruction either way."""
+        sources = (self._ctrl.read_driver_sources()
+                   if role == "driver"
+                   else self._ctrl.read_driven_sources())
+        if not sources:
+            QtWidgets.QMessageBox.information(
+                self,
+                tr("title_nothing_to_disconnect"),
+                tr("msg_nothing_to_disconnect"))
+            return
+        attrs_label = (", ".join(attrs)
+                       if attrs
+                       else tr("all_attrs"))
+        proceed = QtWidgets.QMessageBox.question(
+            self,
+            tr("title_batch_clear_confirm"),
+            tr("msg_batch_clear_confirm").format(
+                count=len(sources),
+                attrs=attrs_label),
+            QtWidgets.QMessageBox.Yes |
+            QtWidgets.QMessageBox.No)
+        if proceed != QtWidgets.QMessageBox.Yes:
+            return
+        target_attrs = list(attrs) if attrs else None
+        for idx in range(len(sources)):
+            try:
+                if role == "driver":
+                    self._ctrl.disconnect_driver_source_attrs(
+                        idx, target_attrs)
+                else:
+                    self._ctrl.disconnect_driven_source_attrs(
+                        idx, target_attrs)
+            except Exception as exc:
+                cmds.warning(
+                    "_batch_clear ({}[{}]): {}".format(
+                        role, idx, exc))
+
+    def _on_driver_source_attrs_apply_batch(self, attrs):
+        self._batch_apply("driver", list(attrs))
+
+    def _on_driver_source_attrs_clear_batch(self, attrs):
+        self._batch_clear("driver", list(attrs))
+
+    def _on_driven_source_attrs_apply_batch(self, attrs):
+        self._batch_apply("driven", list(attrs))
+
+    def _on_driven_source_attrs_clear_batch(self, attrs):
+        self._batch_clear("driven", list(attrs))
 
     def _guard_attrs_apply(self, role, index, attrs):
         """M_CONNECT_DISCONNECT_FIX 加固 2 (2026-04-28): plan-dict

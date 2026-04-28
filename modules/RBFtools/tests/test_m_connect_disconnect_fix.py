@@ -206,11 +206,15 @@ class T_DISCONNECT_PRECISE_ATTRS(unittest.TestCase):
         body = self._tab.split(
             "def _on_disconnect_clicked(self):")[1].split(
             "\n    def ")[0]
-        # Mirror _on_connect_clicked — read selected_attrs() then
-        # emit with a 2-arg payload.
+        # M_BATCH_PATH_A_WIRE (2026-04-28): the slot now dispatches
+        # batch vs single via _chk_batch.isChecked() — assert the
+        # core invariants (selected_attrs read + single-tab path
+        # emits the (idx, attrs) payload) without locking the
+        # exact line shape, since the call now lives inside an
+        # else branch.
         self.assertIn("content.selected_attrs()", body)
         self.assertIn(
-            "self.attrsClearRequested.emit(idx, list(attrs))", body)
+            "self.attrsClearRequested.emit(idx, attrs)", body)
 
     def test_PERMANENT_c_main_slot_signature_extended(self):
         for slot in ("def _on_driver_source_attrs_clear(self, index, attrs)",
