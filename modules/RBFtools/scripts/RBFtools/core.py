@@ -3597,18 +3597,30 @@ def _direct_node_at_subscript(shape, side, idx):
 
 
 def _disconnect_or_purge(shape, side, idx, other_plug):
-    """斩草除根 — sever the wire at ``shape.<side>[idx]``.
+    """斩草除根 — sever the wire at ``shape.<side>[idx]`` AND drop
+    the multi-subscript itself so the array stays packed.
 
-    If a ``unitConversion`` node sits between the bone and the RBF
-    multi (Maya's silent rotation-channel insertion), DELETE that
-    conversion node so the orphan does not pollute future
-    skipConv-based queries. Otherwise issue a plain
-    ``cmds.disconnectAttr`` on the direct (bone <-> shape) pair.
+    Three-step sever protocol:
+      1. If a ``unitConversion`` node sits between the bone and the
+         RBF multi (Maya's silent rotation-channel insertion),
+         ``cmds.delete()`` that conversion node — this severs both
+         legs of the conversion in one shot.
+      2. Otherwise issue a plain ``cmds.disconnectAttr`` on the
+         direct (bone <-> shape) pair.
+      3. M_REMOVE_MULTI (2026-04-28): regardless of which path
+         severed the wire, fire
+         ``cmds.removeMultiInstance(shape.<side>[idx], b=True)``
+         to physically destroy the multi-array slot. Without this,
+         the subscript lingers as an "empty index" — visually noisy
+         in Node Editor + future occupied-subscript queries can be
+         tricked into thinking the slot is still in use.
 
     Returns True iff the wire was successfully torn down (either
-    via delete or disconnectAttr).
+    via delete or disconnectAttr); the slot-removal step is best-
+    effort and never blocks the return value.
     """
     direct = _direct_node_at_subscript(shape, side, idx)
+    severed = False
     if direct is not None:
         try:
             ntype = cmds.nodeType(direct)
@@ -3620,29 +3632,48 @@ def _disconnect_or_purge(shape, side, idx, other_plug):
                 "{}.{}[{}]".format(direct, shape, side, idx))
             try:
                 cmds.delete(direct)
-                return True
+                severed = True
             except Exception as exc:
                 cmds.warning(
                     "disconnect: failed to delete unitConversion "
                     "{!r}: {}".format(direct, exc))
                 # Fall through to plain disconnect attempt below.
-    # Direct wire — straightforward disconnect.
-    if side == "input":
-        src_plug = other_plug
-        dst_plug = "{}.input[{}]".format(shape, idx)
-    else:
-        src_plug = "{}.output[{}]".format(shape, idx)
-        dst_plug = other_plug
-    cmds.warning(
-        "disconnect: trying {} -> {}".format(src_plug, dst_plug))
-    try:
-        cmds.disconnectAttr(src_plug, dst_plug)
-        return True
-    except Exception as exc:
+    if not severed:
+        # Direct wire — straightforward disconnect.
+        if side == "input":
+            src_plug = other_plug
+            dst_plug = "{}.input[{}]".format(shape, idx)
+        else:
+            src_plug = "{}.output[{}]".format(shape, idx)
+            dst_plug = other_plug
         cmds.warning(
-            "disconnect: {} -> {} FAILED: {}".format(
-                src_plug, dst_plug, exc))
-        return False
+            "disconnect: trying {} -> {}".format(
+                src_plug, dst_plug))
+        try:
+            cmds.disconnectAttr(src_plug, dst_plug)
+            severed = True
+        except Exception as exc:
+            cmds.warning(
+                "disconnect: {} -> {} FAILED: {}".format(
+                    src_plug, dst_plug, exc))
+    # M_REMOVE_MULTI: physically drop the now-empty multi subscript
+    # so the array stays packed. b=True forces the removal even if
+    # Maya thinks the index still has stale connection bookkeeping
+    # (belt-and-suspenders against the unitConversion-delete path
+    # leaving partial state). Best-effort: a removeMultiInstance
+    # failure logs a warning but does NOT change the return value.
+    if severed:
+        target_plug = "{}.{}[{}]".format(shape, side, idx)
+        try:
+            cmds.removeMultiInstance(target_plug, b=True)
+            cmds.warning(
+                "disconnect: removeMultiInstance({}) cleared the "
+                "empty slot".format(target_plug))
+        except Exception as exc:
+            cmds.warning(
+                "disconnect: removeMultiInstance({}) failed: "
+                "{}".format(target_plug, exc))
+    return severed
 
 
 def _resolved_pairs_at(shape, side):
