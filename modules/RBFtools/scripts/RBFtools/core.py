@@ -1596,42 +1596,47 @@ def disconnect_driver_source_attrs(node, index, attrs=None):
                 "currently bound to driverSource[{}]; "
                 "skipping".format(skipped, index))
         full_clear = False
-    # 1) Sever each requested wire via _disconnect_or_purge (加固
-    # 1: atomic protocol reuse — unitConversion delete +
-    # removeMultiInstance + sweep all happen inside the helper).
-    for attr in attrs_to_clear:
-        plug = "{}.{}".format(src_node, attr)
-        idx = _subscript_of_existing_input(plug, shape)
-        if idx is None:
-            cmds.warning(
-                "disconnect_driver_source_attrs: {} reports no "
-                "shape.input[] subscript; skipping".format(plug))
-            continue
-        _disconnect_or_purge(shape, "input", idx, plug)
-    # 2) Update driverSource_attrs MStringArray.
-    attrs_plug = "{}.driverSource[{}].driverSource_attrs".format(
-        shape, index)
-    try:
-        if full_clear:
-            cmds.setAttr(attrs_plug, 0, type="stringArray")
-        else:
-            kept = [a for a in existing_attrs
-                    if a not in set(attrs_to_clear)]
-            if kept:
-                cmds.setAttr(
-                    attrs_plug, len(kept), *kept,
-                    type="stringArray")
-            else:
+    # M_CRASH_FIX defense 2 (2026-04-28 hotfix): the disconnect
+    # storm + cmds.delete(unitConv) inside _disconnect_or_purge
+    # MUST run while the solver's nodeState is HasNoEffect,
+    # otherwise mid-evaluate compute() against a half-broken
+    # input[] / unitConversion graph triggers CTD.
+    with undo_chunk("RBFtools: disconnect driver source attrs"), \
+         _node_state_frozen(shape):
+        # 1) Sever each requested wire via _disconnect_or_purge.
+        for attr in attrs_to_clear:
+            plug = "{}.{}".format(src_node, attr)
+            idx = _subscript_of_existing_input(plug, shape)
+            if idx is None:
+                cmds.warning(
+                    "disconnect_driver_source_attrs: {} reports "
+                    "no shape.input[] subscript; skipping".format(
+                        plug))
+                continue
+            _disconnect_or_purge(shape, "input", idx, plug)
+        # 2) Update driverSource_attrs MStringArray.
+        attrs_plug = "{}.driverSource[{}].driverSource_attrs".format(
+            shape, index)
+        try:
+            if full_clear:
                 cmds.setAttr(attrs_plug, 0, type="stringArray")
-    except Exception as exc:
-        cmds.warning(
-            "disconnect_driver_source_attrs: failed to clear "
-            "{}: {}".format(attrs_plug, exc))
-        return False
-    # 3) M_SWEEP_EMPTY chaser — orphan input[] subscripts left by
-    # the disconnects above are removed by the helper, but a final
-    # sweep catches stragglers (idempotent).
-    _sweep_empty_subscripts(shape, "input")
+            else:
+                kept = [a for a in existing_attrs
+                        if a not in set(attrs_to_clear)]
+                if kept:
+                    cmds.setAttr(
+                        attrs_plug, len(kept), *kept,
+                        type="stringArray")
+                else:
+                    cmds.setAttr(
+                        attrs_plug, 0, type="stringArray")
+        except Exception as exc:
+            cmds.warning(
+                "disconnect_driver_source_attrs: failed to clear "
+                "{}: {}".format(attrs_plug, exc))
+            return False
+        # 3) M_SWEEP_EMPTY chaser.
+        _sweep_empty_subscripts(shape, "input")
     return True
 
 
@@ -1677,25 +1682,16 @@ def set_driver_source_attrs(node, index, new_attrs):
             "set_driver_source_attrs: index {} out of range "
             "(0..{})".format(index, len(sources) - 1))
         return False
-    # M_CONNECT_DISCONNECT_FIX 加固 1: pre-clean overlapping wires
-    # via _disconnect_or_purge so unitConversion ghosts cannot
-    # survive the rebuild. Pure-new attrs need no pre-step.
+    # M_CRASH_FIX defense 2 (2026-04-28 hotfix): wrap entire
+    # remove-all + re-add-all storm in _node_state_frozen so a
+    # half-wired input[] array cannot trigger compute() during
+    # the rebuild. Specifically: cmds.delete(unitConv) inside the
+    # overlap pre-clean is the documented CTD trigger when DG is
+    # still actively evaluating.
     target_pre = sources[index]
     existing_pre_attrs = list(target_pre.attrs)
     new_attrs_list = list(new_attrs)
     overlapping = [a for a in new_attrs_list if a in existing_pre_attrs]
-    if overlapping and target_pre.node and _exists(shape):
-        cmds.warning(
-            "set_driver_source_attrs: overlapping attrs {!r} pre-"
-            "cleaned via _disconnect_or_purge before rebuild "
-            "(atomic protocol reuse).".format(overlapping))
-        for attr in overlapping:
-            plug = "{}.{}".format(target_pre.node, attr)
-            sub_idx = _subscript_of_existing_input(plug, shape)
-            if sub_idx is not None:
-                _disconnect_or_purge(shape, "input", sub_idx, plug)
-    # Build the rebuilt source list (in-memory copy + mutation at
-    # the requested index).
     rebuilt = []
     for i, src in enumerate(sources):
         if i == index:
@@ -1706,33 +1702,49 @@ def set_driver_source_attrs(node, index, new_attrs):
                 encoding=int(src.encoding)))
         else:
             rebuilt.append(src)
-    # Remove every existing source (high-to-low index so logical
-    # indices stay valid as we go).
-    try:
-        existing_indices = sorted(cmds.getAttr(
-            get_shape(node) + ".driverSource",
-            multiIndices=True) or [], reverse=True)
-    except Exception:
-        existing_indices = list(range(len(sources) - 1, -1, -1))
-    for d in existing_indices:
-        try:
-            remove_driver_source(node, d)
-        except Exception as exc:
+    with undo_chunk("RBFtools: set driver source attrs"), \
+         _node_state_frozen(shape):
+        # 1) Overlap pre-clean (purge unitConversion ghosts).
+        if overlapping and target_pre.node:
             cmds.warning(
-                "set_driver_source_attrs: remove sweep failed at "
-                "index {}: {}".format(d, exc))
-            return False
-    # Re-add the rebuilt list.
-    for src in rebuilt:
+                "set_driver_source_attrs: overlapping attrs {!r} "
+                "pre-cleaned via _disconnect_or_purge before "
+                "rebuild (atomic protocol reuse).".format(
+                    overlapping))
+            for attr in overlapping:
+                plug = "{}.{}".format(target_pre.node, attr)
+                sub_idx = _subscript_of_existing_input(plug, shape)
+                if sub_idx is not None:
+                    _disconnect_or_purge(
+                        shape, "input", sub_idx, plug)
+        # 2) Remove every existing source (high-to-low so indices
+        # stay valid).
         try:
-            add_driver_source(node, src.node, list(src.attrs),
-                              weight=float(src.weight),
-                              encoding=int(src.encoding))
-        except Exception as exc:
-            cmds.warning(
-                "set_driver_source_attrs: re-add failed for {!r}: "
-                "{}".format(src.node, exc))
-            return False
+            existing_indices = sorted(cmds.getAttr(
+                shape + ".driverSource",
+                multiIndices=True) or [], reverse=True)
+        except Exception:
+            existing_indices = list(range(len(sources) - 1, -1, -1))
+        for d in existing_indices:
+            try:
+                remove_driver_source(node, d)
+            except Exception as exc:
+                cmds.warning(
+                    "set_driver_source_attrs: remove sweep failed "
+                    "at index {}: {}".format(d, exc))
+                return False
+        # 3) Re-add the rebuilt list.
+        for src in rebuilt:
+            try:
+                add_driver_source(
+                    node, src.node, list(src.attrs),
+                    weight=float(src.weight),
+                    encoding=int(src.encoding))
+            except Exception as exc:
+                cmds.warning(
+                    "set_driver_source_attrs: re-add failed for "
+                    "{!r}: {}".format(src.node, exc))
+                return False
     return True
 
 
@@ -2024,41 +2036,43 @@ def disconnect_driven_source_attrs(node, index, attrs=None):
                 "currently bound to drivenSource[{}]; "
                 "skipping".format(skipped, index))
         full_clear = False
-    # 1) Sever via atomic helper.
-    for attr in attrs_to_clear:
-        dst_plug = "{}.{}".format(dvn_node, attr)
-        idx = _subscript_of_existing_output(shape, dst_plug)
-        if idx is None:
-            cmds.warning(
-                "disconnect_driven_source_attrs: {} reports no "
-                "shape.output[] subscript; skipping".format(
-                    dst_plug))
-            continue
-        _disconnect_or_purge(shape, "output", idx, dst_plug)
-    # 2) Update drivenSource_attrs metadata.
-    if cmds.attributeQuery("drivenSource", node=shape, exists=True):
-        attrs_plug = (
-            "{}.drivenSource[{}].drivenSource_attrs".format(
-                shape, index))
-        try:
-            if full_clear:
-                cmds.setAttr(attrs_plug, 0, type="stringArray")
-            else:
-                kept = [a for a in existing_attrs
-                        if a not in set(attrs_to_clear)]
-                if kept:
-                    cmds.setAttr(
-                        attrs_plug, len(kept), *kept,
-                        type="stringArray")
-                else:
+    # M_CRASH_FIX defense 2 driven mirror.
+    with undo_chunk("RBFtools: disconnect driven source attrs"), \
+         _node_state_frozen(shape):
+        for attr in attrs_to_clear:
+            dst_plug = "{}.{}".format(dvn_node, attr)
+            idx = _subscript_of_existing_output(shape, dst_plug)
+            if idx is None:
+                cmds.warning(
+                    "disconnect_driven_source_attrs: {} reports "
+                    "no shape.output[] subscript; skipping".format(
+                        dst_plug))
+                continue
+            _disconnect_or_purge(shape, "output", idx, dst_plug)
+        if cmds.attributeQuery(
+                "drivenSource", node=shape, exists=True):
+            attrs_plug = (
+                "{}.drivenSource[{}].drivenSource_attrs".format(
+                    shape, index))
+            try:
+                if full_clear:
                     cmds.setAttr(attrs_plug, 0, type="stringArray")
-        except Exception as exc:
-            cmds.warning(
-                "disconnect_driven_source_attrs: failed to clear "
-                "{}: {}".format(attrs_plug, exc))
-            return False
-    # 3) M_SWEEP_EMPTY chaser.
-    _sweep_empty_subscripts(shape, "output")
+                else:
+                    kept = [a for a in existing_attrs
+                            if a not in set(attrs_to_clear)]
+                    if kept:
+                        cmds.setAttr(
+                            attrs_plug, len(kept), *kept,
+                            type="stringArray")
+                    else:
+                        cmds.setAttr(
+                            attrs_plug, 0, type="stringArray")
+            except Exception as exc:
+                cmds.warning(
+                    "disconnect_driven_source_attrs: failed to "
+                    "clear {}: {}".format(attrs_plug, exc))
+                return False
+        _sweep_empty_subscripts(shape, "output")
     return True
 
 
@@ -2079,20 +2093,16 @@ def set_driven_source_attrs(node, index, new_attrs):
             "(0..{})".format(index, len(sources) - 1))
         return False
     # M_CONNECT_DISCONNECT_FIX 加固 1 driven mirror.
+    # M_CRASH_FIX defense 2 (2026-04-28 hotfix): wrap the entire
+    # remove-all + re-add-all storm in _node_state_frozen so a
+    # half-wired output[] array cannot trigger compute() — and
+    # specifically so cmds.delete(unitConv) inside the overlap
+    # pre-clean does NOT fire mid-evaluate (the CTD root cause
+    # observed in the user's Driven-side Connect repro).
     target_pre = sources[index]
     existing_pre_attrs = list(target_pre.attrs)
     new_attrs_list = list(new_attrs)
     overlapping = [a for a in new_attrs_list if a in existing_pre_attrs]
-    if overlapping and target_pre.node and _exists(shape):
-        cmds.warning(
-            "set_driven_source_attrs: overlapping attrs {!r} pre-"
-            "cleaned via _disconnect_or_purge before rebuild "
-            "(atomic protocol reuse).".format(overlapping))
-        for attr in overlapping:
-            plug = "{}.{}".format(target_pre.node, attr)
-            sub_idx = _subscript_of_existing_output(shape, plug)
-            if sub_idx is not None:
-                _disconnect_or_purge(shape, "output", sub_idx, plug)
     rebuilt = []
     for i, src in enumerate(sources):
         if i == index:
@@ -2100,28 +2110,47 @@ def set_driven_source_attrs(node, index, new_attrs):
                 node=src.node, attrs=tuple(new_attrs)))
         else:
             rebuilt.append(src)
-    try:
-        existing_indices = sorted(cmds.getAttr(
-            get_shape(node) + ".drivenSource",
-            multiIndices=True) or [], reverse=True)
-    except Exception:
-        existing_indices = list(range(len(sources) - 1, -1, -1))
-    for d in existing_indices:
-        try:
-            remove_driven_source(node, d)
-        except Exception as exc:
+    with undo_chunk("RBFtools: set driven source attrs"), \
+         _node_state_frozen(shape):
+        # 1) Overlap pre-clean — purge unitConversion ghosts
+        # before the heavy rebuild fires.
+        if overlapping and target_pre.node:
             cmds.warning(
-                "set_driven_source_attrs: remove sweep failed at "
-                "index {}: {}".format(d, exc))
-            return False
-    for src in rebuilt:
+                "set_driven_source_attrs: overlapping attrs {!r} "
+                "pre-cleaned via _disconnect_or_purge before "
+                "rebuild (atomic protocol reuse).".format(
+                    overlapping))
+            for attr in overlapping:
+                plug = "{}.{}".format(target_pre.node, attr)
+                sub_idx = _subscript_of_existing_output(shape, plug)
+                if sub_idx is not None:
+                    _disconnect_or_purge(
+                        shape, "output", sub_idx, plug)
+        # 2) Remove every existing source.
         try:
-            add_driven_source(node, src.node, list(src.attrs))
-        except Exception as exc:
-            cmds.warning(
-                "set_driven_source_attrs: re-add failed for {!r}: "
-                "{}".format(src.node, exc))
-            return False
+            existing_indices = sorted(cmds.getAttr(
+                shape + ".drivenSource",
+                multiIndices=True) or [], reverse=True)
+        except Exception:
+            existing_indices = list(range(len(sources) - 1, -1, -1))
+        for d in existing_indices:
+            try:
+                remove_driven_source(node, d)
+            except Exception as exc:
+                cmds.warning(
+                    "set_driven_source_attrs: remove sweep failed "
+                    "at index {}: {}".format(d, exc))
+                return False
+        # 3) Re-add the rebuilt list.
+        for src in rebuilt:
+            try:
+                add_driven_source(
+                    node, src.node, list(src.attrs))
+            except Exception as exc:
+                cmds.warning(
+                    "set_driven_source_attrs: re-add failed for "
+                    "{!r}: {}".format(src.node, exc))
+                return False
     return True
 
 

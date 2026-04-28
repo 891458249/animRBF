@@ -387,5 +387,49 @@ class T_PATH_A_ATOMIC_PROTOCOL_REUSE(unittest.TestCase):
         self.assertIn("_disconnect_or_purge", body)
 
 
+class T_PATH_A_NODE_STATE_FROZEN_HOTFIX(unittest.TestCase):
+    """PERMANENT GUARD — 2026-04-28 hotfix.
+
+    User report: Driven-side Connect caused Maya CTD. Root cause —
+    the path-A set/disconnect_*_source_attrs functions ran their
+    wiring storm (cmds.delete(unitConv) + remove-all + re-add-all)
+    OUTSIDE _node_state_frozen, so DG kept evaluating compute() on
+    a transient half-broken graph and segfaulted in the C++ kernel.
+
+    All 4 path-A functions MUST wrap their body in
+    _node_state_frozen(shape) — same protocol as connect_routed /
+    disconnect_routed (M_CRASH_FIX defense 2)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._core = _read(_CORE_PY)
+
+    def test_set_driver_uses_node_state_frozen(self):
+        body = self._core.split(
+            "def set_driver_source_attrs")[1].split("\ndef ")[0]
+        self.assertIn("_node_state_frozen(shape)", body,
+            "set_driver_source_attrs MUST wrap its rebuild storm "
+            "in _node_state_frozen — DG mid-evaluate during "
+            "cmds.delete(unitConv) is the documented CTD trigger.")
+
+    def test_set_driven_uses_node_state_frozen(self):
+        body = self._core.split(
+            "def set_driven_source_attrs")[1].split("\ndef ")[0]
+        self.assertIn("_node_state_frozen(shape)", body,
+            "set_driven_source_attrs CTD repro fix — wrap in freeze.")
+
+    def test_disconnect_driver_uses_node_state_frozen(self):
+        body = self._core.split(
+            "def disconnect_driver_source_attrs")[1].split(
+            "\ndef ")[0]
+        self.assertIn("_node_state_frozen(shape)", body)
+
+    def test_disconnect_driven_uses_node_state_frozen(self):
+        body = self._core.split(
+            "def disconnect_driven_source_attrs")[1].split(
+            "\ndef ")[0]
+        self.assertIn("_node_state_frozen(shape)", body)
+
+
 if __name__ == "__main__":
     unittest.main()
