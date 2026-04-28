@@ -50,8 +50,11 @@ class TestM_TABBED_CONNECT_GUARD_SourceScan(unittest.TestCase):
         cls._main = _read(_MAIN_WINDOW)
 
     def test_helpers_present(self):
+        # M_CONNECT_DISCONNECT_FIX (2026-04-28): _guard_attrs_clear
+        # was removed; the 3-scene dispatch now lives inline in
+        # _on_*_source_attrs_clear (driver + driven). _guard_attrs_apply
+        # was kept but rewritten to return a plan-dict (overlap-aware).
         self.assertIn("def _guard_attrs_apply", self._main)
-        self.assertIn("def _guard_attrs_clear", self._main)
 
     def test_message_box_used(self):
         self.assertIn("QtWidgets.QMessageBox.information",
@@ -60,12 +63,18 @@ class TestM_TABBED_CONNECT_GUARD_SourceScan(unittest.TestCase):
             "notice when the operation is short-circuited")
 
     def test_apply_slots_call_guard(self):
-        # Both driver + driven Connect slots must consult the guard.
+        # M_CONNECT_DISCONNECT_FIX: Connect slots still consult
+        # _guard_attrs_apply (now plan-dict). Disconnect slots no
+        # longer call _guard_attrs_clear — the 3-scene dispatch is
+        # inline (D.3 nothing-to-disconnect dialog lives directly in
+        # _on_*_source_attrs_clear).
         for slot in ("def _on_driver_source_attrs_apply",
                      "def _on_driven_source_attrs_apply"):
             self.assertIn(slot, self._main)
         self.assertIn("self._guard_attrs_apply(", self._main)
-        self.assertIn("self._guard_attrs_clear(", self._main)
+        # Inline Scene-C dispatch markers (replaces _guard_attrs_clear).
+        self.assertIn("title_nothing_to_disconnect", self._main)
+        self.assertIn("msg_nothing_to_disconnect", self._main)
 
     def test_i18n_keys_present(self):
         from RBFtools.ui import i18n
@@ -118,7 +127,12 @@ class TestM_TABBED_CONNECT_GUARD_Lifecycle(unittest.TestCase):
         mb.information.assert_called_once()
         win._ctrl.set_driver_source_attrs.assert_not_called()
 
-    def test_driver_apply_blocks_when_already_connected(self):
+    def test_driver_apply_proceeds_when_already_connected(self):
+        # M_CONNECT_DISCONNECT_FIX Bug 1: the legacy unconditional
+        # block on "already connected" was the bug — the user
+        # spec 1.3 requires the call to PROCEED so the controller's
+        # set_driver_source_attrs handles overlapping (break-then-
+        # rebuild via _disconnect_or_purge) and append uniformly.
         from RBFtools.ui.main_window import RBFToolsWindow
         win = self._make_window(
             driver_sources=[self._src(["tx", "ty"])])
@@ -127,8 +141,9 @@ class TestM_TABBED_CONNECT_GUARD_Lifecycle(unittest.TestCase):
         ) as mb:
             RBFToolsWindow._on_driver_source_attrs_apply(
                 win, 0, ["rx", "ry"])
-        mb.information.assert_called_once()
-        win._ctrl.set_driver_source_attrs.assert_not_called()
+        mb.information.assert_not_called()
+        win._ctrl.set_driver_source_attrs.assert_called_once_with(
+            0, ["rx", "ry"])
 
     def test_driver_apply_proceeds_when_clean(self):
         from RBFtools.ui.main_window import RBFToolsWindow
@@ -145,36 +160,40 @@ class TestM_TABBED_CONNECT_GUARD_Lifecycle(unittest.TestCase):
     # ----- Disconnect guards -----------------------------------------
 
     def test_driver_clear_blocks_when_already_empty(self):
+        # M_CONNECT_DISCONNECT_FIX D.3 — Scene C dialog still
+        # surfaces when the source has zero attrs. Slot signature
+        # changed to (index, attrs); pass attrs=[] to exercise.
         from RBFtools.ui.main_window import RBFToolsWindow
         win = self._make_window(driver_sources=[self._src([])])
         with mock.patch(
                 "RBFtools.ui.main_window.QtWidgets.QMessageBox"
         ) as mb:
-            RBFToolsWindow._on_driver_source_attrs_clear(win, 0)
+            RBFToolsWindow._on_driver_source_attrs_clear(
+                win, 0, [])
         mb.information.assert_called_once()
-        win._ctrl.set_driver_source_attrs.assert_not_called()
+        win._ctrl.disconnect_driver_source_attrs.assert_not_called()
 
     def test_driver_clear_proceeds_when_populated(self):
-        """M_DISCONNECT_FIX (Phase 1, 2026-04-27): Disconnect on a
-        populated source now routes through
-        controller.disconnect_driver_source_attrs (direct
-        disconnect) instead of the previous
-        set_driver_source_attrs(idx, []) rebuild path."""
+        """M_CONNECT_DISCONNECT_FIX D.2 — empty attrs payload
+        triggers full-source disconnect (attrs=None forwarded to
+        controller)."""
         from RBFtools.ui.main_window import RBFToolsWindow
         win = self._make_window(
             driver_sources=[self._src(["tx", "ty"])])
         with mock.patch(
                 "RBFtools.ui.main_window.QtWidgets.QMessageBox"
         ) as mb:
-            RBFToolsWindow._on_driver_source_attrs_clear(win, 0)
+            RBFToolsWindow._on_driver_source_attrs_clear(
+                win, 0, [])
         mb.information.assert_not_called()
         win._ctrl.disconnect_driver_source_attrs.\
-            assert_called_once_with(0)
+            assert_called_once_with(0, None)
         win._ctrl.set_driver_source_attrs.assert_not_called()
 
     # ----- Driven side: same shape ----------------------------------
 
-    def test_driven_apply_blocks_when_already_connected(self):
+    def test_driven_apply_proceeds_when_already_connected(self):
+        # M_CONNECT_DISCONNECT_FIX Bug 1 driven mirror.
         from RBFtools.ui.main_window import RBFToolsWindow
         from RBFtools.core import DrivenSource
         win = self._make_window(
@@ -185,10 +204,13 @@ class TestM_TABBED_CONNECT_GUARD_Lifecycle(unittest.TestCase):
         ) as mb:
             RBFToolsWindow._on_driven_source_attrs_apply(
                 win, 0, ["tx"])
-        mb.information.assert_called_once()
-        win._ctrl.set_driven_source_attrs.assert_not_called()
+        mb.information.assert_not_called()
+        win._ctrl.set_driven_source_attrs.assert_called_once_with(
+            0, ["tx"])
 
     def test_driven_clear_blocks_when_already_empty(self):
+        # M_CONNECT_DISCONNECT_FIX D.3 driven mirror — slot now
+        # accepts (index, attrs).
         from RBFtools.ui.main_window import RBFToolsWindow
         from RBFtools.core import DrivenSource
         win = self._make_window(
@@ -196,9 +218,10 @@ class TestM_TABBED_CONNECT_GUARD_Lifecycle(unittest.TestCase):
         with mock.patch(
                 "RBFtools.ui.main_window.QtWidgets.QMessageBox"
         ) as mb:
-            RBFToolsWindow._on_driven_source_attrs_clear(win, 0)
+            RBFToolsWindow._on_driven_source_attrs_clear(
+                win, 0, [])
         mb.information.assert_called_once()
-        win._ctrl.set_driven_source_attrs.assert_not_called()
+        win._ctrl.disconnect_driven_source_attrs.assert_not_called()
 
 
 # ----------------------------------------------------------------------

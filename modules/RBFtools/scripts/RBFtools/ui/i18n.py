@@ -495,6 +495,16 @@ _EN = {
     "disconnect_no_connections_found":
         "The selected target has no attributes connected to this "
         "RBF node.",
+    # M_CONNECT_DISCONNECT_FIX (2026-04-28) — overlap-aware Connect
+    # + precise Disconnect status copy.
+    "title_connect_overlap_rebuild":  "Overlap detected",
+    "msg_connect_overlap_rebuild":
+        "Overlapping attributes will be re-bound in the order you "
+        "selected; new attributes will be appended.",
+    "title_disconnect_precise":       "Precise disconnect",
+    "msg_disconnect_precise":
+        "Disconnected the selected attributes only; other "
+        "attributes on this source remain wired.",
 }
 
 _ZH = {
@@ -917,6 +927,13 @@ _ZH = {
         u"\u5df2\u52fe\u9009\uff1a\u904d\u5386\u6240\u6709\u6807\u7b7e\u9875\u3002",
     "disconnect_no_connections_found":
         u"\u8be5\u76ee\u6807\u6ca1\u6709\u4efb\u4f55\u5c5e\u6027\u8fde\u63a5\u5230\u6b64\u8282\u70b9",
+    # M_CONNECT_DISCONNECT_FIX (2026-04-28)
+    "title_connect_overlap_rebuild":  u"\u68c0\u6d4b\u5230\u91cd\u53e0\u5c5e\u6027",
+    "msg_connect_overlap_rebuild":
+        u"\u91cd\u53e0\u5c5e\u6027\u5c06\u6309\u60a8\u9009\u62e9\u7684\u987a\u5e8f\u91cd\u65b0\u7ed1\u5b9a;\u65b0\u5c5e\u6027\u5c06\u4f9d\u6b21\u8ffd\u52a0\u3002",
+    "title_disconnect_precise":       u"\u7cbe\u786e\u65ad\u5f00",
+    "msg_disconnect_precise":
+        u"\u4ec5\u65ad\u5f00\u6240\u9009\u5c5e\u6027;\u6b64\u76ee\u6807\u7684\u5176\u4ed6\u5c5e\u6027\u4fdd\u6301\u8fde\u63a5\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

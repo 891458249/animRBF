@@ -1504,12 +1504,26 @@ def cleanup_remove_redundant_poses(node):
     return removed
 
 
-def disconnect_driver_source_attrs(node, index):
-    """M_DISCONNECT_FIX (Phase 1, P0 critical fix 2026-04-27): true
-    disconnect for a single driver source - directly disconnects
-    the source's `input[base..base+n]` wires + clears the
-    `driverSource_attrs` MStringArray, without rebuilding any other
-    source.
+def disconnect_driver_source_attrs(node, index, attrs=None):
+    """M_CONNECT_DISCONNECT_FIX Bug 2 (2026-04-28) — extended
+    signature accepts optional ``attrs`` list:
+
+      attrs=None    -> Scene B: disconnect the FULL set of currently-
+                       wired attrs and empty the driverSource_attrs
+                       MStringArray (legacy behavior).
+      attrs=[...]   -> Scene A: disconnect ONLY the listed attrs +
+                       remove them from driverSource_attrs while
+                       keeping the rest intact.
+
+    Atomic protocol reuse (加固 1): every sever routes through
+    :func:`_disconnect_or_purge` so a unitConversion ghost is
+    deleted, an empty multi subscript is removed via
+    ``cmds.removeMultiInstance(b=True)``, and the array stays
+    packed. Path A (this function) no longer bypasses the
+    M_BREAK_REBUILD / M_UNITCONV_PURGE / M_REMOVE_MULTI /
+    M_SWEEP_EMPTY protocols.
+
+    Original spec (M_DISCONNECT_FIX 2026-04-27): true
 
     Why a dedicated function:
       - The previous Disconnect path called
@@ -1555,62 +1569,103 @@ def disconnect_driver_source_attrs(node, index):
             "range (0..{})".format(index, len(sources) - 1))
         return False
     target = sources[index]
-    if not target.attrs:
+    existing_attrs = list(target.attrs)
+    if not existing_attrs:
         # Already empty - nothing to disconnect. Still treat as
         # success (idempotent) so the slot guards don't loop.
         return True
-    # Compute base offset for this source's input[] slice. Matches
-    # the convention add_driver_source uses (sum of attr counts of
-    # all logically-prior sources).
-    base = 0
-    for i, s in enumerate(sources):
-        if i == index:
-            break
-        base += len(s.attrs)
-    # 1) disconnect each input[] wire.
     src_node = target.node or ""
-    for i, attr in enumerate(target.attrs):
-        if not src_node:
-            break
-        src_plug = "{}.{}".format(src_node, attr)
-        dst_plug = "{}.input[{}]".format(shape, base + i)
-        try:
-            cmds.disconnectAttr(src_plug, dst_plug)
-        except Exception:
-            # Best-effort: a manually-disconnected wire would raise
-            # here; we still want to clear the metadata below.
-            pass
-    # 2) clear driverSource_attrs metadata. The MStringArray empty
-    # form is `setAttr <plug> 0 -type "stringArray"` (length 0 +
-    # zero values).
+    if not src_node:
+        return False
+    # Decide Scene A vs Scene B scope.
+    if attrs is None:
+        # Scene B: full source — disconnect every currently-wired
+        # attr and empty the MStringArray.
+        attrs_to_clear = list(existing_attrs)
+        full_clear = True
+    else:
+        # Scene A: precise — only the requested subset that is
+        # actually currently held by this source. Anything outside
+        # existing_attrs is silently dropped (cmds.warning trace).
+        requested = list(attrs)
+        attrs_to_clear = [a for a in requested if a in existing_attrs]
+        skipped = [a for a in requested if a not in existing_attrs]
+        if skipped:
+            cmds.warning(
+                "disconnect_driver_source_attrs: attrs {!r} not "
+                "currently bound to driverSource[{}]; "
+                "skipping".format(skipped, index))
+        full_clear = False
+    # 1) Sever each requested wire via _disconnect_or_purge (加固
+    # 1: atomic protocol reuse — unitConversion delete +
+    # removeMultiInstance + sweep all happen inside the helper).
+    for attr in attrs_to_clear:
+        plug = "{}.{}".format(src_node, attr)
+        idx = _subscript_of_existing_input(plug, shape)
+        if idx is None:
+            cmds.warning(
+                "disconnect_driver_source_attrs: {} reports no "
+                "shape.input[] subscript; skipping".format(plug))
+            continue
+        _disconnect_or_purge(shape, "input", idx, plug)
+    # 2) Update driverSource_attrs MStringArray.
     attrs_plug = "{}.driverSource[{}].driverSource_attrs".format(
         shape, index)
     try:
-        cmds.setAttr(attrs_plug, 0, type="stringArray")
+        if full_clear:
+            cmds.setAttr(attrs_plug, 0, type="stringArray")
+        else:
+            kept = [a for a in existing_attrs
+                    if a not in set(attrs_to_clear)]
+            if kept:
+                cmds.setAttr(
+                    attrs_plug, len(kept), *kept,
+                    type="stringArray")
+            else:
+                cmds.setAttr(attrs_plug, 0, type="stringArray")
     except Exception as exc:
         cmds.warning(
             "disconnect_driver_source_attrs: failed to clear "
             "{}: {}".format(attrs_plug, exc))
         return False
+    # 3) M_SWEEP_EMPTY chaser — orphan input[] subscripts left by
+    # the disconnects above are removed by the helper, but a final
+    # sweep catches stragglers (idempotent).
+    _sweep_empty_subscripts(shape, "input")
     return True
 
 
 def set_driver_source_attrs(node, index, new_attrs):
-    """M_UIRECONCILE_PLUS (Item 4b): replace the attrs list of an
-    existing driverSource[index] entry.
+    """M_UIRECONCILE_PLUS (Item 4b) +
+    M_CONNECT_DISCONNECT_FIX Bug 1 (2026-04-28): replace the attrs
+    list of an existing driverSource[index] entry.
 
-    Implementation: read the full source list, replace index'th
-    entry's attrs, then remove + re-add every source in order. This
-    keeps the driverSource[*] indices stable and the input[] /
-    driverList[] wiring consistent with the rest of the multi-
-    source pipeline; performance is fine for the typical 4-10
-    source workload.
+    M_CONNECT_DISCONNECT_FIX 加固 1 / 加固 6 (2026-04-28):
+      * Overlapping attrs (those that are BOTH in existing AND in
+        new_attrs) are first severed via :func:`_disconnect_or_purge`
+        so any unitConversion ghost is purged before the heavy
+        rebuild fires (atomic protocol reuse).
+      * Pure-new attrs (those in new_attrs but NOT existing) just
+        flow through the rebuild append path.
+      * The MStringArray's final order matches ``new_attrs`` —
+        :func:`add_driver_source` writes the attrs in list order
+        and that is the user's selection order from the tabbed
+        editor's QListWidget.
+
+    Implementation (post-fix): read the full source list, replace
+    index'th entry's attrs, then remove + re-add every source in
+    order. The remove-all + re-add-all rebuild handles input[] /
+    driverList[] subscript shifts correctly when len(new_attrs)
+    differs from len(existing). The pre-clean step ensures
+    overlapping wires drop their unitConversion artefacts before
+    the rebuild restores them.
 
     Returns True on success, False if the index is out of range or
     the underlying mutation raised. Failures emit cmds.warning so
     the controller layer surfaces them to the TD via the script
     editor.
     """
+    shape = get_shape(node)
     sources = read_driver_info_multi(node)
     if not sources:
         cmds.warning(
@@ -1622,6 +1677,23 @@ def set_driver_source_attrs(node, index, new_attrs):
             "set_driver_source_attrs: index {} out of range "
             "(0..{})".format(index, len(sources) - 1))
         return False
+    # M_CONNECT_DISCONNECT_FIX 加固 1: pre-clean overlapping wires
+    # via _disconnect_or_purge so unitConversion ghosts cannot
+    # survive the rebuild. Pure-new attrs need no pre-step.
+    target_pre = sources[index]
+    existing_pre_attrs = list(target_pre.attrs)
+    new_attrs_list = list(new_attrs)
+    overlapping = [a for a in new_attrs_list if a in existing_pre_attrs]
+    if overlapping and target_pre.node and _exists(shape):
+        cmds.warning(
+            "set_driver_source_attrs: overlapping attrs {!r} pre-"
+            "cleaned via _disconnect_or_purge before rebuild "
+            "(atomic protocol reuse).".format(overlapping))
+        for attr in overlapping:
+            plug = "{}.{}".format(target_pre.node, attr)
+            sub_idx = _subscript_of_existing_input(plug, shape)
+            if sub_idx is not None:
+                _disconnect_or_purge(shape, "input", sub_idx, plug)
     # Build the rebuilt source list (in-memory copy + mutation at
     # the requested index).
     rebuilt = []
@@ -1910,11 +1982,11 @@ def remove_driven_source(node, index):
     _wire_driven_sources(shape, read_driven_info_multi(node))
 
 
-def disconnect_driven_source_attrs(node, index):
-    """M_DISCONNECT_FIX driven mirror of
-    :func:`disconnect_driver_source_attrs`. Direct disconnect on
-    `output[base..base+n]` wires + clear `drivenSource_attrs`
-    metadata. No remove-all + re-add-all rebuild."""
+def disconnect_driven_source_attrs(node, index, attrs=None):
+    """M_CONNECT_DISCONNECT_FIX Bug 2 driven mirror of
+    :func:`disconnect_driver_source_attrs`. Same Scene A/B
+    semantics + atomic protocol reuse via
+    :func:`_disconnect_or_purge`."""
     shape = get_shape(node)
     if not _exists(shape):
         cmds.warning(
@@ -1933,45 +2005,68 @@ def disconnect_driven_source_attrs(node, index):
             "range (0..{})".format(index, len(sources) - 1))
         return False
     target = sources[index]
-    if not target.attrs:
+    existing_attrs = list(target.attrs)
+    if not existing_attrs:
         return True
-    # Base offset across logically-prior driven sources.
-    base = 0
-    for i, s in enumerate(sources):
-        if i == index:
-            break
-        base += len(s.attrs)
-    # 1) disconnect output[base+i] -> driven_node.attr_i wires.
     dvn_node = target.node or ""
-    for i, attr in enumerate(target.attrs):
-        if not dvn_node:
-            break
-        src_plug = "{}.output[{}]".format(shape, base + i)
+    if not dvn_node:
+        return False
+    if attrs is None:
+        attrs_to_clear = list(existing_attrs)
+        full_clear = True
+    else:
+        requested = list(attrs)
+        attrs_to_clear = [a for a in requested if a in existing_attrs]
+        skipped = [a for a in requested if a not in existing_attrs]
+        if skipped:
+            cmds.warning(
+                "disconnect_driven_source_attrs: attrs {!r} not "
+                "currently bound to drivenSource[{}]; "
+                "skipping".format(skipped, index))
+        full_clear = False
+    # 1) Sever via atomic helper.
+    for attr in attrs_to_clear:
         dst_plug = "{}.{}".format(dvn_node, attr)
-        try:
-            cmds.disconnectAttr(src_plug, dst_plug)
-        except Exception:
-            pass
-    # 2) clear drivenSource_attrs metadata (the dynamic compound
-    # added by _ensure_driven_source_compound).
+        idx = _subscript_of_existing_output(shape, dst_plug)
+        if idx is None:
+            cmds.warning(
+                "disconnect_driven_source_attrs: {} reports no "
+                "shape.output[] subscript; skipping".format(
+                    dst_plug))
+            continue
+        _disconnect_or_purge(shape, "output", idx, dst_plug)
+    # 2) Update drivenSource_attrs metadata.
     if cmds.attributeQuery("drivenSource", node=shape, exists=True):
         attrs_plug = (
             "{}.drivenSource[{}].drivenSource_attrs".format(
                 shape, index))
         try:
-            cmds.setAttr(attrs_plug, 0, type="stringArray")
+            if full_clear:
+                cmds.setAttr(attrs_plug, 0, type="stringArray")
+            else:
+                kept = [a for a in existing_attrs
+                        if a not in set(attrs_to_clear)]
+                if kept:
+                    cmds.setAttr(
+                        attrs_plug, len(kept), *kept,
+                        type="stringArray")
+                else:
+                    cmds.setAttr(attrs_plug, 0, type="stringArray")
         except Exception as exc:
             cmds.warning(
                 "disconnect_driven_source_attrs: failed to clear "
                 "{}: {}".format(attrs_plug, exc))
             return False
+    # 3) M_SWEEP_EMPTY chaser.
+    _sweep_empty_subscripts(shape, "output")
     return True
 
 
 def set_driven_source_attrs(node, index, new_attrs):
-    """M_DRIVEN_MULTI: replace the attrs list of an existing
-    drivenSource[index] entry. Same remove-all + re-add-in-order pattern
-    used by :func:`set_driver_source_attrs`."""
+    """M_DRIVEN_MULTI + M_CONNECT_DISCONNECT_FIX Bug 1 (2026-04-28)
+    driven mirror — same overlap-aware pre-clean as
+    :func:`set_driver_source_attrs`."""
+    shape = get_shape(node)
     sources = read_driven_info_multi(node)
     if not sources:
         cmds.warning(
@@ -1983,6 +2078,21 @@ def set_driven_source_attrs(node, index, new_attrs):
             "set_driven_source_attrs: index {} out of range "
             "(0..{})".format(index, len(sources) - 1))
         return False
+    # M_CONNECT_DISCONNECT_FIX 加固 1 driven mirror.
+    target_pre = sources[index]
+    existing_pre_attrs = list(target_pre.attrs)
+    new_attrs_list = list(new_attrs)
+    overlapping = [a for a in new_attrs_list if a in existing_pre_attrs]
+    if overlapping and target_pre.node and _exists(shape):
+        cmds.warning(
+            "set_driven_source_attrs: overlapping attrs {!r} pre-"
+            "cleaned via _disconnect_or_purge before rebuild "
+            "(atomic protocol reuse).".format(overlapping))
+        for attr in overlapping:
+            plug = "{}.{}".format(target_pre.node, attr)
+            sub_idx = _subscript_of_existing_output(shape, plug)
+            if sub_idx is not None:
+                _disconnect_or_purge(shape, "output", sub_idx, plug)
     rebuilt = []
     for i, src in enumerate(sources):
         if i == index:

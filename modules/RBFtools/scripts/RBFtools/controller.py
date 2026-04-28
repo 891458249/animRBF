@@ -262,20 +262,29 @@ class MainController(QtCore.QObject):
         self.driverSourcesChanged.emit()
         return True
 
-    def disconnect_driver_source_attrs(self, index):
-        """M_DISCONNECT_FIX (Phase 1, P0 critical fix 2026-04-27):
-        true Disconnect for a driver source - directly disconnects
-        input[] wires + clears the driverSource_attrs metadata,
-        without rebuilding any other source. Routes through
-        :func:`core.disconnect_driver_source_attrs` and emits
-        :attr:`driverSourcesChanged`."""
+    def disconnect_driver_source_attrs(self, index, attrs=None):
+        """M_CONNECT_DISCONNECT_FIX Bug 2 (2026-04-28) — extended
+        signature accepts optional ``attrs`` list:
+
+          attrs=None  -> Scene B: full source disconnect (legacy
+                         behavior)
+          attrs=[...] -> Scene A: precise disconnect of ONLY the
+                         listed attrs (mirrors the new
+                         attrsClearRequested(int, list) signal
+                         payload).
+
+        Routes through :func:`core.disconnect_driver_source_attrs`
+        which itself uses ``_disconnect_or_purge`` for the atomic
+        protocol reuse (M_BREAK_REBUILD / M_UNITCONV_PURGE /
+        M_REMOVE_MULTI / M_SWEEP_EMPTY)."""
         if not self._current_node:
             cmds.warning(
                 "disconnect_driver_source_attrs: no current node")
             return False
         try:
             ok = core.disconnect_driver_source_attrs(
-                self._current_node, int(index))
+                self._current_node, int(index),
+                attrs=list(attrs) if attrs else None)
         except Exception as exc:
             cmds.warning(
                 "disconnect_driver_source_attrs failed: {}".format(exc))
@@ -358,16 +367,17 @@ class MainController(QtCore.QObject):
         self.drivenSourcesChanged.emit()
         return True
 
-    def disconnect_driven_source_attrs(self, index):
-        """M_DISCONNECT_FIX driven mirror. Direct disconnect on
-        output[] wires + clear drivenSource_attrs metadata."""
+    def disconnect_driven_source_attrs(self, index, attrs=None):
+        """M_CONNECT_DISCONNECT_FIX Bug 2 driven mirror — same
+        signature semantics as :meth:`disconnect_driver_source_attrs`."""
         if not self._current_node:
             cmds.warning(
                 "disconnect_driven_source_attrs: no current node")
             return False
         try:
             ok = core.disconnect_driven_source_attrs(
-                self._current_node, int(index))
+                self._current_node, int(index),
+                attrs=list(attrs) if attrs else None)
         except Exception as exc:
             cmds.warning(
                 "disconnect_driven_source_attrs failed: {}".format(exc))

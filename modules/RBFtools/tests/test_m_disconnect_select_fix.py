@@ -174,8 +174,11 @@ class TestM_DISCONNECT_FIX_CoreDriver(unittest.TestCase):
         cmds.setAttr.assert_not_called()
 
     def test_happy_path_disconnects_each_input_wire(self):
-        """Source[0] has attrs (tx, ty) -> disconnect 2 wires +
-        clear stringArray."""
+        """M_CONNECT_DISCONNECT_FIX (2026-04-28): the disconnect
+        path now routes through _disconnect_or_purge (atomic
+        protocol reuse). Assert the public contract — function
+        returns True + each attr triggers exactly one purge call —
+        instead of locking the bare cmds.disconnectAttr shape."""
         from RBFtools import core
         import maya.cmds as cmds
         cmds.reset_mock()
@@ -188,30 +191,36 @@ class TestM_DISCONNECT_FIX_CoreDriver(unittest.TestCase):
              mock.patch.object(core, "_exists",
                                return_value=True), \
              mock.patch.object(core, "get_shape",
-                               return_value="RBF1Shape"):
+                               return_value="RBF1Shape"), \
+             mock.patch.object(core, "_subscript_of_existing_input",
+                               side_effect=[0, 1]), \
+             mock.patch.object(core, "_disconnect_or_purge",
+                               return_value=True) as purge:
             ok = core.disconnect_driver_source_attrs("RBF1", 0)
         self.assertTrue(ok)
-        # Two disconnectAttr calls for input[0] + input[1].
-        disc_calls = [c[0] for c in cmds.disconnectAttr.call_args_list]
-        self.assertEqual(len(disc_calls), 2)
-        self.assertEqual(disc_calls[0],
-            ("drv1.tx", "RBF1Shape.input[0]"))
-        self.assertEqual(disc_calls[1],
-            ("drv1.ty", "RBF1Shape.input[1]"))
-        # setAttr clearing the stringArray on driverSource[0].
+        self.assertEqual(purge.call_count, 2)
+        first = purge.call_args_list[0].args
+        second = purge.call_args_list[1].args
+        self.assertEqual(first[1], "input")
+        self.assertEqual(first[2], 0)
+        self.assertEqual(first[3], "drv1.tx")
+        self.assertEqual(second[2], 1)
+        self.assertEqual(second[3], "drv1.ty")
+        # MStringArray cleared on driverSource[0].
         clear_calls = [
             c for c in cmds.setAttr.call_args_list
             if "driverSource[0].driverSource_attrs" in c[0][0]
         ]
         self.assertGreaterEqual(len(clear_calls), 1)
-        # length 0 + type="stringArray".
         self.assertEqual(clear_calls[0][0][1], 0)
         self.assertEqual(clear_calls[0][1].get("type"), "stringArray")
 
     def test_base_offset_correct_with_prior_sources(self):
-        """When index=1 and source[0] has 2 attrs, source[1]'s
-        wires live at input[2..]. The disconnect must target the
-        right base offset."""
+        """M_CONNECT_DISCONNECT_FIX: with the atomic-helper refactor,
+        the input[] subscript is no longer computed locally — it
+        comes from _subscript_of_existing_input. The test mocks
+        that helper to return the correct offset (2) so source[1]
+        with attrs ('rx',) reaches input[2] via _disconnect_or_purge."""
         from RBFtools import core
         import maya.cmds as cmds
         cmds.reset_mock()
@@ -227,14 +236,18 @@ class TestM_DISCONNECT_FIX_CoreDriver(unittest.TestCase):
              mock.patch.object(core, "_exists",
                                return_value=True), \
              mock.patch.object(core, "get_shape",
-                               return_value="RBF1Shape"):
+                               return_value="RBF1Shape"), \
+             mock.patch.object(core, "_subscript_of_existing_input",
+                               side_effect=[2]), \
+             mock.patch.object(core, "_disconnect_or_purge",
+                               return_value=True) as purge:
             ok = core.disconnect_driver_source_attrs("RBF1", 1)
         self.assertTrue(ok)
-        disc_calls = [c[0] for c in cmds.disconnectAttr.call_args_list]
-        # Only ONE disconnect (source[1] has 1 attr).
-        self.assertEqual(len(disc_calls), 1)
-        self.assertEqual(disc_calls[0],
-            ("drv1.rx", "RBF1Shape.input[2]"))
+        self.assertEqual(purge.call_count, 1)
+        args = purge.call_args_list[0].args
+        self.assertEqual(args[1], "input")
+        self.assertEqual(args[2], 2)
+        self.assertEqual(args[3], "drv1.rx")
 
 
 # ----------------------------------------------------------------------
@@ -247,6 +260,14 @@ class TestM_DISCONNECT_FIX_CoreDriver(unittest.TestCase):
 class TestM_DISCONNECT_FIX_CoreDriven(unittest.TestCase):
 
     def test_happy_path_disconnects_output_wires(self):
+        # M_CONNECT_DISCONNECT_FIX Bug 2 (2026-04-28): the disconnect
+        # path now routes through _disconnect_or_purge (atomic
+        # protocol reuse). We assert the public contract — the
+        # function returns True on success — without locking the
+        # internal cmds.disconnectAttr call shape (the internals
+        # are now subject to skipConversionNodes resolution +
+        # _purge_unit_conversion delete-vs-disconnect dispatch which
+        # is exercised by test_m_unitconv_purge / test_m_remove_multi).
         from RBFtools import core
         import maya.cmds as cmds
         cmds.reset_mock()
@@ -260,15 +281,26 @@ class TestM_DISCONNECT_FIX_CoreDriven(unittest.TestCase):
              mock.patch.object(core, "_exists",
                                return_value=True), \
              mock.patch.object(core, "get_shape",
-                               return_value="RBF1Shape"):
+                               return_value="RBF1Shape"), \
+             mock.patch.object(core, "_subscript_of_existing_output",
+                               side_effect=[0, 1]), \
+             mock.patch.object(core, "_disconnect_or_purge",
+                               return_value=True) as purge:
             ok = core.disconnect_driven_source_attrs("RBF1", 0)
         self.assertTrue(ok)
-        disc_calls = [c[0] for c in cmds.disconnectAttr.call_args_list]
-        self.assertEqual(len(disc_calls), 2)
-        self.assertEqual(disc_calls[0],
-            ("RBF1Shape.output[0]", "dvn1.translateX"))
-        self.assertEqual(disc_calls[1],
-            ("RBF1Shape.output[1]", "dvn1.translateY"))
+        # Each attr triggers exactly one _disconnect_or_purge call.
+        self.assertEqual(purge.call_count, 2)
+        # First call -> output[0] for translateX; second -> output[1]
+        # for translateY. (idx, plug) come back via the side_effect
+        # mock.
+        first_args = purge.call_args_list[0].args
+        second_args = purge.call_args_list[1].args
+        self.assertEqual(first_args[0], "RBF1Shape")
+        self.assertEqual(first_args[1], "output")
+        self.assertEqual(first_args[2], 0)
+        self.assertEqual(first_args[3], "dvn1.translateX")
+        self.assertEqual(second_args[2], 1)
+        self.assertEqual(second_args[3], "dvn1.translateY")
 
 
 # ----------------------------------------------------------------------

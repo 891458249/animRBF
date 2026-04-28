@@ -1443,21 +1443,42 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
     def _on_driven_source_remove_requested(self, index):
         self._ctrl.remove_driven_source(int(index))
 
+    # M_CONNECT_DISCONNECT_FIX (2026-04-28): driven mirror of
+    # _on_driver_source_attrs_apply / _clear. Same plan-dict
+    # guard + 3-scene dispatcher; only the controller method
+    # binding switches to the driven side.
+
     def _on_driven_source_attrs_apply(self, index, attrs):
-        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD: Connect on a
-        driven tab. Same idempotency gate as the driver side."""
-        if not self._guard_attrs_apply(
-                "driven", int(index), list(attrs)):
+        """M_CONNECT_DISCONNECT_FIX Bug 1 driven mirror — same
+        overlap-aware dispatch as the driver side."""
+        plan = self._guard_attrs_apply(
+            "driven", int(index), list(attrs))
+        if plan is None:
             return
+        if plan["overlapping"]:
+            cmds.warning(
+                "Connect (driven[{}]): overlapping attrs {!r} will "
+                "be re-bound in user selection order; new attrs "
+                "{!r} will be appended.".format(
+                    index, plan["overlapping"], plan["new"]))
         self._ctrl.set_driven_source_attrs(int(index), list(attrs))
 
-    def _on_driven_source_attrs_clear(self, index):
-        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD +
-        M_DISCONNECT_FIX: Disconnect on a driven tab. Direct
-        disconnect through controller.disconnect_driven_source_attrs."""
-        if not self._guard_attrs_clear("driven", int(index)):
+    def _on_driven_source_attrs_clear(self, index, attrs):
+        """M_CONNECT_DISCONNECT_FIX Bug 2 driven mirror — Scene
+        A/B/C dispatch identical to the driver side."""
+        sources = self._ctrl.read_driven_sources()
+        if not (0 <= index < len(sources)):
             return
-        self._ctrl.disconnect_driven_source_attrs(int(index))
+        existing_attrs = list(sources[int(index)].attrs)
+        if not existing_attrs:
+            QtWidgets.QMessageBox.information(
+                self,
+                tr("title_nothing_to_disconnect"),
+                tr("msg_nothing_to_disconnect"))
+            return
+        target_attrs = list(attrs) if attrs else None
+        self._ctrl.disconnect_driven_source_attrs(
+            int(index), target_attrs)
 
     def _on_driven_source_select_node(self, index):
         """M_SELECT_SEMANTIC_FIX driven mirror. Selects the
@@ -1704,70 +1725,98 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         return out
 
     def _on_driver_source_attrs_apply(self, index, attrs):
-        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD (2026-04-27):
-        Connect button on a driver tab. Pre-flight idempotency
-        check - if the source already has any attrs connected, the
-        TD must Disconnect first; this prevents accidental
-        rebuilds + makes the "is this connected?" state explicit
-        instead of letting set_driver_source_attrs silently
-        rebuild on every click."""
-        if not self._guard_attrs_apply(
-                "driver", int(index), list(attrs)):
-            return
+        """M_CONNECT_DISCONNECT_FIX Bug 1 (2026-04-28): Connect
+        button on a driver tab. Replaces the legacy
+        M_TABBED_CONNECT_GUARD unconditional "already connected
+        -> block" path with the user-spec A.3 / B.1 overlap-aware
+        dispatch:
+
+          * empty selection           -> info dialog + abort
+          * any non-empty selection   -> proceed; controller's
+            set_driver_source_attrs handles overlapping (break-then-
+            rebuild via _disconnect_or_purge) AND pure-new (append)
+            uniformly. The plan-dict surfaces overlapping attrs as
+            cmds.warning trace so the TD can see what was reset.
+        """
+        plan = self._guard_attrs_apply(
+            "driver", int(index), list(attrs))
+        if plan is None:
+            return  # blocked: empty selection
+        if plan["overlapping"]:
+            cmds.warning(
+                "Connect (driver[{}]): overlapping attrs {!r} will "
+                "be re-bound in user selection order; new attrs "
+                "{!r} will be appended.".format(
+                    index, plan["overlapping"], plan["new"]))
         self._ctrl.set_driver_source_attrs(int(index), list(attrs))
 
-    def _on_driver_source_attrs_clear(self, index):
-        """M_TABBED_EDITOR + M_TABBED_CONNECT_GUARD +
-        M_DISCONNECT_FIX (2026-04-27 P0): Disconnect button on a
-        driver tab. Pre-flight 'nothing to disconnect' guard +
-        direct-disconnect through controller.
-        disconnect_driver_source_attrs (no remove-all + re-add-all
-        rebuild)."""
-        if not self._guard_attrs_clear("driver", int(index)):
-            return
-        self._ctrl.disconnect_driver_source_attrs(int(index))
+    def _on_driver_source_attrs_clear(self, index, attrs):
+        """M_CONNECT_DISCONNECT_FIX Bug 2 (2026-04-28): Disconnect
+        button on a driver tab. Three-scene dispatcher per user
+        spec D.1 + D.2 + D.3 (加固 4):
 
-    # ----- M_TABBED_CONNECT_GUARD: shared guard helpers --------------
+          D.1 attrs non-empty       -> precise disconnect
+          D.2 attrs empty           -> full-source disconnect
+          D.3 source has 0 attrs    -> info dialog "nothing to
+                                       disconnect"
+        """
+        sources = self._ctrl.read_driver_sources()
+        if not (0 <= index < len(sources)):
+            return
+        existing_attrs = list(sources[int(index)].attrs)
+        # D.3 — nothing currently connected.
+        if not existing_attrs:
+            QtWidgets.QMessageBox.information(
+                self,
+                tr("title_nothing_to_disconnect"),
+                tr("msg_nothing_to_disconnect"))
+            return
+        # D.1 vs D.2: attrs list non-empty -> precise; empty -> None
+        # so the controller / core path branches to full-source
+        # disconnect.
+        target_attrs = list(attrs) if attrs else None
+        self._ctrl.disconnect_driver_source_attrs(
+            int(index), target_attrs)
+
+    # ----- M_CONNECT_DISCONNECT_FIX: shared guard helpers ------------
 
     def _guard_attrs_apply(self, role, index, attrs):
-        """Returns True if the Connect call should proceed; False if
-        a notice dialog was surfaced and the call must short-circuit."""
-        # Connect with empty selection -> ask the TD to pick attrs first.
+        """M_CONNECT_DISCONNECT_FIX 加固 2 (2026-04-28): plan-dict
+        return form (not bool). The legacy unconditional
+        "already_connected" -> False short-circuit was Bug 1: it
+        prevented the user spec 1.3 overlap/append semantics.
+
+        Returns
+        -------
+        None
+            Empty selection — caller MUST short-circuit (an info
+            dialog has been surfaced).
+        dict
+            ``{"overlapping": [...], "new": [...], "existing": [...]}``
+            — caller proceeds; routes through
+            controller.set_*_source_attrs which handles the
+            overlapping vs new split internally (B.1 + 加固 6).
+        """
+        # Connect with empty selection — still blocks.
         if not attrs:
             QtWidgets.QMessageBox.information(
                 self,
                 tr("title_no_attrs_selected"),
                 tr("msg_no_attrs_selected"))
-            return False
-        # Already-connected gate.
+            return None
         sources = (self._ctrl.read_driver_sources()
                    if role == "driver"
                    else self._ctrl.read_driven_sources())
+        existing_attrs = []
         if 0 <= index < len(sources):
-            existing = list(sources[index].attrs)
-            if existing:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    tr("title_already_connected"),
-                    tr("msg_already_connected"))
-                return False
-        return True
-
-    def _guard_attrs_clear(self, role, index):
-        """Returns True if the Disconnect call should proceed; False
-        if 'nothing to disconnect' notice was surfaced."""
-        sources = (self._ctrl.read_driver_sources()
-                   if role == "driver"
-                   else self._ctrl.read_driven_sources())
-        if 0 <= index < len(sources):
-            existing = list(sources[index].attrs)
-            if not existing:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    tr("title_nothing_to_disconnect"),
-                    tr("msg_nothing_to_disconnect"))
-                return False
-        return True
+            existing_attrs = list(sources[index].attrs)
+        overlapping = [a for a in attrs if a in existing_attrs]
+        new = [a for a in attrs if a not in existing_attrs]
+        return {
+            "overlapping": overlapping,
+            "new": new,
+            "existing": existing_attrs,
+        }
 
     def _on_driver_source_select_node(self, index):
         """M_SELECT_SEMANTIC_FIX (Phase 1, P1 2026-04-27): Select

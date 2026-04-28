@@ -174,14 +174,25 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
       addRequested()                              <- bottom Add btn
       removeRequested(int)                        <- tab close X
       attrsApplyRequested(int, list[str])         <- Connect btn
-      attrsClearRequested(int)                    <- Disconnect btn
+      attrsClearRequested(int, list[str])         <- Disconnect btn
+                                                    (M_CONNECT_DISCONNECT_FIX
+                                                     Bug 2: payload upgraded
+                                                     to carry selected attrs
+                                                     so the precise vs full
+                                                     disconnect dispatch can
+                                                     happen at the main_window
+                                                     slot — no more silently-
+                                                     dropped attr list)
       selectNodeRequested(int)                    <- per-tab Select
     """
 
     addRequested        = QtCore.Signal()
     removeRequested     = QtCore.Signal(int)
     attrsApplyRequested = QtCore.Signal(int, list)
-    attrsClearRequested = QtCore.Signal(int)
+    # M_CONNECT_DISCONNECT_FIX Bug 2 (2026-04-28): payload mirrors
+    # attrsApplyRequested so the disconnect path can be just as
+    # expressive as connect (Scene A/B dispatch at main_window).
+    attrsClearRequested = QtCore.Signal(int, list)
     selectNodeRequested = QtCore.Signal(int)
 
     _role                 = "driver"
@@ -264,10 +275,20 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         self.attrsApplyRequested.emit(idx, list(attrs))
 
     def _on_disconnect_clicked(self):
+        # M_CONNECT_DISCONNECT_FIX Bug 2 + 加固 3 (2026-04-28):
+        # mirror _on_connect_clicked exactly — read the same
+        # selected_attrs() snapshot and emit the same shape of
+        # payload. The downstream main_window slot then dispatches
+        # Scene A (attrs non-empty -> precise disconnect) vs Scene
+        # B (attrs empty -> full source disconnect).
         idx = self._tabs.currentIndex()
         if idx < 0:
             return
-        self.attrsClearRequested.emit(idx)
+        content = self._tabs.widget(idx)
+        if content is None:
+            return
+        attrs = content.selected_attrs()
+        self.attrsClearRequested.emit(idx, list(attrs))
 
     def _update_empty_hint(self):
         empty = (self._tabs.count() == 0)

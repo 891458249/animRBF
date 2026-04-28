@@ -140,13 +140,20 @@ class TestM_TABBED_EDITOR_PanelConnect(unittest.TestCase):
         _TabbedSourceEditorBase._on_connect_clicked(panel)
         panel.attrsApplyRequested.emit.assert_not_called()
 
-    def test_disconnect_emits_clear_with_current_tab_index(self):
+    def test_disconnect_emits_clear_with_index_and_attrs(self):
+        # M_CONNECT_DISCONNECT_FIX Bug 2 (2026-04-28): payload
+        # upgraded to (int, list) so the slot can dispatch Scene
+        # A (precise) vs Scene B (full).
         from RBFtools.ui.widgets.tabbed_source_editor import (
             _TabbedSourceEditorBase)
         panel = self._make_panel()
         panel._tabs.currentIndex.return_value = 2
+        content = mock.MagicMock()
+        content.selected_attrs.return_value = ["rx", "ry"]
+        panel._tabs.widget.return_value = content
         _TabbedSourceEditorBase._on_disconnect_clicked(panel)
-        panel.attrsClearRequested.emit.assert_called_once_with(2)
+        panel.attrsClearRequested.emit.assert_called_once_with(
+            2, ["rx", "ry"])
 
 
 @unittest.skipIf(conftest._REAL_MAYA,
