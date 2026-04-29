@@ -429,6 +429,20 @@ class RBFSection(CollapsibleFrame):
         self._update_radius_state()
         self._update_mode_visibility(self._cmb_mode.currentIndex())
 
+    def set_rotate_order_values(self, values):
+        """M_P1_ENC_COMBO_FIX (2026-04-29): narrow public entry-point
+        for the rotate-order editor; called from main_window in
+        response to the controller's ``rotateOrderEditorReload``
+        signal (the post-encoding-switch auto-derive path) so the
+        editor refreshes from live driverInputRotateOrder[] without
+        round-tripping through settingsLoaded -> load() — that wider
+        path triggered the inputEncoding combo bounce-back regression.
+
+        ``hasattr`` guard preserves the M2.4b §D① contract
+        (defends against future _build reordering)."""
+        if hasattr(self, "_rotate_order_editor"):
+            self._rotate_order_editor.set_values(list(values or []))
+
     def set_radius_value(self, value):
         """Update radius display without emitting."""
         blocked = self._spn_radius.blockSignals(True)

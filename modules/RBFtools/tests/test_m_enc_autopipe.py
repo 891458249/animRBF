@@ -137,6 +137,15 @@ class T_INPUT_ENCODING_AUTOPIPE(unittest.TestCase):
             "constant so the rule stays single-sourced.")
 
     def test_PERMANENT_d_controller_slot_present(self):
+        # M_P1_ENC_COMBO_FIX (2026-04-29) updated this guard: the
+        # original M_ENC_AUTOPIPE contract called self._load_settings()
+        # to round-trip through settingsLoaded -> rbf_section.load,
+        # but that path triggered a setCurrentIndex() on the
+        # inputEncoding combo from the (then-incomplete)
+        # get_all_settings dict, bouncing the user's pick back to
+        # Raw. The P1 fix replaced the cascade with a NARROW signal
+        # carrying just the rotate-order list values, leaving the
+        # combo selection alone.
         self.assertIn(
             "def on_input_encoding_changed(self, idx):",
             self._ctrl,
@@ -147,11 +156,16 @@ class T_INPUT_ENCODING_AUTOPIPE(unittest.TestCase):
         self.assertIn(
             "core.auto_resolve_generic_rotate_orders(", body,
             "Slot MUST call the core helper.")
-        self.assertIn(
+        self.assertNotIn(
             "self._load_settings()", body,
-            "Slot MUST re-fire settingsLoaded so rbf_section.load "
-            "repopulates the rotate-order editor from the freshly "
-            "derived multi values.")
+            "P1 regression-fix contract: slot MUST NOT call "
+            "_load_settings — that cascade caused the inputEncoding "
+            "combo bounce-back. Use the narrow rotateOrderEditorReload"
+            " signal instead.")
+        self.assertIn(
+            "self.rotateOrderEditorReload.emit(", body,
+            "Slot MUST emit the narrow rotateOrderEditorReload "
+            "signal carrying the freshly read rotate-order values.")
         self.assertIn(
             "self.driverSourcesChanged.emit()", body,
             "Slot MUST emit driverSourcesChanged to keep the "
@@ -377,21 +391,25 @@ class TestM_ENC_AUTOPIPE_RuntimeBehavior(unittest.TestCase):
         self.assertEqual(len(rotate_connects), 0)
 
     def test_controller_slot_calls_core_and_emits(self):
-        # Controller slot E2E: patch core helper + capture the
-        # signal emissions.
+        # M_P1_ENC_COMBO_FIX: contract updated — slot now emits
+        # the narrow rotateOrderEditorReload signal carrying the
+        # freshly-read rotate-order list, instead of round-tripping
+        # through _load_settings -> settingsLoaded -> rbf_section.load.
         from RBFtools import core
         from RBFtools.controller import MainController
         ctrl = MainController.__new__(MainController)
         ctrl._current_node = "RBF1"
-        # _load_settings reads core.get_all_settings which would
-        # trip on the real cmds; stub it.
-        ctrl._load_settings = mock.MagicMock()
+        ctrl.rotateOrderEditorReload = mock.MagicMock()
         ctrl.driverSourcesChanged = mock.MagicMock()
         with mock.patch.object(
                 core, "auto_resolve_generic_rotate_orders") as h:
-            MainController.on_input_encoding_changed(ctrl, 3)
+            with mock.patch.object(
+                    core, "read_driver_rotate_orders",
+                    return_value=[2, 0, 5]):
+                MainController.on_input_encoding_changed(ctrl, 3)
         h.assert_called_once_with("RBF1", 3)
-        ctrl._load_settings.assert_called_once()
+        ctrl.rotateOrderEditorReload.emit.assert_called_once_with(
+            [2, 0, 5])
         ctrl.driverSourcesChanged.emit.assert_called_once()
 
     def test_controller_slot_no_op_without_node(self):
@@ -399,13 +417,13 @@ class TestM_ENC_AUTOPIPE_RuntimeBehavior(unittest.TestCase):
         from RBFtools.controller import MainController
         ctrl = MainController.__new__(MainController)
         ctrl._current_node = None
-        ctrl._load_settings = mock.MagicMock()
+        ctrl.rotateOrderEditorReload = mock.MagicMock()
         ctrl.driverSourcesChanged = mock.MagicMock()
         with mock.patch.object(
                 core, "auto_resolve_generic_rotate_orders") as h:
             MainController.on_input_encoding_changed(ctrl, 3)
         h.assert_not_called()
-        ctrl._load_settings.assert_not_called()
+        ctrl.rotateOrderEditorReload.emit.assert_not_called()
 
 
 if __name__ == "__main__":

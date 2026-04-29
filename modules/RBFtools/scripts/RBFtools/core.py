@@ -351,6 +351,26 @@ def get_all_settings(node):
         "drawTwist":            g(shape + ".drawTwist",            False),
         "opposite":             g(shape + ".opposite",             False),
         "driverIndex":          g(shape + ".driverIndex",          0),
+        # M_P1_ENC_COMBO_FIX (2026-04-29) — 7 M2.x fields previously
+        # absent from the UI reload dict. Their absence forced
+        # rbf_section.load() to fall back to data.get(<key>, default)
+        # for every reload, surfacing as the "inputEncoding combo
+        # bounces back to Raw after pick" repro once enc-1
+        # (M_ENC_AUTOPIPE) added a post-write _load_settings cascade
+        # — and as the latent "node-switch shows wrong combo value"
+        # bug for every other M2.x field listed here.
+        # Keys mirror the C++ short attr names exactly (same
+        # convention as the rest of this dict). Defaults match each
+        # attribute's C++ schema default at RBFtools.cpp.
+        "inputEncoding":        g(shape + ".inputEncoding",        0),
+        "clampEnabled":         g(shape + ".clampEnabled",         False),
+        "clampInflation":       g(shape + ".clampInflation",       0.0),
+        "regularization":       g(shape + ".regularization",       1.0e-8),
+        "solverMethod":         g(shape + ".solverMethod",         0),
+        "driverInputRotateOrder":
+            read_driver_rotate_orders(node) or [],
+        "outputQuaternionGroupStart":
+            read_quat_group_starts(node) or [],
     }
 
 

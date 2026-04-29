@@ -62,7 +62,7 @@ from RBFtools.ui.widgets.vector_angle_section import VectorAngleSection
 from RBFtools.ui.widgets.rbf_section import RBFSection
 from RBFtools.ui.widgets.collapsible import CollapsibleFrame
 from RBFtools.ui.widgets.attribute_list import AttributeList
-from RBFtools.ui.widgets.help_button import HelpButton
+from RBFtools.ui.widgets.help_button import HelpButton, ComboHelpButton
 
 
 # =====================================================================
@@ -676,9 +676,22 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         _oe_row = QtWidgets.QHBoxLayout()
         _oe_row.addWidget(QtWidgets.QLabel(tr("output_encoding_label")))
         _oe_row.addWidget(self._output_encoding_combo, 1)
-        # M_HELPBUBBLE_BATCH: long-form HelpButton next to the
-        # node-level outputEncoding combo.
-        _oe_row.addWidget(HelpButton("output_encoding"))
+        # M_P1_ENC_COMBO_FIX (2026-04-29): per-encoding ComboHelpButton
+        # so the bubble describes ONLY the currently-selected output
+        # encoding (Euler / Quaternion / ExpMap) instead of the merged
+        # 3-section blob. Mirrors the input-encoding combo paradigm
+        # (rbf_section.py:237 + M_HELPTEXT_ENC_PER_KEY). The plain
+        # HelpButton("output_encoding") added in M_HELPBUBBLE_BATCH
+        # (enc-2 / 6528211) is replaced because the ComboHelpButton
+        # constructor must receive the combo directly to subscribe
+        # to its currentIndexChanged + highlighted signals — this is
+        # only reachable as a sibling widget in the parent layout.
+        _oe_row.addWidget(ComboHelpButton(
+            self._output_encoding_combo, [
+                "output_enc_euler",
+                "output_enc_quaternion",
+                "output_enc_expmap",
+            ], fallback_key="output_encoding"))
         self._output_encoding_section.add_layout(_oe_row)
 
         # Phase 3 (Utility section 2026-04-27): below the pose
@@ -1146,6 +1159,15 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # user picks BendRoll / ExpMap / SwingTwist.
         self._rbf_section.inputEncodingChanged.connect(
             ctrl.on_input_encoding_changed)
+        # M_P1_ENC_COMBO_FIX: narrow rotate-order-editor reload that
+        # replaces the prior _load_settings cascade. The controller
+        # emits this signal AFTER auto_resolve_generic_rotate_orders
+        # with the freshly read values; the rbf_section repopulates
+        # only the OrderedEnumListEditor — combos and other M2.x
+        # widgets stay untouched, eliminating the inputEncoding
+        # combo bounce-back regression.
+        ctrl.rotateOrderEditorReload.connect(
+            self._rbf_section.set_rotate_order_values)
 
         # ---- Pose editor panel → handlers ----
         pe = self._pose_editor

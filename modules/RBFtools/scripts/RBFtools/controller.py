@@ -75,6 +75,15 @@ class MainController(QtCore.QObject):
     # Subscribers re-render any displayed node names through
     # core.format_node_for_display.
     nameDisplayModeChanged = QtCore.Signal(str)
+    # M_P1_ENC_COMBO_FIX (2026-04-29): narrow signal carrying the
+    # freshly-derived driverInputRotateOrder list for the rbf_section
+    # rotate-order editor. Replaces the prior _load_settings()
+    # cascade in on_input_encoding_changed (M_ENC_AUTOPIPE) which
+    # round-tripped through settingsLoaded -> rbf_section.load and
+    # exposed the get_all_settings 7-field gap as a combo bounce-back
+    # bug. The narrow path touches only the editor that needs
+    # fresh data; combos and other M2.x fields are not re-pushed.
+    rotateOrderEditorReload = QtCore.Signal(list)
 
     def __init__(self, parent=None):
         super(MainController, self).__init__(parent)
@@ -1194,16 +1203,23 @@ class MainController(QtCore.QObject):
                 "on_input_encoding_changed: auto-derive failed: "
                 "{}".format(exc))
             return
-        # Reload the settings dict so rbf_section.load() repopulates
-        # the rotate-order list editor from the freshly-derived
-        # driverInputRotateOrder[]. settingsLoaded -> main_window ->
-        # rbf_section.load -> set_values is the single MVC-clean
-        # path; driverSourcesChanged covers the tabbed editor reload
-        # for symmetry with add/remove driver flows.
+        # M_P1_ENC_COMBO_FIX: emit a NARROW signal carrying the
+        # freshly-derived rotate-order list. The earlier
+        # _load_settings() cascade re-emitted settingsLoaded which
+        # round-tripped through rbf_section.load() — that path
+        # called setCurrentIndex() on the inputEncoding combo from
+        # data.get("inputEncoding", 0), and because get_all_settings
+        # historically omitted the inputEncoding key the default 0
+        # bounced the combo back to Raw immediately after the user
+        # picked SwingTwist (TD repro 2026-04-29).
+        # The narrow signal touches ONLY the rotate-order editor;
+        # the combo selection that fired this slot is left alone.
         try:
-            self._load_settings()
+            values = list(core.read_driver_rotate_orders(
+                self._current_node) or [])
         except Exception:
-            pass
+            values = []
+        self.rotateOrderEditorReload.emit(values)
         self.driverSourcesChanged.emit()
 
     # =================================================================

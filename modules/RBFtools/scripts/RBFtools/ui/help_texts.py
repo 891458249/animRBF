@@ -539,6 +539,54 @@ _EN = {
         "expects. A mismatch here typically shows up as drift on "
         "extreme rotations rather than an outright break.",
 
+    # -- M_P1_ENC_COMBO_FIX (2026-04-29): per-output-encoding keys
+    # for the OutputEncodingCombo's ComboHelpButton. Mirrors
+    # M_HELPTEXT_ENC_PER_KEY's input-encoding split — each item
+    # gets its own bubble describing semantics + typical usage +
+    # edge cases instead of the merged "output_encoding" blob.
+    "output_enc_euler":
+        "Output Encoding — Euler (default)\n\n"
+        "Each driven attribute group is a raw Euler triple "
+        "(rx, ry, rz). The C++ compute() weighted-sum is applied "
+        "directly per channel; no quaternion or exp-map "
+        "reconstruction step.\n\n"
+        "★ Default for joint translate / rotate channels and any "
+        "driven attribute that is NOT inherently rotational "
+        "(blendshape weights, custom scalars, scale).\n\n"
+        "Edge: gimbal-influenced extreme rotations on a single "
+        "Euler triple can drift on multi-pose blends; switch to "
+        "Quaternion or ExpMap for those cases.",
+
+    "output_enc_quaternion":
+        "Output Encoding — Quaternion\n\n"
+        "Driven attribute groups are interpreted as unit "
+        "quaternions (4 channels per group). C++ compute() runs a "
+        "quaternion-weighted average (M2.2 QWA) instead of a "
+        "scalar weighted sum, preserving rotation continuity "
+        "across the unit hypersphere.\n\n"
+        "Pairs naturally with inputEncoding=Quaternion and with "
+        "the outputQuaternionGroupStart[] list that declares "
+        "where each 4-slot group starts in the output array.\n\n"
+        "Edge: groups whose 4-slot range collides with an "
+        "outputIsScale flag are dropped at compute() with a "
+        "one-time warning — the rig keeps evaluating, dropped "
+        "groups simply revert to scalar output.",
+
+    "output_enc_expmap":
+        "Output Encoding — ExpMap (Exponential Map)\n\n"
+        "Driven attribute groups are encoded as 3-component "
+        "exp-map vectors. The C++ compute() interpolates in "
+        "exp-map space and reconstructs rotations on read; works "
+        "well for medium-range rotations without the gimbal "
+        "artifacts of raw Euler.\n\n"
+        "★ Useful when the driven side is a single rotational "
+        "joint (twist corrective, bend joint) and you need "
+        "smoother blend behaviour than Euler but don't want to "
+        "spend the extra channel of a quaternion group.\n\n"
+        "Edge: large rotations near the pi-radian shell can fold "
+        "back through the origin — keep the per-pose rotation "
+        "magnitudes inside |angle| < pi to avoid antipodal jumps.",
+
     "outer_tabs_overview":
         "Three-tab navigation for the RBF Pose Editor:\n"
         "  · DriverDriven — pick the driver bones / attrs and the "
@@ -1138,6 +1186,35 @@ _ZH = {
         u"rotateOrder \u914d\u5408\uff0c\u786e\u4fdd\u8bc4\u4f30\u65f6\u4e00\u81f4\u91cd\u5efa\u3002\n\n"
         u"\u5207\u6362\u4ee5\u5339\u914d\u4e0b\u6e38\u7ed1\u5b9a\u9884\u671f\u7f16\u7801\u3002\u8bbe\u7f6e\u9519\u4f4d\u901a\u5e38\u5728\u6781\u7aef\u65cb\u8f6c\u4e0b\u8868\u73b0\u4e3a\u6f02\u79fb\u800c"
         u"\u975e\u76f4\u63a5\u62a5\u9519\u3002",
+
+    # -- M_P1_ENC_COMBO_FIX (2026-04-29) \u2014 ZH parity --
+    "output_enc_euler":
+        u"\u8f93\u51fa\u7f16\u7801 \u2014 Euler\uff08\u9ed8\u8ba4\uff09\n\n"
+        u"\u6bcf\u4e2a driven \u5c5e\u6027\u7ec4\u662f\u539f\u59cb Euler \u4e09\u5143\u7ec4 (rx, ry, rz)\u3002"
+        u"C++ compute() \u52a0\u6743\u548c\u6309\u901a\u9053\u76f4\u63a5\u7d2f\u52a0\uff0c\u4e0d\u505a\u56db\u5143\u6570 / exp-map \u91cd\u5efa\u3002\n\n"
+        u"\u2605 \u5173\u8282 translate / rotate \u901a\u9053\u53ca\u975e\u65cb\u8f6c\u6027 driven \u5c5e\u6027"
+        u"\uff08blendshape \u6743\u91cd\u3001\u81ea\u5b9a\u4e49\u6807\u91cf\u3001scale\uff09\u7684\u9ed8\u8ba4\u9009\u62e9\u3002\n\n"
+        u"\u8fb9\u754c\uff1a\u5355 Euler \u4e09\u5143\u7ec4\u5728\u4e07\u5411\u8282\u9644\u8fd1\u6781\u7aef\u65cb\u8f6c\u4e0b\u505a\u591a pose \u6df7\u5408\u53ef\u80fd\u6f02\u79fb\uff1b"
+        u"\u6b64\u65f6\u6362 Quaternion \u6216 ExpMap \u7f16\u7801\u3002",
+
+    "output_enc_quaternion":
+        u"\u8f93\u51fa\u7f16\u7801 \u2014 Quaternion\uff08\u56db\u5143\u6570\uff09\n\n"
+        u"driven \u5c5e\u6027\u7ec4\u6309\u5355\u4f4d\u56db\u5143\u6570\u89e3\u91ca\uff08\u6bcf\u7ec4 4 \u901a\u9053\uff09\u3002C++ compute() "
+        u"\u8d70\u56db\u5143\u6570\u52a0\u6743\u5e73\u5747\uff08M2.2 QWA\uff09\u800c\u975e\u6807\u91cf\u52a0\u6743\u548c\uff0c\u6cbf\u5355\u4f4d\u8d85\u7403\u9762\u4fdd\u6301\u65cb\u8f6c\u8fde\u7eed\u6027\u3002\n\n"
+        u"\u4e0e inputEncoding=Quaternion \u81ea\u7136\u914d\u5957\uff0c\u5e76\u4f9d\u8d56 "
+        u"outputQuaternionGroupStart[] \u5217\u8868\u58f0\u660e\u8f93\u51fa\u6570\u7ec4\u4e2d\u6bcf\u4e2a 4-slot \u7ec4\u7684\u8d77\u59cb\u4f4d\u7f6e\u3002\n\n"
+        u"\u8fb9\u754c\uff1a4-slot \u8303\u56f4\u4e0e outputIsScale flag \u51b2\u7a81\u7684\u7ec4\u5728 compute() \u65f6\u88ab\u4e22\u5f03 + "
+        u"\u4e00\u6b21\u6027 warning\u2014\u2014rig \u7ee7\u7eed\u8fd0\u884c\uff0c\u88ab\u4e22\u7684\u7ec4\u9000\u56de\u6807\u91cf\u8f93\u51fa\u3002",
+
+    "output_enc_expmap":
+        u"\u8f93\u51fa\u7f16\u7801 \u2014 ExpMap\uff08\u6307\u6570\u6620\u5c04\uff09\n\n"
+        u"driven \u5c5e\u6027\u7ec4\u7f16\u7801\u4e3a 3 \u5206\u91cf exp-map \u5411\u91cf\u3002C++ compute() \u5728 exp-map "
+        u"\u7a7a\u95f4\u63d2\u503c\u5e76\u5728\u8bfb\u53d6\u65f6\u91cd\u5efa\u65cb\u8f6c\uff1b\u5bf9\u4e2d\u7b49\u5e45\u5ea6\u65cb\u8f6c\u6548\u679c\u597d\uff0c\u4e14\u65e0 raw Euler "
+        u"\u7684\u4e07\u5411\u8282\u4f2a\u50cf\u3002\n\n"
+        u"\u2605 \u9002\u7528\u4e8e driven \u4fa7\u662f\u5355\u4e00\u65cb\u8f6c\u5173\u8282\u7684\u573a\u666f\uff08twist \u6821\u6b63\u3001\u5f2f\u66f2\u5173\u8282\uff09\uff0c"
+        u"\u9700\u8981\u6bd4 Euler \u66f4\u5e73\u6ed1\u7684\u6df7\u5408\u4f46\u4e0d\u60f3\u4ed8\u56db\u5143\u6570\u7ec4\u7684\u989d\u5916\u901a\u9053\u5f00\u9500\u3002\n\n"
+        u"\u8fb9\u754c\uff1a\u63a5\u8fd1 pi \u5f27\u5ea6\u7403\u58f3\u7684\u5927\u5e45\u65cb\u8f6c\u4f1a\u7ed5\u539f\u70b9\u6298\u56de\u2014\u2014\u4fdd\u6301\u6bcf pose \u65cb\u8f6c\u5e45\u503c "
+        u"|angle| < pi \u4ee5\u907f\u514d\u5bf9\u6781\u8df3\u53d8\u3002",
 
     "outer_tabs_overview":
         u"RBF Pose Editor \u4e09\u6807\u7b7e\u9875\u5bfc\u822a\uff1a\n"
