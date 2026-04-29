@@ -257,7 +257,8 @@ class MainController(QtCore.QObject):
         proceed = self.ask_confirm(
             action_id="remove_driver_source",
             title=tr("title_remove_driver_source"),
-            summary=tr("summary_remove_driver_source"))
+            summary=tr("summary_remove_driver_source"),
+            preview_text="")
         if not proceed:
             return False
         try:
@@ -419,7 +420,8 @@ class MainController(QtCore.QObject):
         proceed = self.ask_confirm(
             action_id="remove_driven_source",
             title=tr("title_remove_driven_source"),
-            summary=tr("summary_remove_driven_source"))
+            summary=tr("summary_remove_driven_source"),
+            preview_text="")
         if not proceed:
             return False
         try:
@@ -708,7 +710,8 @@ class MainController(QtCore.QObject):
             proceed = self.ask_confirm(
                 action_id="mirror_multi_source_info",
                 title=tr("title_mirror_multi_source"),
-                summary=tr("summary_mirror_multi_source"))
+                summary=tr("summary_mirror_multi_source"),
+                preview_text="")
             if not proceed:
                 return None
 
@@ -1187,7 +1190,7 @@ class MainController(QtCore.QObject):
             prog.end(tr("status_alias_done"))
         return result
 
-    def ask_confirm(self, title, summary, preview_text, action_id):
+    def ask_confirm(self, title, summary, preview_text="", action_id=""):
         """Synchronous user-confirmation prompt (addendum §M3.0).
 
         Returns True if the user clicked OK (or had previously silenced
@@ -1195,6 +1198,24 @@ class MainController(QtCore.QObject):
         Sub-tasks call this instead of importing ConfirmDialog
         directly — keeps MVC clean and centralises the parent-widget
         wiring.
+
+        M_P0_REMOVE_TAB_FIX (2026-04-30): ``preview_text`` and
+        ``action_id`` carry empty-string defaults so destructive ops
+        with no diff to preview (e.g. ``remove_driver_source`` /
+        ``remove_driven_source``) can omit them safely. ConfirmDialog
+        already coerces an empty / None preview to "" internally —
+        the defaults here close the historical drift between this
+        signature (introduced as 4-strict-positional in M3.0) and
+        the M_UIRECONCILE-era callers that only passed three kwargs,
+        which silently raised ``TypeError`` inside Qt slot dispatch
+        and made the tab-close X look unresponsive.
+
+        Defence in depth: the per-callsite fixes at lines 257 / 419 /
+        708 explicitly pass ``preview_text=""`` so a future signature
+        revert cannot silently re-introduce the same drift; the
+        defaults here are the catch-all guard. Lesson #6 — "call-site
+        contract drift static-grep cannot catch needs an AST guard"
+        — is implemented by T_REMOVE_TAB_CONFIRM_CONTRACT (e).
         """
         from RBFtools.ui.widgets.confirm_dialog import ConfirmDialog
         return ConfirmDialog.confirm(
