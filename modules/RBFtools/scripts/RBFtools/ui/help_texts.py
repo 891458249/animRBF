@@ -424,6 +424,65 @@ _EN = {
         "  - Use case: spline IK, tentacles, spines, long-chain "
         "structures where local bend extraction is the goal.",
 
+    # M_HELPTEXT_ENC_PER_KEY (2026-04-29): per-encoding help keys.
+    # ComboHelpButton in rbf_section.py:233 uses key_map = ["enc_raw",
+    # "enc_quaternion", "enc_bendroll", "enc_expmap", "enc_swingtwist"]
+    # — _help_key_for_index returns the indexed key inside range, never
+    # falling back to "input_encoding" for valid combo selections.
+    # Without these keys get_help_text returns "" -> empty HelpBubble.
+    # The five entries below mirror the d01a964 input_encoding long-
+    # form guide split into per-encoding subsections so each combo
+    # value shows the relevant content.
+    "enc_raw":
+        "Raw (Euler) — read driver bone's Rotate X/Y/Z Euler "
+        "values directly.\n\n"
+        "Pros: simplest.\n"
+        "Cons: Gimbal lock — when bone rotation exceeds ~90° or "
+        "flips, X/Y/Z values jump discontinuously, RBF distance "
+        "becomes meaningless, driven bones explode.\n\n"
+        "Use case: simple single-axis mechanical structures only "
+        "(door hinges, pistons).",
+
+    "enc_quaternion":
+        "Quaternion — convert rotation to (w, x, y, z) "
+        "quaternion.\n\n"
+        "Pros: gimbal-lock free, handles 360° rotation correctly.\n"
+        "Cons: 4D vector — Euclidean distance is less linearly "
+        "intuitive than 3D.\n\n"
+        "Use case: full-360 controllers without twist-decomposition "
+        "needs.",
+
+    "enc_bendroll":
+        "BendRoll — decompose rotation into bend (axis "
+        "perpendicular to bone) and roll (axis along the bone).\n\n"
+        "Pros: similar to SwingTwist but optimized for bend/roll "
+        "separation on certain axis combinations.\n\n"
+        "Use case: spline IK / spine / tentacle-like long-chain "
+        "rigs where local bend extraction is needed.",
+
+    "enc_expmap":
+        u"ExpMap (Exponential Map) — ★ RBF FAVORITE\n\n"
+        "Represents rotation as a 3D vector: direction = rotation "
+        "axis, length = rotation angle.\n\n"
+        "Pros: gimbal-lock-free like Quaternion + only 3D like "
+        "Euler. Distance in ExpMap space matches human angle "
+        "perception. Smoothest interpolation.\n\n"
+        "Use case: most multi-to-many non-linear RBF deformation "
+        "drives (facial expressions, complex muscle helper bones) "
+        "— first choice.",
+
+    "enc_swingtwist":
+        u"SwingTwist — ★ LIMB RIG FAVORITE\n\n"
+        "Decompose rotation into:\n"
+        u"  · Swing — bone direction (compass-like; "
+        "up/down/left/right pointing)\n"
+        u"  · Twist — bone self-axis rotation\n\n"
+        "Pros: lets you isolate one axis. e.g. drive shoulder "
+        "muscles by arm-up-amount (swing) while ignoring arm-twist "
+        "(twist).\n\n"
+        "Use case: shoulder, wrist, hip helper bones. e.g. extract "
+        "wrist twist to drive forearm twist bones.",
+
     "clamp_enabled":
         "Clip live driver inputs to the per-dimension min/max bounds of "
         "the registered pose samples before kernel evaluation. Prevents "
@@ -824,6 +883,82 @@ _ZH = {
         u"(Bend)\u548c\u6cbf\u8f74\u7684\u7ffb\u6eda(Roll)\u5206\u79bb\u5f00\u6765\u3002\n"
         u"  \u00b7 \u9002\u7528\u573a\u666f:\u901a\u5e38\u7528\u4e8e\u6837\u6761\u7ebf IK(Spline IK)\u6216\u89e6\u624b\u3001"
         u"\u810a\u690e\u7b49\u957f\u6761\u72b6\u7ed3\u6784\u7684\u7ed1\u5b9a,\u63d0\u53d6\u5c40\u90e8\u7684\u5f2f\u66f2\u7a0b\u5ea6\u3002",
+
+    # M_HELPTEXT_ENC_PER_KEY (2026-04-29): ZH per-encoding mirror.
+    # \u2605 U+2605 / \u00b7 U+00B7 / \u4e07\u5411\u8282\u6b7b\u9501 / RBF \u6700\u5e38\u7528 / \u80a2\u4f53\u7ed1\u5b9a\u6700\u5e38\u7528
+    # \u2014 verbatim Chinese rigging vocabulary preserved from d01a964.
+    "enc_raw":
+        u"Raw(\u539f\u59cb\u6570\u636e / \u6b27\u62c9\u89d2)\u2014 "
+        u"\u76f4\u63a5\u8bfb\u53d6\u9aa8\u9abc\u901a\u9053\u76d2\u91cc\u7684 "
+        u"Rotate X\u3001Y\u3001Z \u7684\u6b27\u62c9\u89d2\u6570\u503c\u3002\n\n"
+        u"\u4f18\u70b9:\u6700\u7b80\u5355\u3002\n"
+        u"\u7f3a\u70b9:\u4e07\u5411\u8282\u6b7b\u9501(Gimbal Lock)\u2014"
+        u"\u9aa8\u9abc\u65cb\u8f6c\u8d85\u8fc7 \u224890\u00b0 \u6216\u53d1\u751f"
+        u"\u7ffb\u8f6c\u65f6,X/Y/Z \u6570\u503c\u5267\u70c8\u8df3\u53d8,"
+        u"RBF \u8ddd\u79bb\u5b8c\u5168\u9519\u8bef,\u9a71\u52a8\u9aa8\u9abc"
+        u"\u4f1a\u77ac\u95f4\u4e71\u98de\u3002\n\n"
+        u"\u9002\u7528\u573a\u666f:\u53ea\u505a\u5355\u8f74\u65cb\u8f6c\u7684"
+        u"\u7b80\u5355\u673a\u68b0\u7ed3\u6784(\u5982\u5355\u5411\u95e8\u8f74"
+        u"\u3001\u6d3b\u585e)\u3002",
+
+    "enc_quaternion":
+        u"Quaternion(\u56db\u5143\u6570)\u2014 \u5c06\u65cb\u8f6c\u8f6c\u6362"
+        u"\u4e3a (w, x, y, z) \u56db\u5143\u6570\u3002\n\n"
+        u"\u4f18\u70b9:\u5b8c\u7f8e\u89e3\u51b3\u4e07\u5411\u8282\u6b7b\u9501"
+        u"\u548c\u7ffb\u8f6c\u95ee\u9898,\u652f\u6301 360\u00b0 \u65cb\u8f6c"
+        u"\u3002\n"
+        u"\u7f3a\u70b9:4 \u7ef4\u5411\u91cf\u2014\u6b27\u6c0f\u8ddd\u79bb"
+        u"\u5728\u76f4\u89c9\u7ebf\u6027\u4e0a\u4e0d\u5982 3 \u7ef4\u3002\n\n"
+        u"\u9002\u7528\u573a\u666f:\u9700\u8981\u5168\u7a7a\u95f4 360\u00b0 "
+        u"\u65e0\u6b7b\u89d2\u65cb\u8f6c\u7684\u63a7\u5236\u5668,"
+        u"\u4e14\u4e0d\u6d89\u53ca\u590d\u6742\u7684\u626d\u66f2\u62c6\u5206"
+        u"\u65f6\u3002",
+
+    "enc_bendroll":
+        u"BendRoll(\u5f2f\u66f2\u4e0e\u7ffb\u6eda)\u2014 \u5c06\u65cb\u8f6c"
+        u"\u62c6\u89e3\u4e3a\u5f2f\u66f2(Bend,\u4e0e\u9aa8\u9abc\u8f74"
+        u"\u5782\u76f4)\u548c\u7ffb\u6eda(Roll,\u6cbf\u9aa8\u9abc\u8f74)"
+        u"\u3002\n\n"
+        u"\u4f18\u70b9:\u7c7b\u4f3c SwingTwist,\u4f46\u7b97\u6cd5\u66f4"
+        u"\u4fa7\u91cd\u4e8e bend/roll \u5206\u79bb\u3002\n\n"
+        u"\u9002\u7528\u573a\u666f:\u6837\u6761\u7ebf IK(Spline IK)\u3001"
+        u"\u810a\u690e\u3001\u89e6\u624b\u7b49\u957f\u6761\u72b6\u7ed3\u6784"
+        u"\u7684\u7ed1\u5b9a,\u63d0\u53d6\u5c40\u90e8\u7684\u5f2f\u66f2\u7a0b"
+        u"\u5ea6\u3002",
+
+    "enc_expmap":
+        u"ExpMap(\u6307\u6570\u6620\u5c04)\u2014 \u2605 RBF \u6700\u5e38\u7528"
+        u"\n\n"
+        u"\u5c06\u65cb\u8f6c\u8868\u793a\u4e3a\u4e00\u4e2a 3D \u5411\u91cf:"
+        u"\u65b9\u5411 = \u65cb\u8f6c\u8f74,\u957f\u5ea6 = \u65cb\u8f6c\u89d2"
+        u"\u5ea6\u3002\n\n"
+        u"\u4f18\u70b9:\u65e2\u50cf Quaternion \u4e00\u6837\u6ca1\u6709\u4e07"
+        u"\u5411\u8282\u6b7b\u9501,\u53c8\u50cf\u6b27\u62c9\u89d2\u4e00\u6837"
+        u"\u53ea\u6709 3 \u4e2a\u7ef4\u5ea6\u3002ExpMap \u7a7a\u95f4\u4e2d"
+        u"\u7684\u8ddd\u79bb\u7b26\u5408\u4eba\u7c7b\u5bf9\u89d2\u5ea6\u5dee"
+        u"\u5f02\u7684\u611f\u77e5,\u8fc7\u6e21\u6781\u5176\u5e73\u6ed1"
+        u"\u3002\n\n"
+        u"\u9002\u7528\u573a\u666f:\u5927\u591a\u6570\u591a\u5bf9\u591a\u3001"
+        u"\u975e\u7ebf\u6027\u7684 RBF \u5f62\u53d8\u9a71\u52a8(\u5982\u9762"
+        u"\u90e8\u8868\u60c5\u3001\u590d\u6742\u7684\u808c\u8089\u8f85\u52a9"
+        u"\u9aa8\u9abc)\u7684\u9996\u9009\u3002",
+
+    "enc_swingtwist":
+        u"SwingTwist(\u6446\u52a8\u4e0e\u626d\u66f2)\u2014 \u2605 \u80a2"
+        u"\u4f53\u7ed1\u5b9a\u6700\u5e38\u7528\n\n"
+        u"\u5c06\u590d\u6742\u7684\u65cb\u8f6c\u62c6\u89e3\u4e3a:\n"
+        u"  \u00b7 Swing(\u6446\u52a8)\u2014\u9aa8\u9abc\u50cf\u5706\u89c4"
+        u"\u4e00\u6837\u6307\u5411\u4e0a/\u4e0b/\u5de6/\u53f3\u3002\n"
+        u"  \u00b7 Twist(\u626d\u66f2/\u81ea\u8f6c)\u2014\u9aa8\u9abc\u6cbf"
+        u"\u7740\u81ea\u8eab\u8f74\u7ebf\u65cb\u8f6c\u3002\n\n"
+        u"\u4f18\u70b9:\u53ef\u5265\u79bb\u4e0d\u9700\u8981\u7684\u65cb\u8f6c"
+        u"\u4fe1\u606f\u3002\u4f8b:\u53ea\u6839\u636e\u5927\u81c2\u62ac\u8d77"
+        u"\u7684\u9ad8\u5ea6(Swing)\u9a71\u52a8\u80a9\u8180\u808c\u8089,"
+        u"\u5ffd\u7565\u5927\u81c2\u7684\u81ea\u8f6c(Twist)\u3002\n\n"
+        u"\u9002\u7528\u573a\u666f:\u80a9\u8180\u3001\u624b\u8155\u3001\u5927"
+        u"\u817f\u6839\u90e8(Hip)\u7684\u8f85\u52a9\u9aa8\u9abc\u9a71\u52a8"
+        u"\u3002\u4f8b:\u63d0\u53d6\u624b\u8155\u7684 Twist \u53bb\u9a71"
+        u"\u52a8\u5c0f\u81c2\u7684\u7ffb\u8f6c\u9aa8\u9abc\u3002",
 
     "clamp_enabled":
         u"\u5728 kernel \u8ba1\u7b97\u524d\u5c06\u9a71\u52a8\u8f93\u5165\u949b\u5236\u5230\u8bad\u7ec3\u59ff\u6001\u96c6\u7684\u6bcf\u7ef4\u8fb9\u754c\u3002"
