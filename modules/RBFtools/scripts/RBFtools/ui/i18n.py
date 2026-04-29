@@ -93,6 +93,11 @@ _EN = {
     # -- M2.4b: ordered-list editors for M2.1a / M2.2 multi attrs --
     "driver_rotate_order_label":   "Driver Input Rotate Order:",
     "rotate_order_empty_hint":     "No driver rotate orders defined.",
+    # M_ROTORDER_UI_REFACTOR (2026-04-29): per-row label template for
+    # the driver-tab-synced rotate-order editor. {idx} is 1-based for
+    # user-facing display; {name} is the driver.node string.
+    "driver_rotate_order_row_label":
+        "Driver {idx} ({name}):",
     "quat_group_start_label":      "Quaternion Group Starts (output index):",
     "quat_group_empty_hint":       "No quaternion groups defined.",
     "quat_group_start_value_tip":
@@ -592,6 +597,9 @@ _ZH = {
     # -- M2.4b: ordered-list editors --
     "driver_rotate_order_label":   u"\u9a71\u52a8\u8f93\u5165\u65cb\u8f6c\u987a\u5e8f\uff1a",
     "rotate_order_empty_hint":     u"\u672a\u5b9a\u4e49\u9a71\u52a8\u65cb\u8f6c\u987a\u5e8f\u3002",
+    # M_ROTORDER_UI_REFACTOR (2026-04-29) \u2014 ZH parity --
+    "driver_rotate_order_row_label":
+        u"\u9a71\u52a8 {idx} ({name})\uff1a",
     "quat_group_start_label":      u"\u56db\u5143\u6570\u7ec4\u8d77\u59cb\u7d22\u5f15\uff08\u8f93\u51fa\u7d22\u5f15\uff09\uff1a",
     "quat_group_empty_hint":       u"\u672a\u5b9a\u4e49\u56db\u5143\u6570\u7ec4\u3002",
     "quat_group_start_value_tip":

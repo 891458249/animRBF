@@ -15,11 +15,16 @@ from RBFtools.constants import (
     SOLVER_METHOD_LABELS, INPUT_ENCODING_LABELS,   # M2.4a
     DRIVER_INPUT_ROTATE_ORDER_LABELS,              # M2.4b
 )
-from RBFtools.ui.widgets.ordered_enum_list_editor import (
-    OrderedEnumListEditor,
-)
 from RBFtools.ui.widgets.ordered_int_list_editor import (
     OrderedIntListEditor,
+)
+# M_ROTORDER_UI_REFACTOR (2026-04-29): rotate-order editor swapped
+# from the legacy add/remove/reorder OrderedEnumListEditor to the
+# driver-tab-synced DriverRotateOrderEditor. The legacy class is
+# kept (not imported here) for OrderedIntListEditor's quat-group
+# editor which still needs the 4-button shared base behaviour.
+from RBFtools.ui.widgets.driver_rotate_order_editor import (
+    DriverRotateOrderEditor,
 )
 
 
@@ -245,8 +250,19 @@ class RBFSection(CollapsibleFrame):
         # Generic subsection because rotateOrder is irrelevant to
         # Matrix mode. Visibility is gated by inputEncoding via
         # `_update_encoding_visibility`; default Raw → hidden.
-        self._rotate_order_editor = OrderedEnumListEditor(
-            DRIVER_INPUT_ROTATE_ORDER_LABELS)
+        # M_ROTORDER_UI_REFACTOR (2026-04-29): editor type swapped
+        # from OrderedEnumListEditor to DriverRotateOrderEditor —
+        # rows are now a strict projection of the driver-source
+        # tabs (one row per driver, label "Driver N (joint_name)";
+        # the user can only edit the per-row enum combo, not
+        # add / remove / reorder rows). Driver tabs are the single
+        # source of truth; main_window's _reload_driver_sources
+        # pushes the live driver name list via
+        # set_driver_sources_for_rotate_order on every tab change.
+        # DRIVER_INPUT_ROTATE_ORDER_LABELS no longer flows through
+        # the constructor — the new widget reads it directly from
+        # constants.py.
+        self._rotate_order_editor = DriverRotateOrderEditor()
         self._rotate_order_editor.set_label(tr("driver_rotate_order_label"))
         self._rotate_order_editor.set_empty_hint(tr("rotate_order_empty_hint"))
         self._rotate_order_editor.listChanged.connect(
@@ -428,6 +444,20 @@ class RBFSection(CollapsibleFrame):
         self._update_encoding_visibility(ienc)
         self._update_radius_state()
         self._update_mode_visibility(self._cmb_mode.currentIndex())
+
+    def set_driver_sources_for_rotate_order(self, names):
+        """M_ROTORDER_UI_REFACTOR (2026-04-29): public entry-point
+        called from main_window's ``_reload_driver_sources`` slot
+        whenever the driver-source tab list changes (add / remove /
+        node load). The widget rebuilds its rows from *names*
+        (length owned by the driver tabs); previously-set rotate-
+        order values are preserved by row index when the new length
+        permits.
+
+        ``hasattr`` guard preserves the M2.4b §D① contract."""
+        if hasattr(self, "_rotate_order_editor"):
+            self._rotate_order_editor.set_driver_sources(
+                list(names or []))
 
     def set_rotate_order_values(self, values):
         """M_P1_ENC_COMBO_FIX (2026-04-29): narrow public entry-point

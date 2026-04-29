@@ -333,6 +333,61 @@ class MainController(QtCore.QObject):
                 "read_driver_sources failed: {}".format(exc))
             return []
 
+    # =================================================================
+    #  M_ROTORDER_UI_REFACTOR (2026-04-29) — driver-tab-synced
+    #  rotate-order self-heal.
+    # =================================================================
+
+    def _resync_rotate_order_length(self):
+        """Truncate / pad ``driverInputRotateOrder[]`` to match the
+        current ``driverSource[]`` count and write it back so the
+        scene state matches the new "driver tabs are source of truth"
+        contract.
+
+        Idempotent: when the array already matches the driver count
+        the function is a no-op (no spurious write to the node).
+        Called from the shared ``_reload_driver_sources`` slot — add /
+        remove driver paths reach this layer with the array already
+        aligned (M_REBUILD_REFACTOR incremental diff), so only the
+        editorLoaded entry with stale-on-disk data triggers the actual
+        write-back. The idempotent short-circuit is the load-bearing
+        guarantee here, not the call-site filter — future reload-slot
+        refactors cannot accidentally re-introduce duplicate writes.
+
+        Returns True iff a write-back actually occurred (test hook).
+        """
+        if not self._current_node:
+            return False
+        try:
+            sources = list(core.read_driver_info_multi(
+                self._current_node))
+        except Exception:
+            sources = []
+        target_len = len(sources)
+        try:
+            existing = list(core.read_driver_rotate_orders(
+                self._current_node) or [])
+        except Exception:
+            existing = []
+        if len(existing) == target_len:
+            return False  # idempotent — nothing to write.
+        if target_len == 0:
+            new_values = []
+        elif len(existing) > target_len:
+            new_values = existing[:target_len]                # truncate
+        else:
+            new_values = existing + [0] * (
+                target_len - len(existing))                   # pad xyz=0
+        try:
+            core.write_driver_rotate_orders(
+                self._current_node, new_values)
+        except Exception as exc:
+            cmds.warning(
+                "_resync_rotate_order_length: write-back failed "
+                "for {!r}: {}".format(self._current_node, exc))
+            return False
+        return True
+
     # ------------------------------------------------------------------
     # M_DRIVEN_MULTI - multi-driven path A wiring (Item 4c)
     # ------------------------------------------------------------------

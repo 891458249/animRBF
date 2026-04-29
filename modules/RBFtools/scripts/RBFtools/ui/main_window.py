@@ -2040,6 +2040,13 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Phase 2: cascade the rebuild into the pose grid so its
         # column structure tracks the new driver source list.
         self._refresh_pose_grid()
+        # M_ROTORDER_UI_REFACTOR (2026-04-29): driver tabs are the
+        # single source of truth for the rotate-order list. Push
+        # the live driver-name list into rbf_section + run a one-
+        # shot self-heal to truncate / pad the persisted multi.
+        self._ctrl._resync_rotate_order_length()
+        self._rbf_section.set_driver_sources_for_rotate_order(
+            [s.node for s in sources])
 
     def _on_filters_changed(self, role, filters):
         """M_TABBED_EDITOR_INTEGRATION: filter UX lived on the
