@@ -209,6 +209,13 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
     _add_button_key       = "btn_add_driver"
     _empty_hint_key       = "driver_source_list_empty_hint"
     _batch_checkbox_key   = "batch_all_driver_tabs"
+    # M_HELPBUBBLE_BATCH: per-button HelpButton lookup keys. Subclasses
+    # override _add_help_key + _batch_help_key for the driver/driven
+    # variants since those buttons describe role-specific semantics.
+    _connect_help_key     = "source_tab_connect"
+    _disconnect_help_key  = "source_tab_disconnect"
+    _add_help_key         = "source_tab_add_driver"
+    _batch_help_key       = "source_tab_batch_driver"
 
     def __init__(self, parent=None):
         super(_TabbedSourceEditorBase, self).__init__(
@@ -237,6 +244,11 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
 
         # Connect / Disconnect row (panel-level - operates on the
         # currently-active tab).
+        # M_HELPBUBBLE_BATCH: each interactive widget pairs with a
+        # HelpButton — the setToolTip text remains for hover-only
+        # one-liners; HelpButton carries the long-form 3-5-line
+        # description with usage + edge cases per spec (E.1).
+        from RBFtools.ui.widgets.help_button import HelpButton
         row_cd = QtWidgets.QHBoxLayout()
         self._btn_connect = QtWidgets.QPushButton(tr("connect"))
         self._btn_connect.setToolTip(tr("source_tab_connect_tip"))
@@ -245,25 +257,33 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         self._btn_disconnect.setToolTip(tr("source_tab_disconnect_tip"))
         self._btn_disconnect.clicked.connect(self._on_disconnect_clicked)
         row_cd.addWidget(self._btn_connect, 1)
+        row_cd.addWidget(HelpButton(self._connect_help_key))
         row_cd.addWidget(self._btn_disconnect, 1)
+        row_cd.addWidget(HelpButton(self._disconnect_help_key))
         lay.addLayout(row_cd)
 
         # Full-width Add Driver / Add Driven button.
+        row_add = QtWidgets.QHBoxLayout()
         self._btn_add = QtWidgets.QPushButton(tr(self._add_button_key))
         self._btn_add.setToolTip(tr("source_tab_add_tip"))
         self._btn_add.clicked.connect(self.addRequested)
-        lay.addWidget(self._btn_add)
+        row_add.addWidget(self._btn_add, 1)
+        row_add.addWidget(HelpButton(self._add_help_key))
+        lay.addLayout(row_add)
 
         # 2026-04-28 (M_BATCH_ROUTING): Batch toggle. When unchecked
         # the panel-level Connect / Disconnect operate on ONLY the
         # currently-active tab; when checked they sweep every tab.
         # The actual scope decision lives in main_window's
         # _gather_routed_targets — this is just the pickup point.
+        row_batch = QtWidgets.QHBoxLayout()
         self._chk_batch = QtWidgets.QCheckBox(
             tr(self._batch_checkbox_key))
         self._chk_batch.setToolTip(tr("source_tab_batch_tip"))
         self._chk_batch.setChecked(False)
-        lay.addWidget(self._chk_batch)
+        row_batch.addWidget(self._chk_batch, 1)
+        row_batch.addWidget(HelpButton(self._batch_help_key))
+        lay.addLayout(row_batch)
 
         self._update_empty_hint()
 
@@ -555,3 +575,5 @@ class TabbedDrivenSourceEditor(_TabbedSourceEditorBase):
     _add_button_key   = "btn_add_driven"
     _empty_hint_key   = "driven_source_list_empty_hint"
     _batch_checkbox_key = "batch_all_driven_tabs"
+    _add_help_key     = "source_tab_add_driven"
+    _batch_help_key   = "source_tab_batch_driven"

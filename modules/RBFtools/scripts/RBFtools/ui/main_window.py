@@ -120,6 +120,13 @@ class _PoseEditorPanel(CollapsibleFrame):
         # the pose table + the Add/Apply/Connect/Disconnect/Reload
         # action buttons.
         self._outer_tabs = QtWidgets.QTabWidget()
+        # M_HELPBUBBLE_BATCH: top-right corner HelpButton describing
+        # the three outer tabs together (DriverDriven / BaseDrivenPose
+        # / Pose). One bubble covers the navigation overview; the
+        # per-button HelpButtons inside each tab cover the widgets.
+        self._outer_tabs.setCornerWidget(
+            HelpButton("outer_tabs_overview"),
+            QtCore.Qt.TopRightCorner)
         lay.addWidget(self._outer_tabs, 1)
 
         # ---- Tab 1: DriverDriven ---------------------------------
@@ -669,6 +676,9 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         _oe_row = QtWidgets.QHBoxLayout()
         _oe_row.addWidget(QtWidgets.QLabel(tr("output_encoding_label")))
         _oe_row.addWidget(self._output_encoding_combo, 1)
+        # M_HELPBUBBLE_BATCH: long-form HelpButton next to the
+        # node-level outputEncoding combo.
+        _oe_row.addWidget(HelpButton("output_encoding"))
         self._output_encoding_section.add_layout(_oe_row)
 
         # Phase 3 (Utility section 2026-04-27): below the pose
@@ -677,12 +687,20 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Connectionless Input/Output, Remove Redundant Pose).
         self._utility_section = CollapsibleFrame(
             tr("section_utility"), collapsed=True)
+        # M_HELPBUBBLE_BATCH: HelpButton next to Split RBFSolver.
+        _split_row = QtWidgets.QHBoxLayout()
         self._btn_split_solver = QtWidgets.QPushButton(
             tr("btn_split_solver_per_joint"))
         self._btn_split_solver.setToolTip(
             tr("btn_split_solver_per_joint_tip"))
-        self._utility_section.add_widget(self._btn_split_solver)
+        _split_row.addWidget(self._btn_split_solver, 1)
+        _split_row.addWidget(HelpButton("btn_split_solver_per_joint"))
+        self._utility_section.add_layout(_split_row)
         # Cleanup mode radio group + execute button.
+        # M_HELPBUBBLE_BATCH: ONE HelpButton at the end of the radio
+        # row covers all 3 cleanup modes + the Run button (the
+        # bubble walks through input / output / redundant-pose
+        # semantics together — they share the same execute path).
         cleanup_row = QtWidgets.QHBoxLayout()
         self._rb_cleanup_in = QtWidgets.QRadioButton(
             tr("rb_remove_connectionless_input"))
@@ -698,10 +716,14 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         cleanup_row.addWidget(self._rb_cleanup_in)
         cleanup_row.addWidget(self._rb_cleanup_out)
         cleanup_row.addWidget(self._rb_cleanup_pose)
+        cleanup_row.addWidget(HelpButton("cleanup_modes_overview"))
         self._utility_section.add_layout(cleanup_row)
+        _run_row = QtWidgets.QHBoxLayout()
         self._btn_run_cleanup = QtWidgets.QPushButton(
             tr("btn_remove_unnecessary_datas"))
-        self._utility_section.add_widget(self._btn_run_cleanup)
+        _run_row.addWidget(self._btn_run_cleanup, 1)
+        _run_row.addWidget(HelpButton("btn_remove_unnecessary_datas"))
+        self._utility_section.add_layout(_run_row)
 
         self._sections.addWidget(self._general)
         self._sections.addWidget(self._va_section)
