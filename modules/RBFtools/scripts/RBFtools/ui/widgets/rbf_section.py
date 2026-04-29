@@ -30,6 +30,10 @@ class RBFSection(CollapsibleFrame):
     kernelChanged = QtCore.Signal(int)
     radiusTypeChanged = QtCore.Signal(int)
     radiusEdited = QtCore.Signal(float)
+    # M_ENC_AUTOPIPE: emitted alongside attributeChanged("inputEncoding")
+    # so the controller can run the rotateOrder auto-derive side-effect
+    # without overloading the generic set_attribute dispatch.
+    inputEncodingChanged = QtCore.Signal(int)
 
     def __init__(self, parent=None):
         super(RBFSection, self).__init__(
@@ -485,10 +489,22 @@ class RBFSection(CollapsibleFrame):
         self._update_mode_visibility(idx)
 
     def _on_input_encoding(self, idx):
-        """Emit attr + sync visibility via the dedicated helper. The
-        helper is also called from load() so a v5 rig opening with
-        encoding != Raw shows the rotateOrder editor immediately."""
+        """Emit attr + side-effect signal + sync visibility.
+
+        Two signals fire on user-initiated combo change:
+          1. ``attributeChanged("inputEncoding", idx)`` -> generic
+             set_attribute dispatch writes the schema field.
+          2. ``inputEncodingChanged(idx)`` (M_ENC_AUTOPIPE) -> the
+             controller runs the rotateOrder auto-derive side-effect
+             so Generic-mode TDs get "select-encoding -> works"
+             without manually filling the rotate-order editor.
+
+        :func:`_update_encoding_visibility` is also called from
+        load() so a v5 rig opening with encoding != Raw shows the
+        rotateOrder editor immediately.
+        """
         self.attributeChanged.emit("inputEncoding", idx)
+        self.inputEncodingChanged.emit(int(idx))
         self._update_encoding_visibility(idx)
 
     def _update_encoding_visibility(self, idx):
@@ -496,10 +512,17 @@ class RBFSection(CollapsibleFrame):
 
         ``hasattr`` guard preserved per addendum §M2.4b (D)①: defends
         against future ``_build`` reordering that might construct the
-        editor after a callback fires."""
+        editor after a callback fires.
+
+        M_ENC_AUTOPIPE: the editor is hidden for both Raw (0) and
+        Quaternion (1) since neither encoding consumes
+        ``driverInputRotateOrder[]`` in C++ applyEncodingToBlock
+        (cpp:2606-2624). BendRoll (2) / ExpMap (3) / SwingTwist (4)
+        show the editor.
+        """
         if hasattr(self, "_rotate_order_editor"):
-            # Raw (idx == 0) hides; non-Raw shows.
-            self._rotate_order_editor.setVisible(idx != 0)
+            needs_rotate_order = int(idx) in (2, 3, 4)
+            self._rotate_order_editor.setVisible(needs_rotate_order)
 
     def _on_clamp_toggled(self, checked):
         self.attributeChanged.emit("clampEnabled", checked)

@@ -3404,6 +3404,106 @@ def write_driver_rotate_orders(node, values):
     set_node_multi_attr(node, "driverInputRotateOrder", list(values or []))
 
 
+# M_ENC_AUTOPIPE: encoding indices that consume per-driver-group
+# rotateOrder in C++ applyEncodingToBlock (RBFtools.cpp:2606-2624 +
+# encodeEulerToQuaternion at cpp:3135). Raw (0) bypasses encoding;
+# Quaternion (1) consumes pre-encoded 4-tuples and is rotateOrder-
+# independent. BendRoll (2) / ExpMap (3) / SwingTwist (4) all need
+# rotateOrder for the Euler→Quaternion preconversion.
+_ENCODINGS_NEED_ROTATE_ORDER = (2, 3, 4)
+
+
+def auto_resolve_generic_rotate_orders(node, encoding):
+    """M_ENC_AUTOPIPE: derive driverInputRotateOrder[] from currently
+    connected driverSource[] entries when the user switches Generic
+    inputEncoding to a rotateOrder-consuming mode.
+
+    Encoding semantics (mirrors C++ applyEncodingToBlock dispatch):
+
+      * ``encoding`` in ``{0, 1}`` (Raw / Quaternion) -> clear the
+        multi.  Raw bypasses encoding entirely; Quaternion consumes
+        pre-encoded 4-tuples and is rotateOrder-independent. The
+        clear keeps scene state honest so a later switch to ExpMap
+        rederives from the live driver topology rather than
+        re-using stale entries from a prior encoding.
+
+      * ``encoding`` in ``{2, 3, 4}`` (BendRoll / ExpMap / SwingTwist)
+        -> walk ``driverSource[]`` and connect each
+        ``driver_node.rotateOrder`` ->
+        ``shape.driverInputRotateOrder[idx]`` via the existing
+        :func:`_resolve_driver_rotate_order` helper. ``idx`` matches
+        the driverSource sparse multi index so per-source ordering is
+        preserved across re-derivations.
+
+    Matrix mode is left untouched: ``add_driver_source`` already
+    wires the rotateOrder at add time (cpp:1264) and the C++ math
+    chain for Matrix mode reads the same array.
+
+    No-op when the node has no driverSource entries or when the
+    shape cannot be resolved.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    # Clear-on-bypass branch (encodings that don't consume rotateOrder).
+    if int(encoding) not in _ENCODINGS_NEED_ROTATE_ORDER:
+        try:
+            existing = cmds.getAttr(
+                shape + ".driverInputRotateOrder",
+                multiIndices=True) or []
+        except Exception:
+            existing = []
+        if not existing:
+            return
+        # Best-effort disconnect of upstream .rotateOrder feeders before
+        # the multi clear so the connection layer doesn't leak into the
+        # next derivation. write_driver_rotate_orders ([]) below is the
+        # transactional clear.
+        for i in existing:
+            plug = "{}.driverInputRotateOrder[{}]".format(shape, i)
+            try:
+                srcs = cmds.listConnections(
+                    plug, source=True, destination=False,
+                    plugs=True) or []
+            except Exception:
+                srcs = []
+            for src in srcs:
+                try:
+                    cmds.disconnectAttr(src, plug)
+                except Exception:
+                    pass
+        try:
+            write_driver_rotate_orders(node, [])
+        except Exception:
+            pass
+        return
+    # Auto-derive branch. Walk driverSource[] (sparse multi) and connect
+    # rotateOrder per source.
+    try:
+        ds_indices = cmds.getAttr(
+            shape + ".driverSource", multiIndices=True) or []
+    except Exception:
+        ds_indices = []
+    for d in ds_indices:
+        node_plug = "{}.driverSource[{}].driverSource_node".format(
+            shape, d)
+        try:
+            conns = cmds.listConnections(
+                node_plug, source=True, destination=False) or []
+        except Exception:
+            conns = []
+        if not conns:
+            continue
+        driver_node = conns[0]
+        try:
+            _resolve_driver_rotate_order(shape, driver_node, d)
+        except Exception as exc:
+            cmds.warning(
+                "auto_resolve_generic_rotate_orders: failed for "
+                "driverSource[{}] driver={!r}: {}".format(
+                    d, driver_node, exc))
+
+
 def read_quat_group_starts(node):
     """Return ``outputQuaternionGroupStart[]`` as an ordered int list."""
     shape = get_shape(node)

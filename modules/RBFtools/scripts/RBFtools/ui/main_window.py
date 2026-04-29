@@ -1119,6 +1119,11 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._rbf_section.kernelChanged.connect(ctrl.on_kernel_changed)
         self._rbf_section.radiusTypeChanged.connect(ctrl.on_radius_type_changed)
         self._rbf_section.radiusEdited.connect(ctrl.on_radius_edited)
+        # M_ENC_AUTOPIPE: post-write side-effect — auto-derive
+        # driverInputRotateOrder[] from connected drivers when the
+        # user picks BendRoll / ExpMap / SwingTwist.
+        self._rbf_section.inputEncodingChanged.connect(
+            ctrl.on_input_encoding_changed)
 
         # ---- Pose editor panel → handlers ----
         pe = self._pose_editor

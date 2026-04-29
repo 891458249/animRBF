@@ -1159,6 +1159,54 @@ class MainController(QtCore.QObject):
             core.set_node_attr(self._current_node, attr, value)
 
     # =================================================================
+    #  M_ENC_AUTOPIPE - inputEncoding side-effect: auto-derive
+    #  driverInputRotateOrder[] from connected drivers (Generic mode).
+    # =================================================================
+
+    def on_input_encoding_changed(self, idx):
+        """Side-effect slot for the inputEncoding combo (rbf_section
+        emits ``inputEncodingChanged`` immediately after the regular
+        ``attributeChanged`` write).
+
+        Generic-mode TDs expect "select an encoding -> RBF compute
+        uses it" with zero manual setup. The C++ math chain
+        (RBFtools.cpp:1182 + 2606-2624 + 3135) consumes
+        ``driverInputRotateOrder[]`` for BendRoll / ExpMap /
+        SwingTwist; without an auto-derive step the array stays
+        empty and the C++ falls back to xyz=0 for all drivers,
+        silently mis-encoding any non-XYZ joint.
+
+        :func:`core.auto_resolve_generic_rotate_orders` walks the
+        currently connected ``driverSource[]`` entries and
+        force-connects each ``driver_node.rotateOrder`` so the array
+        tracks the live driver topology. Emitting
+        :attr:`driverSourcesChanged` after the derive forces the
+        rbf_section list editor to reload from the now-populated
+        multi via its existing ``set_values`` path.
+        """
+        if not self._current_node:
+            return
+        try:
+            core.auto_resolve_generic_rotate_orders(
+                self._current_node, int(idx))
+        except Exception as exc:
+            cmds.warning(
+                "on_input_encoding_changed: auto-derive failed: "
+                "{}".format(exc))
+            return
+        # Reload the settings dict so rbf_section.load() repopulates
+        # the rotate-order list editor from the freshly-derived
+        # driverInputRotateOrder[]. settingsLoaded -> main_window ->
+        # rbf_section.load -> set_values is the single MVC-clean
+        # path; driverSourcesChanged covers the tabbed editor reload
+        # for symmetry with add/remove driver flows.
+        try:
+            self._load_settings()
+        except Exception:
+            pass
+        self.driverSourcesChanged.emit()
+
+    # =================================================================
     #  3. Kernel / radius interactions
     # =================================================================
 
