@@ -1260,23 +1260,75 @@ class MainController(QtCore.QObject):
     #  6. Pose CRUD
     # =================================================================
 
+    # ------------------------------------------------------------------
+    # M_ADDPOSE_MULTI_DRIVEN (2026-04-29) helpers — multi-source aware
+    # snapshot. Single-source path of caller (driver_node, driver_attrs)
+    # is the legacy fallback when the multi-source array is empty. For
+    # multi-source nodes (joint1/joint2/joint3 each with 9 attrs) the
+    # legacy `read_current_values(driver_node="joint1",
+    # driver_attrs=27_attrs_concat_with_dups)` read joint1's 9 attrs
+    # THREE times — driven sources came back as triple-duplicate values
+    # in every pose row. The multi helpers iterate the actual source
+    # list and stitch per-source attrs into a contiguous outputs vector
+    # whose length equals sum(len(s.attrs)) — matching shape.input[] /
+    # shape.output[] subscript order produced by add_*_source.
+    # ------------------------------------------------------------------
+
+    def _capture_multi_inputs(self, fallback_node, fallback_attrs):
+        """Snapshot driver values across ALL driver sources. Falls
+        back to the legacy single-source read if the controller has
+        not yet been wired with a multi-source list."""
+        try:
+            sources = list(self.read_driver_sources())
+        except Exception:
+            sources = []
+        if not sources:
+            return core.read_current_values(
+                fallback_node, fallback_attrs)
+        out = []
+        for src in sources:
+            if not src.node or not src.attrs:
+                continue
+            out.extend(core.read_current_values(
+                src.node, list(src.attrs)))
+        # Defensive: empty multi-source return falls back too.
+        if not out:
+            return core.read_current_values(
+                fallback_node, fallback_attrs)
+        return out
+
+    def _capture_multi_outputs(self, fallback_node, fallback_attrs):
+        """Driven mirror of :meth:`_capture_multi_inputs`."""
+        try:
+            sources = list(self.read_driven_sources())
+        except Exception:
+            sources = []
+        if not sources:
+            return core.read_current_values(
+                fallback_node, fallback_attrs)
+        out = []
+        for src in sources:
+            if not src.node or not src.attrs:
+                continue
+            out.extend(core.read_current_values(
+                src.node, list(src.attrs)))
+        if not out:
+            return core.read_current_values(
+                fallback_node, fallback_attrs)
+        return out
+
     def add_pose(self, driver_node, driven_node,
                  driver_attrs, driven_attrs):
         """Capture current scene values and append a new pose.
 
         Handles BlendShape auto-fill logic when :attr:`auto_fill` is on.
 
-        Parameters
-        ----------
-        driver_node, driven_node : str
-            Scene node names.
-        driver_attrs, driven_attrs : list[str]
-            Currently selected attribute names.
-
-        Returns
-        -------
-        PoseData or None
-            The newly created pose, or None on validation failure.
+        M_ADDPOSE_MULTI_DRIVEN (2026-04-29): driver_node /
+        driven_node parameters retained for backcompat with the
+        single-source AttributeList API; the actual snapshot now
+        walks read_driver_sources() / read_driven_sources()
+        internally so multi-source nodes record per-source values
+        instead of triple-duplicating the first source's values.
         """
         if not driver_node or not driven_node:
             cmds.warning("Please set both driver and driven nodes.")
@@ -1304,9 +1356,10 @@ class MainController(QtCore.QObject):
 
         pid = model.next_pose_index()
 
-        # Snapshot current scene values
-        inputs  = core.read_current_values(driver_node, driver_attrs)
-        outputs = core.read_current_values(driven_node, driven_attrs)
+        # M_ADDPOSE_MULTI_DRIVEN: per-source snapshot.
+        inputs = self._capture_multi_inputs(driver_node, driver_attrs)
+        outputs = self._capture_multi_outputs(
+            driven_node, driven_attrs)
 
         # ----- BlendShape auto-fill -----
         # Vector generation is delegated to core (pure math, no UI).
@@ -1329,11 +1382,15 @@ class MainController(QtCore.QObject):
 
     def update_pose(self, row, driver_node, driven_node,
                     driver_attrs, driven_attrs):
-        """Re-capture current scene values into an existing pose row."""
+        """Re-capture current scene values into an existing pose row.
+
+        M_ADDPOSE_MULTI_DRIVEN: same multi-source snapshot as
+        :meth:`add_pose`."""
         if not driver_node or not driven_node:
             return
-        inputs  = core.read_current_values(driver_node, driver_attrs)
-        outputs = core.read_current_values(driven_node, driven_attrs)
+        inputs = self._capture_multi_inputs(driver_node, driver_attrs)
+        outputs = self._capture_multi_outputs(
+            driven_node, driven_attrs)
         self._pose_model.update_pose_values(row, inputs, outputs)
 
     def delete_pose(self, row):
@@ -1400,17 +1457,47 @@ class MainController(QtCore.QObject):
         core.write_base_pose_values(self._current_node, cur)
 
     def recall_base_pose(self):
-        """Commit 3 (M_BASE_POSE): apply the baseline to the active
-        driven node attrs. Mirrors :meth:`recall_pose` semantics — sets
-        the scene values directly without going through the solver."""
+        """Commit 3 (M_BASE_POSE) + M_ADDPOSE_MULTI_DRIVEN
+        (2026-04-29): apply the baseline to the active driven
+        attrs. Multi-source aware: each (source.node,
+        source.attrs[i]) pair receives the corresponding slice of
+        ``base_pose_values``. Falls back to the legacy single-
+        source ``read_driven_info`` path when no multi-source list
+        is wired."""
         if self._current_node is None:
             return
-        dvn_node, dvn_attrs = core.read_driven_info(self._current_node)
+        baseline = list(core.read_base_pose_values(self._current_node))
+        try:
+            dvn_sources = list(self.read_driven_sources())
+        except Exception:
+            dvn_sources = []
+        if dvn_sources:
+            # Pad baseline to total expected length.
+            total = sum(len(s.attrs) for s in dvn_sources)
+            if len(baseline) < total:
+                baseline.extend([0.0] * (total - len(baseline)))
+            with core.undo_chunk("RBFtools: recall base pose"):
+                cursor = 0
+                for src in dvn_sources:
+                    if not src.node:
+                        cursor += len(src.attrs)
+                        continue
+                    for j, attr in enumerate(src.attrs):
+                        if cursor + j >= len(baseline):
+                            break
+                        try:
+                            cmds.setAttr(
+                                "{}.{}".format(src.node, attr),
+                                float(baseline[cursor + j]))
+                        except Exception:
+                            pass
+                    cursor += len(src.attrs)
+            return
+        # Legacy single-source fallback.
+        dvn_node, dvn_attrs = core.read_driven_info(
+            self._current_node)
         if not dvn_node or not dvn_attrs:
             return
-        baseline = list(core.read_base_pose_values(self._current_node))
-        # Pad with zeros to match dvn_attrs length (legacy nodes /
-        # newly-connected ones have fewer slots than attrs).
         if len(baseline) < len(dvn_attrs):
             baseline.extend([0.0] * (len(dvn_attrs) - len(baseline)))
         with core.undo_chunk("RBFtools: recall base pose"):
@@ -1425,14 +1512,81 @@ class MainController(QtCore.QObject):
                     driver_attrs, driven_attrs):
         """Restore a saved pose to the scene.
 
-        Reads the :class:`PoseData` from the model and delegates to
-        :func:`core.recall_pose`.
+        M_ADDPOSE_MULTI_DRIVEN (2026-04-29): the legacy single-
+        source recall path went through :func:`core.recall_pose`
+        which writes every attr in ``driven_attrs`` to
+        ``driven_node``. With multi-source nodes that stitched
+        the FIRST source's name onto every position in the
+        flat-concat attr list — same triple-write bug as
+        :meth:`add_pose`. We now splay PoseData.inputs /
+        PoseData.values back to each (source.node,
+        source.attrs[i]) pair and fall back to the legacy single-
+        source ``core.recall_pose`` when no multi-source list is
+        wired.
         """
         pose = self._pose_model.get_pose(row)
         if pose is None:
             return
-        core.recall_pose(driver_node, driven_node,
-                         driver_attrs, driven_attrs, pose)
+        try:
+            drv_sources = list(self.read_driver_sources())
+        except Exception:
+            drv_sources = []
+        try:
+            dvn_sources = list(self.read_driven_sources())
+        except Exception:
+            dvn_sources = []
+        if not drv_sources and not dvn_sources:
+            # Pure single-source legacy path — preserve the
+            # original recall behaviour bit-for-bit.
+            core.recall_pose(driver_node, driven_node,
+                             driver_attrs, driven_attrs, pose)
+            return
+        # Multi-source splay: write PoseData.inputs / .values back
+        # to each (source.node, attr) pair in their stitched order.
+        with core.undo_chunk("RBFtools: recall pose"):
+            cursor = 0
+            for src in (drv_sources or []):
+                if not src.node:
+                    cursor += len(src.attrs)
+                    continue
+                for j, attr in enumerate(src.attrs):
+                    if cursor + j >= len(pose.inputs):
+                        break
+                    plug = "{}.{}".format(src.node, attr)
+                    val = float(pose.inputs[cursor + j])
+                    self._set_attr_break_then_restore(plug, val)
+                cursor += len(src.attrs)
+            cursor = 0
+            for src in (dvn_sources or []):
+                if not src.node:
+                    cursor += len(src.attrs)
+                    continue
+                for j, attr in enumerate(src.attrs):
+                    if cursor + j >= len(pose.values):
+                        break
+                    plug = "{}.{}".format(src.node, attr)
+                    val = float(pose.values[cursor + j])
+                    self._set_attr_break_then_restore(plug, val)
+                cursor += len(src.attrs)
+
+    def _set_attr_break_then_restore(self, plug, value):
+        """Helper used by recall_pose: temporarily break the
+        incoming connection on ``plug``, write ``value`` via
+        setAttr, then re-connect. Mirrors the "preview pose"
+        contract of :func:`core.recall_pose` without going
+        through the deprecated single-source API."""
+        kept = core._safe_disconnect_incoming(plug)
+        try:
+            cmds.setAttr(plug, value)
+        except Exception as exc:
+            cmds.warning(
+                "_set_attr_break_then_restore: setAttr {} failed: "
+                "{}".format(plug, exc))
+        if kept is not None:
+            try:
+                cmds.connectAttr(kept[0], kept[1], force=True)
+            except Exception:
+                pass
 
     # =================================================================
     #  7. Apply / Connect
