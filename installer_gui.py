@@ -302,9 +302,61 @@ def _build_mod_content(content_path, versions=None):
     return "\n".join(lines) + "\n"
 
 
+def installed_versions(mod_dir=None):
+    """Return the set of Maya versions currently routed by the
+    installed RBFtools .mod file.
+
+    M_P0_INSTALLER_PER_VERSION (2026-05-01): install/uninstall
+    became per-version operations. The .mod file's
+    ``MAYAVERSION:<ver>`` blocks are the source of truth for
+    which Maya versions are wired up; parsing them lets the GUI
+    show ``[Installed]`` / ``[Not installed]`` per row and lets
+    install/uninstall work on subsets without clobbering the
+    others.
+
+    Returns an empty set if the .mod file does not exist or
+    contains no ``MAYAVERSION:`` directive.
+    """
+    if mod_dir is None:
+        modules_base = os.path.normpath(_default_modules_dir())
+        mod_dir = modules_base
+    else:
+        mod_dir = os.path.normpath(mod_dir)
+    mod_path = os.path.join(mod_dir, _MODULE_NAME + ".mod")
+    if not os.path.isfile(mod_path):
+        return set()
+    try:
+        with open(mod_path, "r") as fh:
+            text = fh.read()
+    except (OSError, IOError):
+        return set()
+    versions = set()
+    for line in text.splitlines():
+        s = line.strip()
+        # Lines look like:
+        #   + MAYAVERSION:2025 RBFtools any <path>
+        # Match the token after MAYAVERSION: literally; the value
+        # is a 4-digit year for current Maya releases.
+        idx = s.find("MAYAVERSION:")
+        if idx < 0:
+            continue
+        rest = s[idx + len("MAYAVERSION:"):]
+        # Take the leading whitespace-delimited token.
+        token = rest.split(None, 1)[0] if rest else ""
+        if token:
+            versions.add(token)
+    return versions
+
+
 def install(install_dir=None, mod_dir=None, verbose=True,
             versions=None):
     """Install the RBF Tools module.
+
+    M_P0_INSTALLER_PER_VERSION (2026-05-01): when *versions* is a
+    subset of the discovered Maya versions, the new versions are
+    *merged* with whatever is already routed in the existing .mod
+    file (no clobbering). ``versions=None`` keeps the legacy
+    "install for everything we have a binary for" behaviour.
 
     Returns True on success.
     """
@@ -327,6 +379,15 @@ def install(install_dir=None, mod_dir=None, verbose=True,
         log("[ERROR] Source folder not found: {}".format(source))
         return False
 
+    # Merge with existing .mod routing so single-version installs
+    # don't kick previously-routed versions out of the file.
+    if versions is not None:
+        existing = installed_versions(mod_dir=mod_dir)
+        merged = sorted(set(versions) | existing)
+        effective_versions = merged
+    else:
+        effective_versions = None
+
     log("=" * 60)
     log("  RBF Tools Installer")
     log("=" * 60)
@@ -334,6 +395,10 @@ def install(install_dir=None, mod_dir=None, verbose=True,
     log("  Source       : {}".format(source))
     log("  Install to   : {}".format(install_dir))
     log("  .mod file in : {}".format(mod_dir))
+    if versions is not None:
+        log("  Requested    : {}".format(", ".join(versions)))
+        log("  Routed (.mod): {}".format(
+            ", ".join(effective_versions)))
     log("")
 
     log("[1/3] Copying module content ...")
@@ -348,7 +413,8 @@ def install(install_dir=None, mod_dir=None, verbose=True,
     log("[2/3] Writing .mod file ...")
     _ensure_dir(mod_dir)
     mod_path = os.path.join(mod_dir, _MODULE_NAME + ".mod")
-    mod_content = _build_mod_content(install_dir, versions=versions)
+    mod_content = _build_mod_content(
+        install_dir, versions=effective_versions)
     with open(mod_path, "w") as fh:
         fh.write(mod_content)
     log("      -> {}".format(mod_path))
@@ -359,8 +425,17 @@ def install(install_dir=None, mod_dir=None, verbose=True,
     return True
 
 
-def uninstall(install_dir=None, mod_dir=None, verbose=True):
-    """Remove a previous RBF Tools installation."""
+def uninstall(install_dir=None, mod_dir=None, verbose=True,
+              versions=None):
+    """Remove a previous RBF Tools installation.
+
+    M_P0_INSTALLER_PER_VERSION (2026-05-01): when *versions* is a
+    subset of the currently routed Maya versions, only those
+    blocks are removed from the .mod file; the content directory
+    + remaining versions stay intact. ``versions=None`` keeps the
+    legacy "remove everything" behaviour (drops the .mod file
+    AND the content directory).
+    """
     log = print if verbose else (lambda *a, **k: None)
 
     modules_base = os.path.normpath(_default_modules_dir())
@@ -382,6 +457,33 @@ def uninstall(install_dir=None, mod_dir=None, verbose=True):
 
     mod_path = os.path.normpath(
         os.path.join(mod_dir, _MODULE_NAME + ".mod"))
+
+    # Per-version subset path: rewrite the .mod with only the
+    # versions the caller did NOT request to remove. If the
+    # remaining set is empty, fall through to the full-uninstall
+    # branch so the .mod + content directory both get cleaned.
+    if versions:
+        existing = installed_versions(mod_dir=mod_dir)
+        to_remove = set(versions)
+        remaining = sorted(existing - to_remove)
+        log("  Requested remove : {}".format(", ".join(versions)))
+        log("  Currently routed : {}".format(
+            ", ".join(sorted(existing)) if existing else "(none)"))
+        log("  Will remain      : {}".format(
+            ", ".join(remaining) if remaining else "(none)"))
+        log("")
+        if remaining:
+            mod_content = _build_mod_content(
+                install_dir, versions=remaining)
+            _ensure_dir(mod_dir)
+            with open(mod_path, "w") as fh:
+                fh.write(mod_content)
+            log("  Rewrote .mod     : {}".format(mod_path))
+            log("  Kept content     : {}".format(install_dir))
+            log("")
+            return True
+        # remaining empty -> fall through to full-uninstall.
+
     if os.path.isfile(mod_path):
         os.remove(mod_path)
         log("  Removed .mod file : {}".format(mod_path))
@@ -420,6 +522,8 @@ _TR = {
             "or check repo plug-ins/win64/<ver>/ "
             "RBFtools.mll exists)",
         "version_row":      "Maya {ver}   ({path})",
+        "status_installed": "[Installed]",
+        "status_not_installed": "[Not installed]",
         "action_label":     "Action:",
         "action_install":   "Install",
         "action_uninstall": "Uninstall",
@@ -433,6 +537,9 @@ _TR = {
         "err_no_version":
             "[ERROR] No Maya version selected; check at "
             "least one box.",
+        "err_no_version_uninstall":
+            "[ERROR] No Maya version selected to uninstall; "
+            "check at least one box.",
         "log_done_install": "[DONE] install ok={ok}",
         "log_done_uninstall": "[DONE] uninstall ok={ok}",
         "log_fatal":        "[FATAL] {exc}",
@@ -449,6 +556,8 @@ _TR = {
             "  （未检测到——请先安装 Maya 2022 / 2025，"
             "或确认仓库 plug-ins/win64/<版本>/RBFtools.mll 存在）",
         "version_row":      "Maya {ver}   ({path})",
+        "status_installed": "[已安装]",
+        "status_not_installed": "[未安装]",
         "action_label":     "操作：",
         "action_install":   "安装",
         "action_uninstall": "卸载",
@@ -460,6 +569,8 @@ _TR = {
         "btn_close":        "关闭",
         "err_no_version":
             "[错误] 未选中任何 Maya 版本；请至少勾选一项。",
+        "err_no_version_uninstall":
+            "[错误] 未选中任何要卸载的 Maya 版本；请至少勾选一项。",
         "log_done_install": "[完成] 安装 ok={ok}",
         "log_done_uninstall": "[完成] 卸载 ok={ok}",
         "log_fatal":        "[严重错误] {exc}",
@@ -637,6 +748,11 @@ class InstallerWindow(object):
 
         self._installable = compute_installable_versions()
         self._version_vars = {}    # version -> BooleanVar
+        # M_P0_INSTALLER_PER_VERSION (2026-05-01): per-row
+        # ``[Installed]`` / ``[Not installed]`` status labels.
+        # Keyed by version so _refresh_install_status can update
+        # them after each install/uninstall completes.
+        self._version_status_labels = {}
         self._mode_var = tk.StringVar(value="install")
         self._install_dir_var = tk.StringVar(value="")
 
@@ -932,18 +1048,29 @@ class InstallerWindow(object):
             for version, maya_path in self._installable:
                 var = tk.BooleanVar(value=True)
                 self._version_vars[version] = var
+                row = ttk.Frame(ver_frame)
+                row.pack(anchor="w", fill="x")
                 rb = tk.Checkbutton(
-                    ver_frame, variable=var,
+                    row, variable=var,
                     bg=_DARK["bg"], fg=_DARK["fg"],
                     activebackground=_DARK["bg"],
                     activeforeground=_DARK["fg"],
                     selectcolor=_DARK["bg"],
                     borderwidth=0, highlightthickness=0,
                     font=("Segoe UI", 9))
-                rb.pack(anchor="w")
+                rb.pack(side="left", anchor="w")
                 self._track(
                     rb, "version_row",
                     ver=version, path=maya_path)
+                # M_P0_INSTALLER_PER_VERSION (2026-05-01): per-row
+                # status label (``[Installed]`` / ``[Not
+                # installed]``). Initial text is set via
+                # _refresh_install_status() at the end of _build.
+                status_lbl = ttk.Label(
+                    row, style="Hint.TLabel",
+                    font=("Segoe UI", 9))
+                status_lbl.pack(side="left", padx=(8, 0))
+                self._version_status_labels[version] = status_lbl
 
         # Mode radio — raw tk.Radiobutton, same selectcolor trick.
         ttk.Separator(outer, orient="horizontal").pack(
@@ -1027,6 +1154,27 @@ class InstallerWindow(object):
         close_btn.pack(side="right", padx=(0, 8))
         self._track(close_btn, "btn_close")
 
+        # M_P0_INSTALLER_PER_VERSION (2026-05-01): seed the per-row
+        # status labels with the current install state at launch.
+        self._refresh_install_status()
+
+    def _refresh_install_status(self):
+        """Recompute ``installed_versions()`` and update every per-
+        row status label. Called at startup, after each
+        install/uninstall completes, and on language switch."""
+        try:
+            current = installed_versions()
+        except Exception:
+            current = set()
+        for version, label in self._version_status_labels.items():
+            key = ("status_installed" if version in current
+                   else "status_not_installed")
+            try:
+                label.configure(text=_tr(self._lang, key))
+            except Exception:
+                # Widget destroyed during teardown; skip.
+                pass
+
     def _on_language_changed(self):
         """User flipped the Language radio. Re-render every
         tracked widget through the new locale's lookup. Window
@@ -1043,6 +1191,10 @@ class InstallerWindow(object):
             except Exception:
                 # Widget destroyed; skip silently.
                 continue
+        # Status labels aren't in _tr_widgets because their key
+        # depends on runtime state (installed vs not). Re-render
+        # them through the new locale here.
+        self._refresh_install_status()
 
     def _selected_versions(self):
         return [v for v, var in self._version_vars.items()
@@ -1058,8 +1210,15 @@ class InstallerWindow(object):
         mode = self._mode_var.get()
         versions = self._selected_versions()
         install_dir = self._resolve_install_dir()
-        if mode == "install" and not versions:
-            self._log_line(_tr(self._lang, "err_no_version"))
+        # M_P0_INSTALLER_PER_VERSION (2026-05-01): both install AND
+        # uninstall now require at least one checked version. The
+        # legacy "uninstall everything" path is reachable by
+        # checking every row.
+        if not versions:
+            err_key = ("err_no_version_uninstall"
+                       if mode == "uninstall"
+                       else "err_no_version")
+            self._log_line(_tr(self._lang, err_key))
             return
         worker = threading.Thread(
             target=self._run_action,
@@ -1082,8 +1241,14 @@ class InstallerWindow(object):
                     _tr(self._lang,
                         "log_done_install", ok=ok))
             elif mode == "uninstall":
+                # M_P0_INSTALLER_PER_VERSION (2026-05-01): pass the
+                # checked-version subset through so only those .mod
+                # blocks are removed; remaining versions stay
+                # routed.
                 ok = uninstall(
-                    install_dir=install_dir, verbose=True)
+                    install_dir=install_dir,
+                    versions=versions,
+                    verbose=True)
                 self._log_line(
                     _tr(self._lang,
                         "log_done_uninstall", ok=ok))
@@ -1092,6 +1257,13 @@ class InstallerWindow(object):
                 _tr(self._lang, "log_fatal", exc=exc))
         finally:
             sys.stdout = saved
+            # Refresh status labels on the GUI thread once the
+            # backend mutation completes. tkinter is not thread-
+            # safe, so funnel the call through after().
+            try:
+                self._root.after(0, self._refresh_install_status)
+            except Exception:
+                pass
 
     def _log_line(self, msg):
         try:
