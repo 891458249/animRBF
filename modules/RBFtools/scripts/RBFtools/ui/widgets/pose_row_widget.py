@@ -170,12 +170,23 @@ class PoseRowWidget(QtWidgets.QWidget):
                          str attr_name, float new_value)
       poseRadiusChanged(int pose_idx, float new_radius)
       poseRecallRequested(int pose_idx)
+      poseUpdateRequested(int pose_idx)   # M_P0_UPDATE_BUTTON_REVERSED
       poseDeleteRequested(int pose_idx)
+
+    M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): the per-row "Update"
+    button (``self._btn_edit``) emits ``poseUpdateRequested`` —
+    the controller-side path that snapshots the current viewport
+    driver/driven values into the existing pose row. This is the
+    INVERSE of ``poseRecallRequested`` (which is the "Go to Pose"
+    path: pose data -> viewport). The right-click menu Recall +
+    the row double-click both still emit ``poseRecallRequested``;
+    those channels are independent of the Update button.
     """
 
     poseValueChangedV2  = QtCore.Signal(int, str, int, str, float)
     poseRadiusChanged   = QtCore.Signal(int, float)
     poseRecallRequested = QtCore.Signal(int)
+    poseUpdateRequested = QtCore.Signal(int)
     poseDeleteRequested = QtCore.Signal(int)
 
     BASE_POSE_SENTINEL = -1
@@ -301,9 +312,16 @@ class PoseRowWidget(QtWidgets.QWidget):
 
         self._btn_edit = QtWidgets.QPushButton(tr("update"))
         self._btn_edit.setMinimumWidth(ACTIONS_MIN_W // 2 - 4)
+        # M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): the button text
+        # is "Update" — emit poseUpdateRequested (snapshot viewport
+        # -> pose model). The original wiring sent poseRecallRequested
+        # (pose -> viewport) which is the literal inverse and made
+        # the button effectively a "Go to Pose" duplicate of the
+        # right-click menu. The right-click Recall + row double-
+        # click still use poseRecallRequested independently.
         self._btn_edit.clicked.connect(
             lambda _checked=False:
-                self.poseRecallRequested.emit(self._pose_index))
+                self.poseUpdateRequested.emit(self._pose_index))
         tail_l.addWidget(self._btn_edit)
         self._btn_del = QtWidgets.QPushButton(tr("delete"))
         self._btn_del.setMinimumWidth(ACTIONS_MIN_W // 2 - 4)

@@ -91,6 +91,10 @@ class _PoseEditorPanel(CollapsibleFrame):
     # more flat_attr_idx). poseRadiusChanged + BasePose triplet
     # added for the M_PER_POSE_SIGMA + M_BASE_POSE wires.
     poseRecallRequested      = QtCore.Signal(int)
+    # M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): per-row Update button
+    # forwards through the panel as a distinct channel — pre-fix
+    # the click was misrouted through poseRecallRequested.
+    poseUpdateRequested      = QtCore.Signal(int)
     poseDeleteRequested      = QtCore.Signal(int)
     poseDeleteAllRequested   = QtCore.Signal()
     poseValueChangedV2       = QtCore.Signal(int, str, int, str, float)
@@ -236,6 +240,8 @@ class _PoseEditorPanel(CollapsibleFrame):
             self._on_grid_delete_all_poses)
         self._pose_grid.poseRecallRequested.connect(
             self._on_grid_recall_pose)
+        self._pose_grid.poseUpdateRequested.connect(
+            self._on_grid_update_pose)
         self._pose_grid.poseDeleteRequested.connect(
             self._on_grid_delete_pose)
         self._pose_grid.poseValueChangedV2.connect(
@@ -271,6 +277,13 @@ class _PoseEditorPanel(CollapsibleFrame):
 
     def _on_grid_recall_pose(self, pose_index):
         self.poseRecallRequested.emit(int(pose_index))
+
+    def _on_grid_update_pose(self, pose_index):
+        # M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): re-emit the
+        # per-row Update button click at the panel level so
+        # main_window can dispatch ctrl.update_pose. Distinct
+        # channel from poseRecallRequested.
+        self.poseUpdateRequested.emit(int(pose_index))
 
     def _on_grid_delete_pose(self, pose_index):
         self.poseDeleteRequested.emit(int(pose_index))
@@ -1181,6 +1194,11 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         pe.autoFillChanged.connect(ctrl.set_auto_fill)
         # Phase 2 PoseGridEditor signals.
         pe.poseRecallRequested.connect(self._on_pose_grid_recall)
+        # M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): per-row Update
+        # button click -> ctrl.update_pose (snapshot viewport ->
+        # pose model). Distinct from poseRecallRequested
+        # (Go-to-Pose; pose -> viewport).
+        pe.poseUpdateRequested.connect(self._on_pose_grid_update)
         pe.poseDeleteRequested.connect(self._on_pose_grid_delete)
         pe.poseDeleteAllRequested.connect(
             self._on_pose_grid_delete_all)
@@ -1602,6 +1620,26 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         drv_node, dvn_node, drv_attrs, dvn_attrs = (
             self._gather_role_info())
         self._ctrl.recall_pose(
+            int(pose_index), drv_node, dvn_node, drv_attrs, dvn_attrs)
+
+    def _on_pose_grid_update(self, pose_index):
+        """M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): per-row Update
+        button click -> ctrl.update_pose (re-capture current
+        viewport driver/driven values into the existing pose row).
+
+        Sibling to :meth:`_on_pose_grid_recall` (the inverse
+        Go-to-Pose path). Pre-fix the per-row Update button was
+        misrouted through poseRecallRequested + this same slot's
+        recall sibling, making the button literally function as a
+        second "Go to Pose" instead of as an Update.
+
+        Pose-index passes straight through to ctrl.update_pose's
+        ``row`` arg — the pose model's row order matches the
+        packed pose_index since :func:`apply_poses` writes
+        sequential indices."""
+        drv_node, dvn_node, drv_attrs, dvn_attrs = (
+            self._gather_role_info())
+        self._ctrl.update_pose(
             int(pose_index), drv_node, dvn_node, drv_attrs, dvn_attrs)
 
     def _on_pose_grid_delete(self, pose_index):

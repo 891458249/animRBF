@@ -41,6 +41,7 @@ class PoseGridEditor(QtWidgets.QWidget):
 
     Signal contract (Commit 3 — C2 semantic refactor):
       poseRecallRequested(int)
+      poseUpdateRequested(int)        # M_P0_UPDATE_BUTTON_REVERSED
       poseDeleteRequested(int)
       poseValueChangedV2(int pose_idx, str side, int source_idx,
                          str attr_name, float new_value)
@@ -48,12 +49,18 @@ class PoseGridEditor(QtWidgets.QWidget):
       addPoseRequested()
       deleteAllPosesRequested()
 
+    M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): poseUpdateRequested
+    forwards the per-row Update button click (snapshot viewport
+    -> pose model). Distinct from poseRecallRequested (Go-to-Pose
+    inverse).
+
     The legacy ``poseValueChanged(int, str, int, float)`` flat_attr_idx
     form was removed in Commit 3 per the user's hard decree.
     main_window slots were updated atomically.
     """
 
     poseRecallRequested  = QtCore.Signal(int)
+    poseUpdateRequested  = QtCore.Signal(int)
     poseDeleteRequested  = QtCore.Signal(int)
     # C2 semantic signal — per-source / attr-name carriage.
     poseValueChangedV2   = QtCore.Signal(int, str, int, str, float)
@@ -198,6 +205,7 @@ class PoseGridEditor(QtWidgets.QWidget):
             row.poseValueChangedV2.connect(self.poseValueChangedV2)
             row.poseRadiusChanged.connect(self.poseRadiusChanged)
             row.poseRecallRequested.connect(self.poseRecallRequested)
+            row.poseUpdateRequested.connect(self.poseUpdateRequested)
             row.poseDeleteRequested.connect(self.poseDeleteRequested)
             self._row_widgets.append(row)
             self._inner_layout.insertWidget(
