@@ -498,18 +498,26 @@ class InstallerWindow(object):
 
         # Language switch row — first thing the user sees so the
         # whole UI is reachable in either language regardless of
-        # which one defaulted at startup.
+        # which one defaulted at startup. tk.Radiobutton (not
+        # ttk) for the same selectcolor trick used by the
+        # version + mode rows below.
         lang_frame = ttk.Frame(outer)
         lang_frame.pack(fill="x", anchor="w")
         lang_lbl = ttk.Label(lang_frame, font=("Segoe UI", 9))
         lang_lbl.pack(side="left")
         self._track(lang_lbl, "language_label")
         for code in ("en", "zh"):
-            rb = ttk.Radiobutton(
+            rb = tk.Radiobutton(
                 lang_frame,
                 value=code,
                 variable=self._lang_var,
-                command=self._on_language_changed)
+                command=self._on_language_changed,
+                bg=_DARK["bg"], fg=_DARK["fg"],
+                activebackground=_DARK["bg"],
+                activeforeground=_DARK["fg"],
+                selectcolor=_DARK["bg"],
+                borderwidth=0, highlightthickness=0,
+                font=("Segoe UI", 9))
             rb.pack(side="left", padx=(6, 0))
             self._track(rb, "lang_{}".format(code))
 
@@ -521,7 +529,16 @@ class InstallerWindow(object):
         header_lbl.pack(anchor="w")
         self._track(header_lbl, "header_versions")
 
-        # Version checkboxes.
+        # Version checkboxes — raw tk.Checkbutton (NOT ttk).
+        # M_P0_INSTALLER_DARK_INDICATOR (2026-05-01): ttk.Check/
+        # Radiobutton's indicator selected-state fill cannot be
+        # overridden through ttk.Style under the clam base theme
+        # (the indicator's "X" / dot mark is a Tcl element with
+        # no Python-exposed color knob). The native tk widgets
+        # accept a ``selectcolor`` kwarg that controls exactly
+        # that filled square / circle. Setting it to the window
+        # bg makes the white square disappear; the "✓" / dot
+        # mark itself stays visible because it inherits from fg.
         ver_frame = ttk.Frame(outer, padding=(12, 4))
         ver_frame.pack(fill="x")
         if not self._installable:
@@ -533,17 +550,20 @@ class InstallerWindow(object):
             for version, maya_path in self._installable:
                 var = tk.BooleanVar(value=True)
                 self._version_vars[version] = var
-                rb = ttk.Checkbutton(
-                    ver_frame, variable=var)
+                rb = tk.Checkbutton(
+                    ver_frame, variable=var,
+                    bg=_DARK["bg"], fg=_DARK["fg"],
+                    activebackground=_DARK["bg"],
+                    activeforeground=_DARK["fg"],
+                    selectcolor=_DARK["bg"],
+                    borderwidth=0, highlightthickness=0,
+                    font=("Segoe UI", 9))
                 rb.pack(anchor="w")
-                # Per-row label uses the version_row template so
-                # the localized prefix ("Maya") stays consistent
-                # even if a future locale changes the wording.
                 self._track(
                     rb, "version_row",
                     ver=version, path=maya_path)
 
-        # Mode radio.
+        # Mode radio — raw tk.Radiobutton, same selectcolor trick.
         ttk.Separator(outer, orient="horizontal").pack(
             fill="x", pady=(8, 4))
         mode_frame = ttk.Frame(outer)
@@ -554,9 +574,15 @@ class InstallerWindow(object):
         self._track(action_lbl, "action_label")
         for value, key in (("install", "action_install"),
                             ("uninstall", "action_uninstall")):
-            rb = ttk.Radiobutton(
+            rb = tk.Radiobutton(
                 mode_frame, value=value,
-                variable=self._mode_var)
+                variable=self._mode_var,
+                bg=_DARK["bg"], fg=_DARK["fg"],
+                activebackground=_DARK["bg"],
+                activeforeground=_DARK["fg"],
+                selectcolor=_DARK["bg"],
+                borderwidth=0, highlightthickness=0,
+                font=("Segoe UI", 9))
             rb.pack(side="left", padx=(8, 0))
             self._track(rb, key)
 
@@ -574,22 +600,38 @@ class InstallerWindow(object):
         hint_lbl.pack(anchor="w")
         self._track(hint_lbl, "install_path_hint")
 
-        # Log panel — uses raw Tk ScrolledText (not ttk) so we set
-        # its colors directly instead of via the Style system.
+        # Log panel — manual tk.Text + tk.Scrollbar so the
+        # scrollbar's trough / arrow / thumb colours are
+        # controllable. ScrolledText would have hidden the
+        # Scrollbar behind a wrapper that defaults to OS-native
+        # white-on-grey, which violates the "no white anywhere
+        # except text" mandate.
         log_lbl = ttk.Label(outer, style="Header.TLabel")
         log_lbl.pack(anchor="w", pady=(8, 2))
         self._track(log_lbl, "log_label")
-        from tkinter import scrolledtext
-        self._log = scrolledtext.ScrolledText(
-            outer, height=14, state="disabled",
+        log_frame = tk.Frame(outer, bg=_DARK["bg"], bd=0,
+                             highlightthickness=0)
+        log_frame.pack(fill="both", expand=True)
+        self._log = tk.Text(
+            log_frame, height=14, state="disabled",
             font=("Consolas", 9),
             bg=_DARK["log_bg"], fg=_DARK["log_fg"],
             insertbackground=_DARK["fg"],
             selectbackground=_DARK["select_bg"],
             selectforeground=_DARK["fg"],
+            borderwidth=0, highlightthickness=0)
+        log_scroll = tk.Scrollbar(
+            log_frame, command=self._log.yview,
+            bg=_DARK["btn_bg"],
+            troughcolor=_DARK["log_bg"],
+            activebackground=_DARK["btn_bg_hover"],
+            highlightthickness=0,
             borderwidth=0,
-            highlightthickness=0)
-        self._log.pack(fill="both", expand=True)
+            elementborderwidth=0,
+            width=14)
+        self._log.config(yscrollcommand=log_scroll.set)
+        log_scroll.pack(side="right", fill="y")
+        self._log.pack(side="left", fill="both", expand=True)
 
         # Buttons.
         btn_frame = ttk.Frame(outer, padding=(0, 8, 0, 0))

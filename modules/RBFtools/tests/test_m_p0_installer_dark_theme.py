@@ -273,6 +273,84 @@ class T_M_P0_INSTALLER_DARK_THEME(unittest.TestCase):
             "PhotoImage load AND the PyInstaller spec icon "
             "kwarg point at this single file.")
 
+    # ----- M_P0_INSTALLER_DARK_INDICATOR (2026-05-01) addendum -----
+    # ttk.Checkbutton / ttk.Radiobutton's selected-state indicator
+    # fill cannot be overridden through ttk.Style under the clam
+    # base theme — the white square / dot bleeds through. Swap to
+    # raw tk.Checkbutton / tk.Radiobutton with selectcolor=bg so
+    # the selected indicator melts into the window background and
+    # only the inherited foreground "✓" / "●" mark stays visible.
+
+    def test_PERMANENT_l_no_ttk_checkbutton_radio_in_build(self):
+        # AST guard: _build body MUST NOT use ttk.Checkbutton or
+        # ttk.Radiobutton — those are the regression shape.
+        body = self._gui_src.split(
+            "def _build(self):"
+        )[1].split("\n    def ")[0]
+        self.assertNotIn(
+            "ttk.Checkbutton(", body,
+            "_build MUST use tk.Checkbutton (raw Tk), NOT "
+            "ttk.Checkbutton — the latter shows a white "
+            "indicator square on selected state under the clam "
+            "theme that cannot be styled away.")
+        self.assertNotIn(
+            "ttk.Radiobutton(", body,
+            "_build MUST use tk.Radiobutton (raw Tk), NOT "
+            "ttk.Radiobutton — same indicator-color issue as "
+            "the Checkbutton case.")
+        # Positive assertion: tk.Checkbutton + tk.Radiobutton
+        # MUST be present.
+        self.assertIn("tk.Checkbutton(", body)
+        self.assertIn("tk.Radiobutton(", body)
+
+    def test_PERMANENT_m_check_radio_use_selectcolor_bg(self):
+        # The defining kwarg that kills the white square: every
+        # tk.Checkbutton / tk.Radiobutton in _build MUST pass
+        # selectcolor=_DARK["bg"] (or equivalent dark hex).
+        body = self._gui_src.split(
+            "def _build(self):"
+        )[1].split("\n    def ")[0]
+        self.assertIn(
+            'selectcolor=_DARK["bg"]', body,
+            "Native tk Checkbutton / Radiobutton MUST set "
+            "selectcolor=_DARK['bg'] so the selected indicator "
+            "fills with the window background, killing the "
+            "white square.")
+        # All three call sites (language radio + version
+        # checkboxes + mode radio) MUST share the same trick.
+        self.assertGreaterEqual(
+            body.count('selectcolor=_DARK["bg"]'), 3,
+            "Expected >= 3 selectcolor=_DARK['bg'] occurrences "
+            "(Language radio + version checkboxes + mode "
+            "radio); got {}.".format(
+                body.count('selectcolor=_DARK["bg"]')))
+
+    def test_PERMANENT_n_log_scrollbar_uses_dark_palette(self):
+        # The pre-fix ScrolledText hid its Scrollbar inside the
+        # default ttk-style wrapper which defaults to OS-native
+        # white-on-grey. The post-fix uses an explicit tk.Frame +
+        # tk.Text + tk.Scrollbar so we can dial the trough +
+        # active background colours into the _DARK palette.
+        body = self._gui_src.split(
+            "def _build(self):"
+        )[1].split("\n    def ")[0]
+        self.assertIn(
+            "tk.Scrollbar(", body,
+            "_build MUST construct a raw tk.Scrollbar so its "
+            "trough / arrow / thumb colours are reachable via "
+            "kwargs (ttk-wrapped scrollbars default to OS "
+            "native white).")
+        self.assertIn(
+            "troughcolor=_DARK[", body,
+            "Scrollbar MUST set troughcolor from _DARK so the "
+            "background channel of the scrollbar matches the "
+            "log panel.")
+        self.assertIn(
+            "activebackground=_DARK[", body,
+            "Scrollbar MUST set activebackground from _DARK "
+            "so hovering the thumb stays inside the dark "
+            "palette.")
+
 
 # ----------------------------------------------------------------------
 # Mock E2E — runtime: helpers are reachable, palette is sound.
