@@ -5,7 +5,16 @@ Run via ``tools/build_installer.bat`` or directly:
 
     python -m PyInstaller tools/build_installer.spec --noconfirm --clean
 
-Produces ``dist/RBFtoolsInstaller.exe`` — a single self-contained
+M_P0_RENAME_DIST_INSTALLER (2026-05-01): the build wrapper passes
+``--distpath installer`` so the artefact lives at
+``installer/RBFtoolsInstaller.exe`` instead of PyInstaller's default
+``dist/RBFtoolsInstaller.exe`` — the directory name now reads as its
+purpose (the bundled installer) rather than PyInstaller's generic
+"distribution" shorthand, which confused end-users browsing the
+repo root. Direct ``python -m PyInstaller`` invocations without
+``--distpath`` still fall back to ``dist/`` (covered by .gitignore).
+
+Produces ``installer/RBFtoolsInstaller.exe`` — a single self-contained
 binary that ships:
 
   * tkinter GUI (Python stdlib, bundled by PyInstaller)
@@ -15,7 +24,7 @@ binary that ships:
     version, plus scripts/ + icons/)
   * resources/module_template.mod (used by install.py if present)
 
-Distribution: copy dist/RBFtoolsInstaller.exe to any Windows
+Distribution: copy installer/RBFtoolsInstaller.exe to any Windows
 machine — no Python installation needed on the target.
 """
 
