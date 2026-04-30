@@ -38,7 +38,14 @@ MODULES_SRC = os.path.join(INSTALL_ROOT, "modules")
 
 PLUGIN_NAME = "RBFtools"
 
-MAYA_VERSIONS = ["2022"]
+# M_P0_INSTALL_DUAL_VERSION (2026-04-30): MAYA_VERSIONS is now
+# resolved dynamically by _discover_maya_versions (defined below
+# after _current_platform). Pre-fix this was a hardcoded ["2022"]
+# list that silently dropped the 2025 routing line from the
+# generated .mod file when Maya 2025 binaries were added to the
+# repo. The constant assignment lives at module-import time, near
+# the bottom of the constants section, so other code keeps
+# referencing MAYA_VERSIONS unchanged.
 PLATFORMS = {
     "Windows": "win64",
     "Darwin":  "macOS",
@@ -59,6 +66,57 @@ def _maya_platform_tag():
     """Return the PLATFORM tag used in .mod files."""
     tags = {"win64": "win64", "macOS": "mac", "linux64": "linux"}
     return tags.get(_current_platform(), "linux")
+
+
+def _discover_maya_versions():
+    """M_P0_INSTALL_DUAL_VERSION (2026-04-30): mirror
+    ``dragDropInstaller.getMayaVersions``'s design — dynamically
+    scan ``modules/<MODULE_NAME>/plug-ins/<platform>/`` for
+    available Maya version subdirs. Replaces the legacy hardcoded
+    ``["2022"]`` constant which silently dropped the 2025 routing
+    line from the generated ``RBFtools.mod`` file once Maya 2025
+    binaries landed in the repo. Future Maya 2026 / 2027
+    additions are picked up automatically with no install.py
+    edit required.
+
+    Filtering: only include subdirs that look like a Maya version
+    (4-digit numeric name) AND actually carry a plugin binary
+    (.mll / .so / .bundle). An empty version directory (created
+    but never built) is skipped so the generated .mod does not
+    point at a broken route.
+
+    Defensive fallback: if the plug-ins directory is missing or
+    the scan raises (read-permission corner case), return
+    ``["2022", "2025"]`` so the installer can still produce a
+    usable .mod for the historically-common 2-version case.
+    """
+    plat = _current_platform()
+    plug_dir = os.path.join(
+        MODULES_SRC, MODULE_NAME, "plug-ins", plat)
+    try:
+        entries = sorted(os.listdir(plug_dir))
+    except (OSError, FileNotFoundError):
+        return ["2022", "2025"]
+    result = []
+    for v in entries:
+        sub = os.path.join(plug_dir, v)
+        if not (os.path.isdir(sub)
+                and v.isdigit()
+                and len(v) == 4):
+            continue
+        try:
+            files = os.listdir(sub)
+        except OSError:
+            continue
+        if any(f.lower().endswith((".mll", ".so", ".bundle"))
+               for f in files):
+            result.append(v)
+    return result if result else ["2022", "2025"]
+
+
+# Resolve dynamically at module import. Other code in this file
+# keeps the legacy ``MAYA_VERSIONS`` reference unchanged.
+MAYA_VERSIONS = _discover_maya_versions()
 
 
 def _default_modules_dir():
