@@ -220,6 +220,11 @@ class TestM_P0_REMOVE_TAB_FIX_RuntimeBehavior(unittest.TestCase):
         from RBFtools.controller import MainController
         ctrl = MainController.__new__(MainController)
         ctrl._current_node = "RBF1"
+        # M_P0_TAB_REMOVE_SPARSE_FIX: passthrough stub — these tests
+        # operate on dense-equals-sparse setups so the translator is
+        # an identity. The new T_P0_TAB_REMOVE_SPARSE suite covers
+        # the discontinuous-sparse path explicitly.
+        ctrl._list_idx_to_sparse = lambda role, idx: int(idx)
         ctrl.driverSourcesChanged = mock.MagicMock()
         ctrl.drivenSourcesChanged = mock.MagicMock()
         return ctrl

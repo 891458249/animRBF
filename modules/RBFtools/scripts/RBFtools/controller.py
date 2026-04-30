@@ -254,6 +254,16 @@ class MainController(QtCore.QObject):
             cmds.warning("remove_driver_source: no current node")
             return False
         from RBFtools.ui.i18n import tr
+        # M_P0_TAB_REMOVE_SPARSE_FIX (2026-04-30): translate tab-
+        # position to sparse multi index BEFORE the confirm dialog
+        # so a stale view index aborts cleanly instead of asking the
+        # user about a phantom source.
+        multi_idx = self._list_idx_to_sparse("driver", index)
+        if multi_idx is None:
+            cmds.warning(
+                "remove_driver_source: list_idx {} out of range "
+                "or no current node".format(index))
+            return False
         proceed = self.ask_confirm(
             action_id="remove_driver_source",
             title=tr("title_remove_driver_source"),
@@ -262,7 +272,7 @@ class MainController(QtCore.QObject):
         if not proceed:
             return False
         try:
-            core.remove_driver_source(self._current_node, index)
+            core.remove_driver_source(self._current_node, multi_idx)
         except Exception as exc:
             cmds.warning(
                 "remove_driver_source failed: {}".format(exc))
@@ -291,9 +301,15 @@ class MainController(QtCore.QObject):
             cmds.warning(
                 "disconnect_driver_source_attrs: no current node")
             return False
+        multi_idx = self._list_idx_to_sparse("driver", index)
+        if multi_idx is None:
+            cmds.warning(
+                "disconnect_driver_source_attrs: list_idx {} out "
+                "of range".format(index))
+            return False
         try:
             ok = core.disconnect_driver_source_attrs(
-                self._current_node, int(index),
+                self._current_node, multi_idx,
                 attrs=list(attrs) if attrs else None)
         except Exception as exc:
             cmds.warning(
@@ -311,9 +327,15 @@ class MainController(QtCore.QObject):
         if not self._current_node:
             cmds.warning("set_driver_source_attrs: no current node")
             return False
+        multi_idx = self._list_idx_to_sparse("driver", index)
+        if multi_idx is None:
+            cmds.warning(
+                "set_driver_source_attrs: list_idx {} out of "
+                "range".format(index))
+            return False
         try:
             ok = core.set_driver_source_attrs(
-                self._current_node, int(index), list(new_attrs))
+                self._current_node, multi_idx, list(new_attrs))
         except Exception as exc:
             cmds.warning(
                 "set_driver_source_attrs failed: {}".format(exc))
@@ -338,6 +360,60 @@ class MainController(QtCore.QObject):
     #  M_ROTORDER_UI_REFACTOR (2026-04-29) — driver-tab-synced
     #  rotate-order self-heal.
     # =================================================================
+
+    def _list_idx_to_sparse(self, role, list_idx):
+        """M_P0_TAB_REMOVE_SPARSE_FIX (2026-04-30) — translate a tab-
+        position index (0..n-1, dense) to the Maya multi-instance
+        sparse index that ``core.{remove,set,disconnect}_*_source``
+        expects.
+
+        Background: ``core.add_*_source`` allocates new entries via
+        ``max(indices) + 1`` (append-only, no hole reuse), so the
+        ``driverSource[]`` / ``drivenSource[]`` sparse multi grows
+        discontinuous after any remove. The view emits Qt
+        tabCloseRequested / list-enumerate indices (always dense
+        0..n-1); core takes sparse multi indices. The bug: the
+        first remove coincidentally hits ``list_pos == sparse_idx``
+        and works; every subsequent remove / attrs edit on a
+        sparse-discontinuous node lands on the wrong (or empty)
+        slot — the user-reported "only first ❌ works" repro.
+
+        Lesson #7 (project-methodology candidate): "view <-> core
+        index-space drift goes silent until sparse goes
+        discontinuous". Boundary translator at the controller
+        layer is the canonical fix — view and core both keep
+        their native conventions.
+
+        Args:
+          role:     "driver" or "driven" — selects the multi attr
+                    name (driverSource / drivenSource).
+          list_idx: dense list position from the view (0..n-1).
+
+        Returns:
+          int sparse index, or ``None`` when (a) no current node,
+          (b) shape unresolved, (c) multiIndices unavailable, or
+          (d) list_idx is out of range. Callers MUST treat None as
+          "abort the operation safely with a cmds.warning" — never
+          fall through to core with a list-pos that drifted.
+        """
+        if not self._current_node:
+            return None
+        try:
+            shape = core.get_shape(self._current_node)
+        except Exception:
+            return None
+        if not shape:
+            return None
+        multi_attr = "{}.{}Source".format(shape, role)
+        try:
+            sparse = sorted(
+                cmds.getAttr(multi_attr, multiIndices=True) or [])
+        except Exception:
+            return None
+        li = int(list_idx)
+        if 0 <= li < len(sparse):
+            return int(sparse[li])
+        return None
 
     def _resync_rotate_order_length(self):
         """Truncate / pad ``driverInputRotateOrder[]`` to match the
@@ -417,6 +493,15 @@ class MainController(QtCore.QObject):
             cmds.warning("remove_driven_source: no current node")
             return False
         from RBFtools.ui.i18n import tr
+        # M_P0_TAB_REMOVE_SPARSE_FIX: list-pos -> sparse translation
+        # before the confirm dialog so a stale view index aborts
+        # cleanly. Driven mirror of remove_driver_source.
+        multi_idx = self._list_idx_to_sparse("driven", index)
+        if multi_idx is None:
+            cmds.warning(
+                "remove_driven_source: list_idx {} out of range "
+                "or no current node".format(index))
+            return False
         proceed = self.ask_confirm(
             action_id="remove_driven_source",
             title=tr("title_remove_driven_source"),
@@ -425,7 +510,7 @@ class MainController(QtCore.QObject):
         if not proceed:
             return False
         try:
-            core.remove_driven_source(self._current_node, int(index))
+            core.remove_driven_source(self._current_node, multi_idx)
         except Exception as exc:
             cmds.warning(
                 "remove_driven_source failed: {}".format(exc))
@@ -440,9 +525,15 @@ class MainController(QtCore.QObject):
             cmds.warning(
                 "disconnect_driven_source_attrs: no current node")
             return False
+        multi_idx = self._list_idx_to_sparse("driven", index)
+        if multi_idx is None:
+            cmds.warning(
+                "disconnect_driven_source_attrs: list_idx {} out "
+                "of range".format(index))
+            return False
         try:
             ok = core.disconnect_driven_source_attrs(
-                self._current_node, int(index),
+                self._current_node, multi_idx,
                 attrs=list(attrs) if attrs else None)
         except Exception as exc:
             cmds.warning(
@@ -458,9 +549,15 @@ class MainController(QtCore.QObject):
         if not self._current_node:
             cmds.warning("set_driven_source_attrs: no current node")
             return False
+        multi_idx = self._list_idx_to_sparse("driven", index)
+        if multi_idx is None:
+            cmds.warning(
+                "set_driven_source_attrs: list_idx {} out of "
+                "range".format(index))
+            return False
         try:
             ok = core.set_driven_source_attrs(
-                self._current_node, int(index), list(new_attrs))
+                self._current_node, multi_idx, list(new_attrs))
         except Exception as exc:
             cmds.warning(
                 "set_driven_source_attrs failed: {}".format(exc))

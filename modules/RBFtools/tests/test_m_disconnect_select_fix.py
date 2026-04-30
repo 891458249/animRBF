@@ -318,6 +318,8 @@ class TestM_DISCONNECT_FIX_ControllerSignals(unittest.TestCase):
         ctrl._current_node = "RBF1"
         ctrl.driverSourcesChanged = mock.MagicMock()
         ctrl.drivenSourcesChanged = mock.MagicMock()
+        # M_P0_TAB_REMOVE_SPARSE_FIX passthrough.
+        ctrl._list_idx_to_sparse = lambda role, idx: int(idx)
         return ctrl
 
     def test_driver_disconnect_emits_on_success(self):
