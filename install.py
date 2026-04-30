@@ -207,18 +207,29 @@ def _flatten_icons(icons_dir):
 # .mod file generation
 # ----------------------------------------------------------------------
 
-def _build_mod_content(content_path):
+def _build_mod_content(content_path, versions=None):
     """Return the text for the RBFtools.mod file.
 
     *content_path* is where the module content folder lives, e.g.
     ``<maya-modules>/RBFtools``.
+
+    M_P0_INSTALLER_EXE_GUI (2026-05-01): the optional ``versions``
+    parameter overrides the module-level ``MAYA_VERSIONS`` so the
+    standalone exe GUI can route the .mod file to a user-selected
+    Maya-version subset (e.g. install only on Maya 2025 even when
+    both 2022 and 2025 are detected on the machine). Default
+    ``None`` preserves the legacy behaviour — the full
+    ``MAYA_VERSIONS`` set discovered at module import time.
     """
     plat = _current_platform()
     plat_tag = _maya_platform_tag()
     recursive_icons = (plat != "linux64")
 
+    if versions is None:
+        versions = MAYA_VERSIONS
+
     lines = []
-    for ver in MAYA_VERSIONS:
+    for ver in versions:
         plug_dir = os.path.join(MODULES_SRC, MODULE_NAME,
                                 "plug-ins", plat, ver)
         if not os.path.isdir(plug_dir):
@@ -244,7 +255,8 @@ def _build_mod_content(content_path):
 # core install / uninstall
 # ----------------------------------------------------------------------
 
-def install(install_dir=None, mod_dir=None, verbose=True):
+def install(install_dir=None, mod_dir=None, verbose=True,
+            versions=None):
     """Install the RBF Tools module.
 
     Parameters
@@ -257,6 +269,13 @@ def install(install_dir=None, mod_dir=None, verbose=True):
         as *install_dir*.
     verbose : bool
         Print progress messages.
+    versions : list[str] or None
+        M_P0_INSTALLER_EXE_GUI (2026-05-01): optional Maya-version
+        subset to route the .mod file to. ``None`` (default) means
+        use every version found by ``_discover_maya_versions`` —
+        the historical behaviour. The standalone exe GUI passes a
+        user-selected subset (e.g. ``["2025"]``) so a TD with both
+        2022 and 2025 installed can install RBFtools on just one.
 
     Returns
     -------
@@ -308,7 +327,7 @@ def install(install_dir=None, mod_dir=None, verbose=True):
     log("[2/4] Writing .mod file ...")
     _ensure_dir(mod_dir)
     mod_path = os.path.join(mod_dir, MODULE_NAME + ".mod")
-    mod_content = _build_mod_content(install_dir)
+    mod_content = _build_mod_content(install_dir, versions=versions)
     with open(mod_path, "w") as fh:
         fh.write(mod_content)
     log("      -> {}".format(mod_path))

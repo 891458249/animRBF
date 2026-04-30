@@ -203,17 +203,31 @@ class T_M_P0_INSTALL_DUAL_VERSION(unittest.TestCase):
             "scan; install.py mirrors this primitive.")
 
     def test_PERMANENT_h_build_mod_iterates_dynamic_versions(self):
-        # _build_mod_content MUST consume the dynamic
-        # MAYA_VERSIONS list (no ad-hoc hardcoded ver list inside
-        # the loop).
+        # _build_mod_content MUST iterate the version list, never
+        # a hardcoded ["2022"] literal.
+        # M_P0_INSTALLER_EXE_GUI (2026-05-01): the function gained
+        # a ``versions`` kwarg defaulting to None; the loop now
+        # iterates the parameter (with MAYA_VERSIONS fallback) so
+        # the GUI can pass a user-selected subset. Either pattern
+        # — direct ``for ver in MAYA_VERSIONS:`` (legacy) or
+        # ``for ver in versions:`` after a ``versions = MAYA_VERSIONS``
+        # default — satisfies the "no hardcoded list" contract.
         body = self._install_src.split(
-            "def _build_mod_content(content_path):"
+            "def _build_mod_content("
         )[1].split("\ndef ")[0]
-        self.assertIn(
-            "for ver in MAYA_VERSIONS:", body,
-            "_build_mod_content MUST iterate MAYA_VERSIONS — "
-            "the module-level dynamic constant feeds the .mod "
-            "routing loop.")
+        # Either the direct iteration over MAYA_VERSIONS OR the
+        # parameterized form (which falls back to MAYA_VERSIONS
+        # when versions is None) is acceptable.
+        has_direct = "for ver in MAYA_VERSIONS:" in body
+        has_parameterized = (
+            "for ver in versions:" in body
+            and "versions = MAYA_VERSIONS" in body)
+        self.assertTrue(
+            has_direct or has_parameterized,
+            "_build_mod_content MUST iterate MAYA_VERSIONS "
+            "directly OR a ``versions`` parameter that defaults "
+            "to MAYA_VERSIONS — the module-level dynamic constant "
+            "feeds the .mod routing loop in both shapes.")
 
 
 # ----------------------------------------------------------------------
