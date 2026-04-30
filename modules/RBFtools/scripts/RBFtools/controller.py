@@ -416,51 +416,74 @@ class MainController(QtCore.QObject):
         return None
 
     def _resync_rotate_order_length(self):
-        """Truncate / pad ``driverInputRotateOrder[]`` to match the
-        current ``driverSource[]`` count and write it back so the
-        scene state matches the new "driver tabs are source of truth"
-        contract.
+        """Re-derive ``driverInputRotateOrder[]`` to match the current
+        driverSource[] population by routing through the canonical
+        M_ENC_AUTOPIPE auto-resolve path.
 
-        Idempotent: when the array already matches the driver count
-        the function is a no-op (no spurious write to the node).
-        Called from the shared ``_reload_driver_sources`` slot — add /
-        remove driver paths reach this layer with the array already
-        aligned (M_REBUILD_REFACTOR incremental diff), so only the
-        editorLoaded entry with stale-on-disk data triggers the actual
-        write-back. The idempotent short-circuit is the load-bearing
-        guarantee here, not the call-site filter — future reload-slot
-        refactors cannot accidentally re-introduce duplicate writes.
+        M_P0_ENCODING_OUTPUT_GLITCH (2026-04-30): the previous
+        implementation called ``core.write_driver_rotate_orders``
+        which delegates to ``core.set_node_multi_attr``. That helper's
+        clear-then-write contract (M2.4a refinement 2) calls
+        ``cmds.removeMultiInstance`` per index — and removeMultiInstance
+        TEARS DOWN any incoming connection. The M_ENC_AUTOPIPE fix
+        (commit 673ab13) had wired ``driver.rotateOrder ->
+        shape.driverInputRotateOrder[d]`` as a LIVE connection so the
+        C++ ``applyEncodingToBlock`` (cpp:1464-1483 / 2606-2624) reads
+        the right rotate-order at every evaluation. The clear-then-
+        write self-heal silently demoted those live connections to
+        static 0 (XYZ); for any non-XYZ driver under a non-Raw
+        encoding (Quaternion / BendRoll / ExpMap / SwingTwist) the
+        Euler -> Quaternion preconversion picked the wrong rotation
+        order and the driven outputs jumped on every viewport change.
+        Raw encoding short-circuits the rotate-order read in
+        applyEncodingToBlock and was not affected — matching the
+        user-reported "Raw 正常 + 其他编码乱跳" symptom verbatim.
 
-        Returns True iff a write-back actually occurred (test hook).
+        Path C fix: replace the static write-back with a call into
+        ``core.auto_resolve_generic_rotate_orders`` — the same helper
+        that establishes the live connection in the first place. It
+        internally:
+
+          * For Raw / Quaternion encodings (rotate-order-independent
+            in C++), clears ``driverInputRotateOrder[]`` via the
+            transactional helper. Live connections are not relevant
+            here so the clear is correct.
+          * For BendRoll / ExpMap / SwingTwist encodings, walks
+            driverSource[] and ``connectAttr force=True`` per source
+            — re-establishing or refreshing each
+            ``driver.rotateOrder -> driverInputRotateOrder[d]`` live
+            connection. The force=True flag turns this into an
+            idempotent "ensure connection" without an intermediate
+            removeMultiInstance.
+
+        Length self-heal (the original purpose) is now an emergent
+        property of auto_resolve walking the live driverSource list:
+        new sources get a fresh connection, removed sources leave
+        their stale rotate-order slot which the next clear-on-bypass
+        cycle (Raw/Quat) cleans up. The TD-visible behaviour matches
+        what M_ROTORDER_UI_REFACTOR contracted; the Bug-1 mechanism
+        is the only thing removed.
+
+        Returns True iff the auto-resolve was invoked (test hook).
         """
         if not self._current_node:
             return False
         try:
-            sources = list(core.read_driver_info_multi(
-                self._current_node))
+            shape = core.get_shape(self._current_node)
         except Exception:
-            sources = []
-        target_len = len(sources)
+            return False
+        if not shape:
+            return False
         try:
-            existing = list(core.read_driver_rotate_orders(
-                self._current_node) or [])
+            encoding = int(cmds.getAttr(shape + ".inputEncoding"))
         except Exception:
-            existing = []
-        if len(existing) == target_len:
-            return False  # idempotent — nothing to write.
-        if target_len == 0:
-            new_values = []
-        elif len(existing) > target_len:
-            new_values = existing[:target_len]                # truncate
-        else:
-            new_values = existing + [0] * (
-                target_len - len(existing))                   # pad xyz=0
+            encoding = 0
         try:
-            core.write_driver_rotate_orders(
-                self._current_node, new_values)
+            core.auto_resolve_generic_rotate_orders(
+                self._current_node, encoding)
         except Exception as exc:
             cmds.warning(
-                "_resync_rotate_order_length: write-back failed "
+                "_resync_rotate_order_length: auto-resolve failed "
                 "for {!r}: {}".format(self._current_node, exc))
             return False
         return True

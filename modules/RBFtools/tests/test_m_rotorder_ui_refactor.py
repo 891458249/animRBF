@@ -157,6 +157,17 @@ class T_DRIVER_ROTATE_ORDER_SYNC(unittest.TestCase):
             "live driver-name list into the editor.")
 
     def test_PERMANENT_e_controller_resync_helper(self):
+        # M_P0_ENCODING_OUTPUT_GLITCH (2026-04-30) updated this guard:
+        # the original M_ROTORDER_UI_REFACTOR contract called
+        # core.write_driver_rotate_orders to truncate / pad the
+        # multi, but that path delegates to set_node_multi_attr
+        # whose clear-then-write contract calls removeMultiInstance
+        # per index — which TEARS DOWN the live driver.rotateOrder
+        # connection that M_ENC_AUTOPIPE established. The Path C
+        # fix routes self-heal through the canonical
+        # auto_resolve_generic_rotate_orders helper instead, which
+        # uses connectAttr force=True per source so the live
+        # connection survives (or gets re-established cleanly).
         self.assertIn(
             "def _resync_rotate_order_length(self):",
             self._ctrl,
@@ -165,25 +176,31 @@ class T_DRIVER_ROTATE_ORDER_SYNC(unittest.TestCase):
         body = self._ctrl.split(
             "def _resync_rotate_order_length(self):"
         )[1].split("\n    def ")[0]
-        # Must reuse the existing read / write helpers — never
-        # touch shape attrs directly from the controller layer.
         self.assertIn(
-            "core.read_driver_info_multi(", body,
-            "Helper MUST resolve target driver count via "
-            "read_driver_info_multi (not ad-hoc cmds.getAttr).")
+            "core.auto_resolve_generic_rotate_orders(", body,
+            "Helper MUST route through "
+            "core.auto_resolve_generic_rotate_orders (Path C fix) — "
+            "the canonical M_ENC_AUTOPIPE path that uses "
+            "connectAttr force=True per source so the live "
+            "driver.rotateOrder connection is preserved.")
+        # Read inputEncoding via cmds (controller-layer is allowed
+        # narrow getAttr access for routing decisions).
         self.assertIn(
-            "core.read_driver_rotate_orders(", body,
-            "Helper MUST read existing array via the canonical "
-            "core reader.")
-        self.assertIn(
+            'cmds.getAttr(shape + ".inputEncoding")', body,
+            "Helper MUST read the current inputEncoding so the "
+            "auto-resolve walk picks the right branch (clear-on-"
+            "bypass for Raw/Quat vs per-source connect for "
+            "BendRoll/ExpMap/SwingTwist).")
+        # Defence-in-depth: write_driver_rotate_orders MUST NOT
+        # appear in the helper body — it is the regression-source
+        # path. The canonical core helper still uses it internally
+        # for the Raw/Quat clear branch, but the controller layer
+        # MUST NOT touch it directly.
+        self.assertNotIn(
             "core.write_driver_rotate_orders(", body,
-            "Helper MUST write back via the canonical core writer "
-            "(M_REBUILD_REFACTOR clear-then-write semantics).")
-        # Idempotence guard: must short-circuit when already aligned.
-        self.assertIn(
-            "return False", body,
-            "Helper MUST return False (idempotent no-op) when "
-            "the persisted array already matches the driver count.")
+            "Helper MUST NOT call core.write_driver_rotate_orders "
+            "directly — that path's clear-then-write semantics is "
+            "the M_P0_ENCODING_OUTPUT_GLITCH bug shape.")
 
     def test_PERMANENT_f_main_window_wires_sync(self):
         # The single ≤3-LoC main_window edit lives inside
@@ -325,146 +342,124 @@ class T_DRIVER_ROTATE_ORDER_WIDGET_API(unittest.TestCase):
     "mock-dependent (controller helper + cmds stubs)")
 class TestM_ROTORDER_UI_REFACTOR_ControllerBehavior(unittest.TestCase):
 
-    def _make_ctrl(self, drv_count, existing_orders):
+    # M_P0_ENCODING_OUTPUT_GLITCH (2026-04-30): the runtime tests
+    # below were updated alongside the Path C contract change.
+    # The legacy truncate / pad / write_driver_rotate_orders
+    # assertions (which the original M_ROTORDER_UI_REFACTOR
+    # introduced) are now covered by the dedicated
+    # T_M_P0_ENCODING_OUTPUT_GLITCH suite — those assertions
+    # locked the behaviour that was the root cause of the user-
+    # reported "Raw 正常 + 其他编码乱跳" repro, so they cannot
+    # stay green. The replacements here lock the new contract:
+    # the helper must route through auto_resolve_generic_rotate_
+    # orders with the correct encoding.
+
+    def _make_ctrl(self, encoding=0):
         from RBFtools.controller import MainController
         ctrl = MainController.__new__(MainController)
         ctrl._current_node = "RBF1"
-        # Stub readers / writer.
-        from RBFtools import core
-        from RBFtools.core import DriverSource
-        sources = [
-            DriverSource(node="d{}".format(i), attrs=("rx",))
-            for i in range(drv_count)
-        ]
-        ctrl._sources = sources
-        ctrl._existing = list(existing_orders)
-        ctrl._writes = []
+        ctrl._encoding = int(encoding)
         return ctrl
 
-    def test_resync_idempotent_when_already_aligned(self):
-        # Scenario (f): aligned -> no write-back.
+    def _patch_resync_env(self, ctrl):
+        """Yield a context where get_shape resolves and
+        cmds.getAttr(shape+".inputEncoding") returns
+        ctrl._encoding."""
         from RBFtools import core
+        from RBFtools import controller as ctrl_mod
+        cmds_stub = mock.MagicMock()
+
+        def _get_attr(plug, *args, **kwargs):
+            if plug.endswith(".inputEncoding"):
+                return ctrl._encoding
+            return 0
+
+        cmds_stub.getAttr.side_effect = _get_attr
+        cmds_stub.warning = mock.MagicMock()
+        return mock.patch.multiple(
+            ctrl_mod,
+            cmds=cmds_stub,
+            core=mock.MagicMock(
+                get_shape=mock.MagicMock(return_value="RBF1Shape"),
+                auto_resolve_generic_rotate_orders=mock.MagicMock(),
+            ),
+        )
+
+    def test_resync_routes_through_auto_resolve(self):
+        # Path C contract: helper MUST call
+        # core.auto_resolve_generic_rotate_orders with the live
+        # inputEncoding read from the shape, NOT
+        # write_driver_rotate_orders.
         from RBFtools.controller import MainController
-        ctrl = self._make_ctrl(drv_count=3,
-                                existing_orders=[0, 1, 2])
-        with mock.patch.object(
-                core, "read_driver_info_multi",
-                return_value=ctrl._sources):
-            with mock.patch.object(
-                    core, "read_driver_rotate_orders",
-                    return_value=list(ctrl._existing)):
-                with mock.patch.object(
-                        core, "write_driver_rotate_orders") as w:
-                    result = MainController._resync_rotate_order_length(
-                        ctrl)
-        self.assertFalse(result, "Aligned state must short-circuit.")
-        w.assert_not_called()
+        from RBFtools import controller as ctrl_mod
+        ctrl = self._make_ctrl(encoding=3)  # ExpMap
+        with self._patch_resync_env(ctrl):
+            result = MainController._resync_rotate_order_length(ctrl)
+            ctrl_mod.core.auto_resolve_generic_rotate_orders \
+                .assert_called_once_with("RBF1", 3)
+        self.assertTrue(result,
+            "Helper MUST return True after a successful auto-"
+            "resolve invocation (test hook).")
 
-    def test_resync_truncates_when_array_too_long(self):
-        # Scenario: 2 drivers but persisted [0, 1, 2, 3] -> truncate.
-        from RBFtools import core
+    def test_resync_passes_raw_encoding_for_clear_branch(self):
+        # Raw / Quat -> auto_resolve runs the clear-on-bypass
+        # branch internally. Helper just forwards the encoding.
         from RBFtools.controller import MainController
-        ctrl = self._make_ctrl(drv_count=2,
-                                existing_orders=[0, 1, 2, 3])
-        with mock.patch.object(
-                core, "read_driver_info_multi",
-                return_value=ctrl._sources):
-            with mock.patch.object(
-                    core, "read_driver_rotate_orders",
-                    return_value=list(ctrl._existing)):
-                with mock.patch.object(
-                        core, "write_driver_rotate_orders") as w:
-                    result = MainController._resync_rotate_order_length(
-                        ctrl)
-        self.assertTrue(result)
-        w.assert_called_once_with("RBF1", [0, 1])
+        from RBFtools import controller as ctrl_mod
+        ctrl = self._make_ctrl(encoding=0)  # Raw
+        with self._patch_resync_env(ctrl):
+            MainController._resync_rotate_order_length(ctrl)
+            ctrl_mod.core.auto_resolve_generic_rotate_orders \
+                .assert_called_once_with("RBF1", 0)
 
-    def test_resync_pads_when_array_too_short(self):
-        # Scenario: 4 drivers but persisted [5, 3] -> pad with xyz=0.
-        from RBFtools import core
+    def test_resync_passes_swingtwist_encoding(self):
         from RBFtools.controller import MainController
-        ctrl = self._make_ctrl(drv_count=4,
-                                existing_orders=[5, 3])
-        with mock.patch.object(
-                core, "read_driver_info_multi",
-                return_value=ctrl._sources):
-            with mock.patch.object(
-                    core, "read_driver_rotate_orders",
-                    return_value=list(ctrl._existing)):
-                with mock.patch.object(
-                        core, "write_driver_rotate_orders") as w:
-                    result = MainController._resync_rotate_order_length(
-                        ctrl)
-        self.assertTrue(result)
-        w.assert_called_once_with("RBF1", [5, 3, 0, 0])
+        from RBFtools import controller as ctrl_mod
+        ctrl = self._make_ctrl(encoding=4)  # SwingTwist
+        with self._patch_resync_env(ctrl):
+            MainController._resync_rotate_order_length(ctrl)
+            ctrl_mod.core.auto_resolve_generic_rotate_orders \
+                .assert_called_once_with("RBF1", 4)
 
-    def test_resync_clears_when_no_drivers(self):
-        # 0 drivers + persisted entries -> write back empty list.
-        from RBFtools import core
+    def test_resync_does_not_call_write_driver_rotate_orders(self):
+        # Defence-in-depth: the regression-source path MUST NOT be
+        # invoked from within the helper. The clear-then-write
+        # contract of write_driver_rotate_orders -> set_node_multi
+        # _attr is precisely what tore down the live connections.
         from RBFtools.controller import MainController
-        ctrl = self._make_ctrl(drv_count=0,
-                                existing_orders=[2, 5])
-        with mock.patch.object(
-                core, "read_driver_info_multi",
-                return_value=[]):
-            with mock.patch.object(
-                    core, "read_driver_rotate_orders",
-                    return_value=list(ctrl._existing)):
-                with mock.patch.object(
-                        core, "write_driver_rotate_orders") as w:
-                    result = MainController._resync_rotate_order_length(
-                        ctrl)
-        self.assertTrue(result)
-        w.assert_called_once_with("RBF1", [])
-
-    def test_resync_double_call_idempotent(self):
-        # Scenario (f) reinforced: first call writes, second call
-        # is a no-op.
-        from RBFtools import core
-        from RBFtools.controller import MainController
-        ctrl = self._make_ctrl(drv_count=2,
-                                existing_orders=[0, 1, 2])
-        # First call truncates.
-        first_state = list(ctrl._existing)
-
-        def _read_orders(*_args, **_kw):
-            return list(first_state)
-
-        write_log = []
-
-        def _write(_node, values):
-            # After write, "persisted" state matches what was written.
-            first_state[:] = list(values)
-            write_log.append(list(values))
-
-        with mock.patch.object(
-                core, "read_driver_info_multi",
-                return_value=ctrl._sources):
-            with mock.patch.object(
-                    core, "read_driver_rotate_orders",
-                    side_effect=_read_orders):
-                with mock.patch.object(
-                        core, "write_driver_rotate_orders",
-                        side_effect=_write):
-                    r1 = MainController._resync_rotate_order_length(
-                        ctrl)
-                    r2 = MainController._resync_rotate_order_length(
-                        ctrl)
-        self.assertTrue(r1, "First call should truncate + write.")
-        self.assertFalse(r2, "Second call MUST be idempotent.")
-        self.assertEqual(write_log, [[0, 1]],
-            "Only the first call writes; second is no-op.")
+        from RBFtools import controller as ctrl_mod
+        ctrl = self._make_ctrl(encoding=3)
+        with self._patch_resync_env(ctrl):
+            MainController._resync_rotate_order_length(ctrl)
+            ctrl_mod.core.write_driver_rotate_orders \
+                .assert_not_called()
 
     def test_resync_no_op_without_node(self):
+        # Early return preserved on no current_node (or shape
+        # unresolved).
         from RBFtools import core
         from RBFtools.controller import MainController
         ctrl = MainController.__new__(MainController)
         ctrl._current_node = None
         with mock.patch.object(
-                core, "write_driver_rotate_orders") as w:
+                core, "auto_resolve_generic_rotate_orders") as h:
             result = MainController._resync_rotate_order_length(ctrl)
         self.assertFalse(result)
-        w.assert_not_called()
+        h.assert_not_called()
+
+    def test_resync_no_op_when_shape_unresolved(self):
+        from RBFtools import core
+        from RBFtools.controller import MainController
+        ctrl = MainController.__new__(MainController)
+        ctrl._current_node = "missing_node"
+        with mock.patch.object(
+                core, "get_shape", return_value=""):
+            with mock.patch.object(
+                    core, "auto_resolve_generic_rotate_orders") as h:
+                result = MainController._resync_rotate_order_length(
+                    ctrl)
+        self.assertFalse(result)
+        h.assert_not_called()
 
     # ------------------------------------------------------------------
     # rbf_section visibility gating (Raw/Quat hide; BendRoll/ExpMap/
