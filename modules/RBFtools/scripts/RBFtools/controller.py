@@ -1495,9 +1495,57 @@ class MainController(QtCore.QObject):
             self.editorLoaded.emit()
             return
 
-        # Discover wiring
-        driver_node, driver_attrs = core.read_driver_info(node)
-        driven_node, driven_attrs = core.read_driven_info(node)
+        # M_P0_LOAD_EDITOR_MULTI (2026-04-30): use multi-source
+        # readers to match main_window._gather_role_info's flatten
+        # contract. The DEPRECATED legacy single-source readers
+        # truncated to driverSource[0] only, causing
+        # pose_model.n_inputs to mismatch the view layer (e.g. 4 vs
+        # 8 with 2 driver sources), which produced two cascading
+        # symptoms reported by the user:
+        #   - read_all_poses returns rows with the FULL multi-
+        #     source dimension (e.g. 8 inputs across 2 driverSource
+        #     entries), but setup_columns was configured with the
+        #     truncated single-source count (4). The first
+        #     pose_model.add_pose raised "Input dimension mismatch:
+        #     expected 4, got 8", _load_editor aborted before
+        #     editorLoaded.emit, and the view-side cascade never
+        #     fired — pose grid stayed blank ("切换 RBF 节点后
+        #     pose 信息全部消失").
+        #   - After the partial abort, pose_model.n_inputs retained
+        #     the previous node's truncated value. The next UI
+        #     add_pose (which already walks the multi readers via
+        #     _gather_role_info) then compared its 8-attr count
+        #     against the stale n_inputs=4 and rejected with
+        #     "Driver attribute count (8) differs from existing
+        #     poses (4)" — the verbatim warning the user saw.
+        # Path A fix: read via the multi-source helpers and flat-
+        # concat their attrs. Dimensions exactly match what
+        # read_all_poses produces and what main_window
+        # _gather_role_info hands the controller's add_pose path.
+        # Complementary to M_P0_NODE_SWITCH_POSE_GRID (41f3e47):
+        # that commit closed the editorLoaded -> _refresh_pose_grid
+        # leg in the view layer; this commit closes the data-
+        # shape leg in the controller. Both are necessary.
+        # NOTE: alias-path callsites at line 1218 / 1292 (and a
+        # handful of others — 826 / 838 / 931 / 932 / 1757) still
+        # use the legacy single-source readers. They are recorded
+        # technical debt; deferring to an independent
+        # M_ALIAS_MULTI_AWARE sub-task keeps this commit's blast
+        # radius scoped to the user-reported failure.
+        try:
+            drv_sources = list(
+                core.read_driver_info_multi(node))
+        except Exception:
+            drv_sources = []
+        try:
+            dvn_sources = list(
+                core.read_driven_info_multi(node))
+        except Exception:
+            dvn_sources = []
+        driver_node = drv_sources[0].node if drv_sources else ""
+        driven_node = dvn_sources[0].node if dvn_sources else ""
+        driver_attrs = [a for src in drv_sources for a in src.attrs]
+        driven_attrs = [a for src in dvn_sources for a in src.attrs]
 
         # Configure columns (resets model)
         self._pose_model.setup_columns(driver_attrs, driven_attrs)
