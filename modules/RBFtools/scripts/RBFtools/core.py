@@ -2884,7 +2884,40 @@ def read_all_poses(node):
     except Exception:
         n_outputs = 0
 
+    # M_P0_POSE_GRID_DEEP_FIX (2026-04-30): fallback to multi-source
+    # metadata when wiring arrays are absent. shape.output[] is only
+    # populated when the user clicks Connect — an "Applied but not
+    # Connected" node has shape.poses[] populated AND the pose data
+    # is structurally sound, but ``cmds.getAttr(shape+".output",
+    # size=True)`` returns 0. The pre-fix early-return rejected
+    # such nodes as "no poses" and was the core read-side mechanism
+    # behind the user's "切换 RBF 节点 pose 信息全部消失" report
+    # (compounding 41f3e47 + 5799958 fixes which only addressed
+    # the view-timing and controller-data-shape legs).
+    #
+    # driverSource[] / drivenSource[] metadata always carries the
+    # intended attr count regardless of wiring state — read its
+    # flat-concat length as the reliable n_inputs / n_outputs when
+    # the input / output multi sizes are zero. Symmetric on both
+    # sides: an Applied-only node has populated driverSource[] but
+    # may have unwired output; a Connected-but-not-Applied node is
+    # the legitimate empty case.
+    if n_inputs == 0:
+        try:
+            drv_sources = read_driver_info_multi(node)
+            n_inputs = sum(len(s.attrs) for s in drv_sources)
+        except Exception:
+            n_inputs = 0
+    if n_outputs == 0:
+        try:
+            dvn_sources = read_driven_info_multi(node)
+            n_outputs = sum(len(s.attrs) for s in dvn_sources)
+        except Exception:
+            n_outputs = 0
+
     if n_inputs == 0 or n_outputs == 0:
+        # True empty node — neither wiring nor metadata exists.
+        # Legitimate "node created but never configured" case.
         return []
 
     pose_indices = _multi_indices(shape, "poses")

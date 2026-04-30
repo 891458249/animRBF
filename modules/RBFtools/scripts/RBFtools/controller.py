@@ -1550,10 +1550,35 @@ class MainController(QtCore.QObject):
         # Configure columns (resets model)
         self._pose_model.setup_columns(driver_attrs, driven_attrs)
 
-        # Load poses
+        # Load poses — M_P0_POSE_GRID_DEEP_FIX (2026-04-30):
+        # per-pose try/except so a single malformed pose (e.g. a
+        # v5-pre-multi node with 4-dim poseInput vs the now 8-dim
+        # setup_columns) does NOT abort the whole loop and leave
+        # editorLoaded.emit unfired. The view-side cascade
+        # (41f3e47's _refresh_pose_grid + driver / driven tab
+        # rebuilds wired at 1249 / 1270) hard-depends on the
+        # signal landing — without it the user sees a blank pose
+        # grid AND blank driver/driven tabs even though
+        # _pose_model.setup_columns succeeded above. Per-pose
+        # warnings make the partial-load visible in the Script
+        # Editor so the TD knows to re-Apply on the current
+        # multi-source schema.
         poses = core.read_all_poses(node)
+        skipped = 0
         for p in poses:
-            self._pose_model.add_pose(p)
+            try:
+                self._pose_model.add_pose(p)
+            except ValueError as exc:
+                cmds.warning(
+                    "_load_editor: skipping malformed pose "
+                    "{!r}: {}".format(
+                        getattr(p, "index", "?"), exc))
+                skipped += 1
+        if skipped:
+            cmds.warning(
+                "_load_editor: {} pose(s) skipped due to "
+                "dimension mismatch — node may need re-Apply on "
+                "the current multi-source schema.".format(skipped))
 
         self.editorLoaded.emit()
 
