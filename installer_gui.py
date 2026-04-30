@@ -406,6 +406,39 @@ def install(install_dir=None, mod_dir=None, verbose=True,
     _copy_tree(source, install_dir)
     log("      -> {}".format(install_dir))
 
+    # M_P0_INSTALLER_VERSION_PRUNE (2026-05-01): _copy_tree is a
+    # bulk shutil.copytree under the hood — it has no per-subdir
+    # filter, so plug-ins/<platform>/<ver>/ for EVERY version the
+    # repo carries is replicated regardless of the caller's
+    # ``versions`` selection. The .mod file then routes only the
+    # subset the user picked (line ~415), leaving the unselected
+    # version dirs as dead weight that confuses end-users
+    # browsing the install directory ("I asked for 2022 only,
+    # why is 2025 here?"). Prune them post-copy so the install
+    # tree mirrors the .mod routing 1:1.
+    #
+    # versions=None (legacy --headless / "install for all
+    # detected") skips prune, preserving the historical "every
+    # version we have a binary for" payload.
+    if versions is not None and effective_versions:
+        plat = _current_platform()
+        plug_root = os.path.join(install_dir, "plug-ins", plat)
+        if os.path.isdir(plug_root):
+            keep = set(effective_versions)
+            for entry in sorted(os.listdir(plug_root)):
+                full = os.path.join(plug_root, entry)
+                if not os.path.isdir(full):
+                    continue
+                if entry in keep:
+                    continue
+                try:
+                    _remove_tree(full)
+                    log("      -> Pruned unselected: "
+                        "plug-ins/{}/{}".format(plat, entry))
+                except Exception as exc:
+                    log("      -> Warning: prune {} failed: "
+                        "{}".format(entry, exc))
+
     if _current_platform() == "linux64":
         _flatten_icons(os.path.join(install_dir, "icons"))
         log("      -> Flattened icons for Linux.")
