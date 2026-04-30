@@ -46,10 +46,19 @@ class BasePoseEditor(QtWidgets.QWidget):
       poseRecallRequested(int pose_idx)
         ``pose_idx == -1`` => apply the BasePose baseline to the
         driven node attrs (main_window translates).
+
+      poseUpdateRequested(int pose_idx)
+        Symmetric forward of the per-row Update button (M_P0_
+        UPDATE_BUTTON_REVERSED 2026-04-30). The BasePose row
+        hides the Update button per pose_row_widget.py:314, so
+        this channel never fires today; the forward is preserved
+        for symmetry with PoseGridEditor + future-proofing should
+        the BasePose row ever expose Update.
     """
 
     poseValueChangedV2  = QtCore.Signal(int, str, int, str, float)
     poseRecallRequested = QtCore.Signal(int)
+    poseUpdateRequested = QtCore.Signal(int)
 
     def __init__(self, parent=None):
         super(BasePoseEditor, self).__init__(parent)
@@ -168,6 +177,8 @@ class BasePoseEditor(QtWidgets.QWidget):
             self.poseValueChangedV2)
         self._row_widget.poseRecallRequested.connect(
             self.poseRecallRequested)
+        self._row_widget.poseUpdateRequested.connect(
+            self.poseUpdateRequested)
         self._inner_layout.insertWidget(
             self._inner_layout.count() - 1,
             self._row_widget)

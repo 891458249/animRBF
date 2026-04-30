@@ -520,6 +520,193 @@ _EN = {
         "an outputIsScale flag inside the 4-slot range) are dropped at "
         "compute() time with a one-time warning — the rig keeps "
         "evaluating; the dropped groups simply revert to scalar output.",
+
+    # -- M_HELPBUBBLE_BATCH (2026-04-29): red-frame-area HelpButton
+    # coverage. Each interactive widget in the Output Encoding /
+    # RBF Pose Editor outer tabs / Driver Sources / Driven Targets
+    # / Utility / Tools sections gets a long-form HelpButton bubble
+    # describing function + typical usage + edge cases (decision E.1).
+    "output_encoding":
+        "Node-level output encoding for the driven values fed into "
+        "the C++ output[] array.\n\n"
+        "  · Euler — the default; raw 3-tuple Euler angles.\n"
+        "  · Quaternion — driven groups represent unit quaternions; "
+        "matches the inputEncoding=Quaternion flow on the input side.\n"
+        "  · ExpMap — driven groups encoded as exponential map "
+        "vectors; pairs with the per-driver-group rotateOrder for "
+        "consistent reconstruction at evaluation time.\n\n"
+        "Switch this to match the encoding your downstream rig "
+        "expects. A mismatch here typically shows up as drift on "
+        "extreme rotations rather than an outright break.",
+
+    # -- M_P1_ENC_COMBO_FIX (2026-04-29): per-output-encoding keys
+    # for the OutputEncodingCombo's ComboHelpButton. Mirrors
+    # M_HELPTEXT_ENC_PER_KEY's input-encoding split — each item
+    # gets its own bubble describing semantics + typical usage +
+    # edge cases instead of the merged "output_encoding" blob.
+    "output_enc_euler":
+        "Output Encoding — Euler (default)\n\n"
+        "Each driven attribute group is a raw Euler triple "
+        "(rx, ry, rz). The C++ compute() weighted-sum is applied "
+        "directly per channel; no quaternion or exp-map "
+        "reconstruction step.\n\n"
+        "★ Default for joint translate / rotate channels and any "
+        "driven attribute that is NOT inherently rotational "
+        "(blendshape weights, custom scalars, scale).\n\n"
+        "Edge: gimbal-influenced extreme rotations on a single "
+        "Euler triple can drift on multi-pose blends; switch to "
+        "Quaternion or ExpMap for those cases.",
+
+    "output_enc_quaternion":
+        "Output Encoding — Quaternion\n\n"
+        "Driven attribute groups are interpreted as unit "
+        "quaternions (4 channels per group). C++ compute() runs a "
+        "quaternion-weighted average (M2.2 QWA) instead of a "
+        "scalar weighted sum, preserving rotation continuity "
+        "across the unit hypersphere.\n\n"
+        "Pairs naturally with inputEncoding=Quaternion and with "
+        "the outputQuaternionGroupStart[] list that declares "
+        "where each 4-slot group starts in the output array.\n\n"
+        "Edge: groups whose 4-slot range collides with an "
+        "outputIsScale flag are dropped at compute() with a "
+        "one-time warning — the rig keeps evaluating, dropped "
+        "groups simply revert to scalar output.",
+
+    "output_enc_expmap":
+        "Output Encoding — ExpMap (Exponential Map)\n\n"
+        "Driven attribute groups are encoded as 3-component "
+        "exp-map vectors. The C++ compute() interpolates in "
+        "exp-map space and reconstructs rotations on read; works "
+        "well for medium-range rotations without the gimbal "
+        "artifacts of raw Euler.\n\n"
+        "★ Useful when the driven side is a single rotational "
+        "joint (twist corrective, bend joint) and you need "
+        "smoother blend behaviour than Euler but don't want to "
+        "spend the extra channel of a quaternion group.\n\n"
+        "Edge: large rotations near the pi-radian shell can fold "
+        "back through the origin — keep the per-pose rotation "
+        "magnitudes inside |angle| < pi to avoid antipodal jumps.",
+
+    "outer_tabs_overview":
+        "Three-tab navigation for the RBF Pose Editor:\n"
+        "  · DriverDriven — pick the driver bones / attrs and the "
+        "driven joints / attrs the solver maps between. Edits here "
+        "rebuild the per-pose schema.\n"
+        "  · BaseDrivenPose — the rest / baseline output values per "
+        "driven attr; subtracted from each pose so deltas are what "
+        "the solver actually interpolates.\n"
+        "  · Pose — the live pose grid: add new poses, recall / "
+        "delete existing ones, edit per-row driver + driven "
+        "samples.\n\n"
+        "Switching tabs is non-destructive; all three views read "
+        "from the same active node.",
+
+    "source_tab_connect":
+        "Wire the currently selected attrs from THIS tab's source "
+        "(driver or driven) into the active node's "
+        "input[] / output[] arrays.\n\n"
+        "Path-A semantics — operates on the per-tab attribute list "
+        "directly; no pose data is touched. Idempotent: clicking "
+        "twice on the same selection reuses existing slots.\n\n"
+        "When the panel-level Batch checkbox is on, Connect sweeps "
+        "EVERY tab in the panel instead of just the active one — "
+        "useful for re-applying the same attribute set to all "
+        "drivers at once.",
+
+    "source_tab_disconnect":
+        "Tear down the input[] / output[] array slots wired by "
+        "Connect for this tab's source.\n\n"
+        "Walks the precise per-attribute connections so other "
+        "tabs / unrelated nodes are untouched. After Disconnect "
+        "the node still keeps its driverSource[] / drivenSource[] "
+        "metadata entry — only the data path is broken; "
+        "Add Driver / Add Driven is NOT undone.\n\n"
+        "Batch checkbox: when on, Disconnect runs across every "
+        "tab in the panel.",
+
+    "source_tab_add_driver":
+        "Append a new driver source tab to the active node and "
+        "open it for attribute selection.\n\n"
+        "Each driver source maps to one driverSource[] entry on the "
+        "shape — a (node, attrs, weight, encoding) tuple with the "
+        "driver's .message connected to driverSource_node.\n\n"
+        "Pick the driver bone / control object first, then choose "
+        "which of its attrs participate. Duplicate (bone, attr) "
+        "pairs across sources are allowed but rarely useful.",
+
+    "source_tab_add_driven":
+        "Append a new driven source tab and open it for attribute "
+        "selection.\n\n"
+        "Each driven source maps to one drivenSource[] entry — the "
+        "joint / control whose attrs the RBF compute will write "
+        "into. Select all driven attrs the solver should drive on "
+        "this object before clicking Connect.\n\n"
+        "Driven attributes participate in the M2.4a per-attribute "
+        "outputIsScale flag list; defaults to non-scale (translate / "
+        "rotate / blendshape semantics).",
+
+    "source_tab_batch_driver":
+        "When checked, panel-level Connect / Disconnect operate on "
+        "EVERY driver tab simultaneously instead of only the "
+        "currently-active one.\n\n"
+        "Use this to re-broadcast the same attribute set to a list "
+        "of similarly-set-up driver bones (e.g. an arm chain) "
+        "without click-cycling tabs. The Add Driver button is NOT "
+        "affected — that always creates one new tab.\n\n"
+        "Batch is a session-only flag; not persisted on the node.",
+
+    "source_tab_batch_driven":
+        "When checked, panel-level Connect / Disconnect operate on "
+        "EVERY driven tab simultaneously instead of only the "
+        "currently-active one.\n\n"
+        "Useful when several driven joints share the same attr "
+        "list (e.g. a row of corrective blendshapes). Add Driven "
+        "always creates one new tab regardless of this flag.\n\n"
+        "Batch is a session-only flag; not persisted on the node.",
+
+    "btn_split_solver_per_joint":
+        "Split this multi-driven RBF solver into one solver-per-"
+        "joint copy.\n\n"
+        "Useful for breaking up a heavy node when profiling shows "
+        "compute() dominated by a single driver feeding many "
+        "outputs that could evaluate independently. Each new node "
+        "inherits the same driver topology + the subset of pose "
+        "values relevant to its driven joint.\n\n"
+        "Destructive on the original node — best run on a "
+        "duplicate first to compare evaluation parity.",
+
+    "cleanup_modes_overview":
+        "Three cleanup modes share the Remove Unnecessary Datas "
+        "button below; pick one before clicking it.\n\n"
+        "  · Remove Connectionless Input — drops input[] slots "
+        "with no upstream connection, then renumbers downstream "
+        "data so pose vectors stay aligned.\n"
+        "  · Remove Connectionless Output — same idea on the "
+        "output side; useful after blendshape / joint pruning.\n"
+        "  · Remove Redundant Pose — drops poses whose driver "
+        "vector duplicates another pose's within tolerance.\n\n"
+        "All three are destructive but reversible by undo.",
+
+    "btn_remove_unnecessary_datas":
+        "Run the cleanup mode selected above (one of: connection-"
+        "less input, connectionless output, or redundant pose).\n\n"
+        "The button reads the radio selection at click time, so "
+        "you can switch modes between runs. Status output goes "
+        "to the Maya Script Editor — review it before saving the "
+        "scene; the cleanup may have changed the pose / attribute "
+        "count.\n\n"
+        "Single undo step; safe to repeat.",
+
+    "btn_refresh_profile":
+        "Run the per-node profiler and render the report inline.\n\n"
+        "The profile is intentionally NOT auto-recomputed on node "
+        "switch — large rigs can take a noticeable second to "
+        "summarize, and the data is read-only context (pose count, "
+        "input / output dimensionality, kernel / radius signature, "
+        "per-driver weight totals).\n\n"
+        "The report is a snapshot; click Refresh again after any "
+        "structural edit (Add / Remove driver, pose changes) to "
+        "see updated numbers.",
 }
 
 _ZH = {
@@ -988,6 +1175,134 @@ _ZH = {
         u"\u5e94\u8d70\u56db\u5143\u6570\u52a0\u6743\u5e73\u5747\u800c\u975e\u6807\u91cf\u52a0\u6743\u548c\u3002\n\n"
         u"\u65e0\u6548\u6761\u76ee\uff08\u8d8a\u754c / \u91cd\u53e0 / \u4e0e 4-slot \u8303\u56f4\u5185 outputIsScale flag \u51b2\u7a81\uff09\u5728 compute() "
         u"\u65f6\u88ab\u4e22\u5f03\u4e0e\u4e00\u6b21\u6027 warning\u2014\u2014rig \u7ee7\u7eed\u8fd0\u884c\uff0c\u88ab\u4e22\u7684\u7ec4\u4ec5\u9000\u56de\u6807\u91cf\u8f93\u51fa\u3002",
+
+    # -- M_HELPBUBBLE_BATCH (2026-04-29) \u2014 ZH parity --
+    "output_encoding":
+        u"\u8282\u70b9\u7ea7\u8f93\u51fa\u7f16\u7801\uff0c\u51b3\u5b9a driven \u503c\u5982\u4f55\u5199\u5165 C++ output[] \u6570\u7ec4\u3002\n\n"
+        u"  \u00b7 Euler \u2014 \u9ed8\u8ba4\uff1b\u539f\u59cb 3 \u5143 Euler \u89d2\u3002\n"
+        u"  \u00b7 Quaternion \u2014 driven \u7ec4\u6309\u5355\u4f4d\u56db\u5143\u6570\u89e3\u91ca\uff1b\u4e0e input \u7aef "
+        u"inputEncoding=Quaternion \u6d41\u7a0b\u5bf9\u9f50\u3002\n"
+        u"  \u00b7 ExpMap \u2014 driven \u7ec4\u6309\u6307\u6570\u6620\u5c04\u5411\u91cf\u7f16\u7801\uff1b\u4e0e per-driver-group "
+        u"rotateOrder \u914d\u5408\uff0c\u786e\u4fdd\u8bc4\u4f30\u65f6\u4e00\u81f4\u91cd\u5efa\u3002\n\n"
+        u"\u5207\u6362\u4ee5\u5339\u914d\u4e0b\u6e38\u7ed1\u5b9a\u9884\u671f\u7f16\u7801\u3002\u8bbe\u7f6e\u9519\u4f4d\u901a\u5e38\u5728\u6781\u7aef\u65cb\u8f6c\u4e0b\u8868\u73b0\u4e3a\u6f02\u79fb\u800c"
+        u"\u975e\u76f4\u63a5\u62a5\u9519\u3002",
+
+    # -- M_P1_ENC_COMBO_FIX (2026-04-29) \u2014 ZH parity --
+    "output_enc_euler":
+        u"\u8f93\u51fa\u7f16\u7801 \u2014 Euler\uff08\u9ed8\u8ba4\uff09\n\n"
+        u"\u6bcf\u4e2a driven \u5c5e\u6027\u7ec4\u662f\u539f\u59cb Euler \u4e09\u5143\u7ec4 (rx, ry, rz)\u3002"
+        u"C++ compute() \u52a0\u6743\u548c\u6309\u901a\u9053\u76f4\u63a5\u7d2f\u52a0\uff0c\u4e0d\u505a\u56db\u5143\u6570 / exp-map \u91cd\u5efa\u3002\n\n"
+        u"\u2605 \u5173\u8282 translate / rotate \u901a\u9053\u53ca\u975e\u65cb\u8f6c\u6027 driven \u5c5e\u6027"
+        u"\uff08blendshape \u6743\u91cd\u3001\u81ea\u5b9a\u4e49\u6807\u91cf\u3001scale\uff09\u7684\u9ed8\u8ba4\u9009\u62e9\u3002\n\n"
+        u"\u8fb9\u754c\uff1a\u5355 Euler \u4e09\u5143\u7ec4\u5728\u4e07\u5411\u8282\u9644\u8fd1\u6781\u7aef\u65cb\u8f6c\u4e0b\u505a\u591a pose \u6df7\u5408\u53ef\u80fd\u6f02\u79fb\uff1b"
+        u"\u6b64\u65f6\u6362 Quaternion \u6216 ExpMap \u7f16\u7801\u3002",
+
+    "output_enc_quaternion":
+        u"\u8f93\u51fa\u7f16\u7801 \u2014 Quaternion\uff08\u56db\u5143\u6570\uff09\n\n"
+        u"driven \u5c5e\u6027\u7ec4\u6309\u5355\u4f4d\u56db\u5143\u6570\u89e3\u91ca\uff08\u6bcf\u7ec4 4 \u901a\u9053\uff09\u3002C++ compute() "
+        u"\u8d70\u56db\u5143\u6570\u52a0\u6743\u5e73\u5747\uff08M2.2 QWA\uff09\u800c\u975e\u6807\u91cf\u52a0\u6743\u548c\uff0c\u6cbf\u5355\u4f4d\u8d85\u7403\u9762\u4fdd\u6301\u65cb\u8f6c\u8fde\u7eed\u6027\u3002\n\n"
+        u"\u4e0e inputEncoding=Quaternion \u81ea\u7136\u914d\u5957\uff0c\u5e76\u4f9d\u8d56 "
+        u"outputQuaternionGroupStart[] \u5217\u8868\u58f0\u660e\u8f93\u51fa\u6570\u7ec4\u4e2d\u6bcf\u4e2a 4-slot \u7ec4\u7684\u8d77\u59cb\u4f4d\u7f6e\u3002\n\n"
+        u"\u8fb9\u754c\uff1a4-slot \u8303\u56f4\u4e0e outputIsScale flag \u51b2\u7a81\u7684\u7ec4\u5728 compute() \u65f6\u88ab\u4e22\u5f03 + "
+        u"\u4e00\u6b21\u6027 warning\u2014\u2014rig \u7ee7\u7eed\u8fd0\u884c\uff0c\u88ab\u4e22\u7684\u7ec4\u9000\u56de\u6807\u91cf\u8f93\u51fa\u3002",
+
+    "output_enc_expmap":
+        u"\u8f93\u51fa\u7f16\u7801 \u2014 ExpMap\uff08\u6307\u6570\u6620\u5c04\uff09\n\n"
+        u"driven \u5c5e\u6027\u7ec4\u7f16\u7801\u4e3a 3 \u5206\u91cf exp-map \u5411\u91cf\u3002C++ compute() \u5728 exp-map "
+        u"\u7a7a\u95f4\u63d2\u503c\u5e76\u5728\u8bfb\u53d6\u65f6\u91cd\u5efa\u65cb\u8f6c\uff1b\u5bf9\u4e2d\u7b49\u5e45\u5ea6\u65cb\u8f6c\u6548\u679c\u597d\uff0c\u4e14\u65e0 raw Euler "
+        u"\u7684\u4e07\u5411\u8282\u4f2a\u50cf\u3002\n\n"
+        u"\u2605 \u9002\u7528\u4e8e driven \u4fa7\u662f\u5355\u4e00\u65cb\u8f6c\u5173\u8282\u7684\u573a\u666f\uff08twist \u6821\u6b63\u3001\u5f2f\u66f2\u5173\u8282\uff09\uff0c"
+        u"\u9700\u8981\u6bd4 Euler \u66f4\u5e73\u6ed1\u7684\u6df7\u5408\u4f46\u4e0d\u60f3\u4ed8\u56db\u5143\u6570\u7ec4\u7684\u989d\u5916\u901a\u9053\u5f00\u9500\u3002\n\n"
+        u"\u8fb9\u754c\uff1a\u63a5\u8fd1 pi \u5f27\u5ea6\u7403\u58f3\u7684\u5927\u5e45\u65cb\u8f6c\u4f1a\u7ed5\u539f\u70b9\u6298\u56de\u2014\u2014\u4fdd\u6301\u6bcf pose \u65cb\u8f6c\u5e45\u503c "
+        u"|angle| < pi \u4ee5\u907f\u514d\u5bf9\u6781\u8df3\u53d8\u3002",
+
+    "outer_tabs_overview":
+        u"RBF Pose Editor \u4e09\u6807\u7b7e\u9875\u5bfc\u822a\uff1a\n"
+        u"  \u00b7 DriverDriven \u2014 \u9009\u62e9\u9a71\u52a8\u9aa8\u9abc/\u5c5e\u6027 + \u88ab\u9a71\u52a8\u5173\u8282/\u5c5e\u6027\uff0c"
+        u"\u51b3\u5b9a solver \u7684\u8f93\u5165\u8f93\u51fa\u7ef4\u5ea6\u3002\u6b64\u5904\u7f16\u8f91\u4f1a\u91cd\u5efa pose \u6a21\u5f0f\u3002\n"
+        u"  \u00b7 BaseDrivenPose \u2014 \u6bcf\u4e2a driven \u5c5e\u6027\u7684\u57fa\u7ebf/\u4f11\u6b62\u503c\uff1b\u4ece\u6bcf\u4e2a pose"
+        u"\u4e2d\u51cf\u53bb\u540e\u624d\u662f solver \u5b9e\u9645\u63d2\u503c\u7684 delta\u3002\n"
+        u"  \u00b7 Pose \u2014 \u5b9e\u65f6 pose \u7f51\u683c\uff1a\u589e\u52a0 / \u53ec\u56de / \u5220\u9664 pose\u3001"
+        u"\u9010\u884c\u7f16\u8f91 driver + driven \u91c7\u6837\u503c\u3002\n\n"
+        u"\u6807\u7b7e\u5207\u6362\u65e0\u7834\u574f\u6027\uff0c\u4e09\u4e2a\u89c6\u56fe\u5171\u4eab\u540c\u4e00\u6d3b\u52a8\u8282\u70b9\u3002",
+
+    "source_tab_connect":
+        u"\u5c06\u672c\u6807\u7b7e\u9875\u6240\u9009\u5c5e\u6027\uff08driver \u6216 driven\uff09\u8fde\u63a5\u5230\u6d3b\u52a8\u8282\u70b9\u7684 "
+        u"input[] / output[] \u6570\u7ec4\u3002\n\n"
+        u"Path-A \u8bed\u4e49\u2014\u2014\u76f4\u63a5\u64cd\u4f5c\u6bcf\u6807\u7b7e\u9875\u7684\u5c5e\u6027\u5217\u8868\uff0cpose \u6570\u636e\u4e0d\u88ab\u89e6\u78b0\u3002"
+        u"\u5e42\u7b49\uff1a\u540c\u4e00\u9009\u62e9\u91cd\u590d\u70b9\u51fb\u590d\u7528\u65e2\u6709\u69fd\u4f4d\u3002\n\n"
+        u"\u9762\u677f\u7ea7 Batch \u590d\u9009\u6846\u542f\u7528\u65f6\uff0cConnect \u6a2a\u626b\u9762\u677f\u91cc**\u6bcf\u4e00\u4e2a**\u6807\u7b7e\u9875"
+        u"\u800c\u975e\u4ec5\u5f53\u524d\u6d3b\u52a8\u6807\u7b7e\u2014\u2014\u4fbf\u4e8e\u540c\u4e00\u5c5e\u6027\u96c6\u4e00\u6b21\u5e7f\u64ad\u5230\u5168\u90e8\u9a71\u52a8\u3002",
+
+    "source_tab_disconnect":
+        u"\u62c6\u9664 Connect \u4e3a\u672c\u6807\u7b7e\u9875\u6e90\u5efa\u7acb\u7684 input[] / output[] \u6570\u636e\u8fde\u63a5\u3002\n\n"
+        u"\u6309\u7cbe\u786e\u6bcf\u5c5e\u6027\u7ea7\u522b\u8d70\u94fe\u8def\uff0c\u5176\u5b83\u6807\u7b7e\u9875 / \u4e0d\u76f8\u5173\u8282\u70b9\u4e0d\u53d7\u5f71\u54cd\u3002"
+        u"Disconnect \u540e\u8282\u70b9\u4ecd\u4fdd\u7559 driverSource[] / drivenSource[] \u5143\u6570\u636e\u6761\u76ee"
+        u"\u2014\u2014\u4ec5\u6570\u636e\u94fe\u8def\u88ab\u65ad\uff1bAdd Driver / Add Driven \u4e0d\u4f1a\u88ab\u64a4\u9500\u3002\n\n"
+        u"Batch \u590d\u9009\u6846\u542f\u7528\u65f6\uff0cDisconnect \u6a2a\u626b\u9762\u677f\u91cc\u6bcf\u4e00\u4e2a\u6807\u7b7e\u9875\u3002",
+
+    "source_tab_add_driver":
+        u"\u5728\u6d3b\u52a8\u8282\u70b9\u8ffd\u52a0\u4e00\u4e2a\u65b0\u7684 driver \u6e90\u6807\u7b7e\u9875\u5e76\u6253\u5f00\u5c5e\u6027\u9009\u62e9\u3002\n\n"
+        u"\u6bcf\u4e2a driver \u6e90\u5bf9\u5e94 shape \u4e0a\u4e00\u6761 driverSource[]\u2014\u2014\u4e00\u4e2a "
+        u"(node, attrs, weight, encoding) \u5143\u7ec4\uff0cdriver \u7684 .message \u8fde\u5230 "
+        u"driverSource_node\u3002\n\n"
+        u"\u5148\u9009 driver \u9aa8\u9abc / \u63a7\u5236\u5668\u5bf9\u8c61\uff0c\u518d\u9009\u5176\u53c2\u4e0e\u7684\u5c5e\u6027\u3002\u5141\u8bb8\u8de8\u6e90\u91cd\u590d "
+        u"(bone, attr) \u5bf9\uff0c\u4f46\u901a\u5e38\u65e0\u610f\u4e49\u3002",
+
+    "source_tab_add_driven":
+        u"\u8ffd\u52a0\u4e00\u4e2a\u65b0\u7684 driven \u6e90\u6807\u7b7e\u9875\u5e76\u6253\u5f00\u5c5e\u6027\u9009\u62e9\u3002\n\n"
+        u"\u6bcf\u4e2a driven \u6e90\u5bf9\u5e94\u4e00\u6761 drivenSource[]\u2014\u2014RBF compute \u5c06\u5411\u5176\u5c5e\u6027"
+        u"\u5199\u5165\u7ed3\u679c\u7684\u5173\u8282 / \u63a7\u5236\u5668\u3002\u70b9 Connect \u524d\u9009\u597d\u8be5\u5bf9\u8c61\u4e0a solver "
+        u"\u5e94\u9a71\u52a8\u7684\u6240\u6709 driven \u5c5e\u6027\u3002\n\n"
+        u"Driven \u5c5e\u6027\u53c2\u4e0e M2.4a \u7684 per-attribute outputIsScale \u6807\u8bb0\u5217\u8868\uff1b"
+        u"\u9ed8\u8ba4\u975e scale\uff08translate / rotate / blendshape \u8bed\u4e49\uff09\u3002",
+
+    "source_tab_batch_driver":
+        u"\u52fe\u9009\u65f6\uff0c\u9762\u677f\u7ea7 Connect / Disconnect \u540c\u65f6\u4f5c\u7528\u4e8e**\u6bcf\u4e00\u4e2a** driver "
+        u"\u6807\u7b7e\u9875\uff0c\u800c\u975e\u4ec5\u5f53\u524d\u6d3b\u52a8\u6807\u7b7e\u3002\n\n"
+        u"\u7528\u4e8e\u628a\u540c\u4e00\u5c5e\u6027\u96c6\u4e00\u6b21\u6027\u5e7f\u64ad\u5230\u7ed3\u6784\u76f8\u4f3c\u7684\u591a\u6839 driver \u9aa8\uff08\u5982\u624b\u81c2\u94fe\uff09\uff0c"
+        u"\u7701\u53bb\u9010\u6807\u7b7e\u5207\u6362\u3002Add Driver \u6309\u94ae**\u4e0d**\u53d7\u6b64 flag \u5f71\u54cd\u2014\u2014\u59cb\u7ec8\u65b0\u5efa\u4e00\u4e2a\u6807\u7b7e\u3002\n\n"
+        u"Batch \u4ec5\u4f1a\u8bdd\u7ea7 flag\uff0c\u4e0d\u6301\u4e45\u5316\u5728\u8282\u70b9\u4e0a\u3002",
+
+    "source_tab_batch_driven":
+        u"\u52fe\u9009\u65f6\uff0c\u9762\u677f\u7ea7 Connect / Disconnect \u540c\u65f6\u4f5c\u7528\u4e8e**\u6bcf\u4e00\u4e2a** driven "
+        u"\u6807\u7b7e\u9875\uff0c\u800c\u975e\u4ec5\u5f53\u524d\u6d3b\u52a8\u6807\u7b7e\u3002\n\n"
+        u"\u9002\u5408\u591a\u6839\u5171\u4eab\u540c\u4e00\u5c5e\u6027\u5217\u8868\u7684 driven \u5173\u8282\uff08\u5982\u4e00\u6392\u77eb\u6b63 blendshape\uff09\u3002"
+        u"Add Driven \u4e0d\u53d7\u5f71\u54cd\u2014\u2014\u59cb\u7ec8\u65b0\u5efa\u4e00\u4e2a\u6807\u7b7e\u3002\n\n"
+        u"Batch \u4ec5\u4f1a\u8bdd\u7ea7 flag\uff0c\u4e0d\u6301\u4e45\u5316\u5728\u8282\u70b9\u4e0a\u3002",
+
+    "btn_split_solver_per_joint":
+        u"\u5c06\u8fd9\u4e2a\u591a driven \u7684 RBF solver \u62c6\u6210\u6bcf\u4e2a joint \u4e00\u4efd\u72ec\u7acb solver\u3002\n\n"
+        u"\u7528\u4e8e\u6027\u80fd\u62c6\u5206\uff1a\u5f53 profile \u663e\u793a compute() \u88ab\u5355\u4e00 driver \u9988\u9001\u5927\u91cf"
+        u"\u4e92\u4e0d\u76f8\u5e72\u8f93\u51fa\u65f6\uff0c\u72ec\u7acb\u8bc4\u4f30\u80fd\u5e76\u884c\u3002\u65b0\u8282\u70b9\u7ee7\u627f\u76f8\u540c\u7684 driver \u62d3\u6251 + "
+        u"\u4e0e\u5176 driven joint \u76f8\u5173\u7684 pose \u5b50\u96c6\u3002\n\n"
+        u"\u5bf9\u539f\u8282\u70b9\u5177\u7834\u574f\u6027\u2014\u2014\u5efa\u8bae\u5148\u590d\u5236\u540e\u5bf9\u6bd4\u8bc4\u4f30\u7b49\u4ef7\u3002",
+
+    "cleanup_modes_overview":
+        u"\u4e09\u79cd\u6e05\u7406\u6a21\u5f0f\u5171\u7528\u4e0b\u65b9 Remove Unnecessary Datas \u6309\u94ae\uff1b\u70b9\u51fb\u524d\u5148\u9009\u4e00\u79cd\u3002\n\n"
+        u"  \u00b7 Remove Connectionless Input \u2014 \u4e22\u5f03\u6ca1\u6709\u4e0a\u6e38\u8fde\u63a5\u7684 input[] \u69fd\uff0c"
+        u"\u5e76\u5bf9\u4e0b\u6e38\u6570\u636e\u91cd\u65b0\u7f16\u53f7\u4ee5\u4fdd pose \u5411\u91cf\u5bf9\u9f50\u3002\n"
+        u"  \u00b7 Remove Connectionless Output \u2014 output \u7aef\u540c\u7406\uff1b\u5e38\u7528\u4e8e "
+        u"blendshape / joint \u4fee\u526a\u540e\u3002\n"
+        u"  \u00b7 Remove Redundant Pose \u2014 \u4e22\u5f03 driver \u5411\u91cf\u4e0e\u4ed6\u8005\u5728\u5bb9\u5dee\u5185\u91cd\u590d"
+        u"\u7684 pose\u3002\n\n"
+        u"\u4e09\u8005\u7686\u7834\u574f\u6027\u4f46\u53ef undo \u64a4\u56de\u3002",
+
+    "btn_remove_unnecessary_datas":
+        u"\u8fd0\u884c\u4e0a\u9762\u9009\u4e2d\u7684\u6e05\u7406\u6a21\u5f0f\uff08connectionless input / output / "
+        u"redundant pose \u4e09\u9009\u4e00\uff09\u3002\n\n"
+        u"\u6309\u94ae\u5728\u70b9\u51fb\u65f6\u8bfb\u53d6\u5355\u9009\u9879\uff0c\u56e0\u6b64\u53ef\u5728\u4e0d\u540c\u6a21\u5f0f\u95f4\u5207\u6362\u91cd\u590d\u8fd0\u884c\u3002\u72b6\u6001\u8f93\u51fa"
+        u"\u6253\u5230 Maya Script Editor\u2014\u2014\u4fdd\u5b58\u573a\u666f\u524d\u8bf7\u5ba1\u67e5\uff1b\u6e05\u7406\u53ef\u80fd\u6539\u53d8 pose / "
+        u"\u5c5e\u6027\u6570\u91cf\u3002\n\n"
+        u"\u5355\u6b65 undo\uff0c\u53ef\u91cd\u590d\u6267\u884c\u3002",
+
+    "btn_refresh_profile":
+        u"\u8fd0\u884c\u8282\u70b9 profiler \u5e76\u5c06\u62a5\u544a\u5c31\u5730\u6e32\u67d3\u3002\n\n"
+        u"profile \u6545\u610f**\u4e0d**\u5728\u8282\u70b9\u5207\u6362\u65f6\u81ea\u52a8\u91cd\u7b97\u2014\u2014\u5927\u578b rig \u6c47\u603b\u4f1a\u6709\u53ef\u89c1\u5ef6\u8fdf\uff0c"
+        u"\u4e14\u6570\u636e\u662f\u53ea\u8bfb\u4e0a\u4e0b\u6587\uff08pose \u6570\u3001input/output \u7ef4\u5ea6\u3001kernel/radius \u7b7e\u540d\u3001"
+        u"per-driver \u6743\u91cd\u603b\u548c\uff09\u3002\n\n"
+        u"\u62a5\u544a\u662f\u5feb\u7167\uff1b\u4efb\u4f55\u7ed3\u6784\u7f16\u8f91\uff08\u589e\u5220 driver\u3001pose \u6539\u52a8\uff09\u540e\u518d\u6b21\u70b9 Refresh "
+        u"\u4ee5\u67e5\u770b\u66f4\u65b0\u6570\u636e\u3002",
 }
 
 _TABLES = {"en": _EN, "zh": _ZH}

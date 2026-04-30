@@ -75,6 +75,15 @@ class MainController(QtCore.QObject):
     # Subscribers re-render any displayed node names through
     # core.format_node_for_display.
     nameDisplayModeChanged = QtCore.Signal(str)
+    # M_P1_ENC_COMBO_FIX (2026-04-29): narrow signal carrying the
+    # freshly-derived driverInputRotateOrder list for the rbf_section
+    # rotate-order editor. Replaces the prior _load_settings()
+    # cascade in on_input_encoding_changed (M_ENC_AUTOPIPE) which
+    # round-tripped through settingsLoaded -> rbf_section.load and
+    # exposed the get_all_settings 7-field gap as a combo bounce-back
+    # bug. The narrow path touches only the editor that needs
+    # fresh data; combos and other M2.x fields are not re-pushed.
+    rotateOrderEditorReload = QtCore.Signal(list)
 
     def __init__(self, parent=None):
         super(MainController, self).__init__(parent)
@@ -245,14 +254,25 @@ class MainController(QtCore.QObject):
             cmds.warning("remove_driver_source: no current node")
             return False
         from RBFtools.ui.i18n import tr
+        # M_P0_TAB_REMOVE_SPARSE_FIX (2026-04-30): translate tab-
+        # position to sparse multi index BEFORE the confirm dialog
+        # so a stale view index aborts cleanly instead of asking the
+        # user about a phantom source.
+        multi_idx = self._list_idx_to_sparse("driver", index)
+        if multi_idx is None:
+            cmds.warning(
+                "remove_driver_source: list_idx {} out of range "
+                "or no current node".format(index))
+            return False
         proceed = self.ask_confirm(
             action_id="remove_driver_source",
             title=tr("title_remove_driver_source"),
-            summary=tr("summary_remove_driver_source"))
+            summary=tr("summary_remove_driver_source"),
+            preview_text="")
         if not proceed:
             return False
         try:
-            core.remove_driver_source(self._current_node, index)
+            core.remove_driver_source(self._current_node, multi_idx)
         except Exception as exc:
             cmds.warning(
                 "remove_driver_source failed: {}".format(exc))
@@ -281,9 +301,15 @@ class MainController(QtCore.QObject):
             cmds.warning(
                 "disconnect_driver_source_attrs: no current node")
             return False
+        multi_idx = self._list_idx_to_sparse("driver", index)
+        if multi_idx is None:
+            cmds.warning(
+                "disconnect_driver_source_attrs: list_idx {} out "
+                "of range".format(index))
+            return False
         try:
             ok = core.disconnect_driver_source_attrs(
-                self._current_node, int(index),
+                self._current_node, multi_idx,
                 attrs=list(attrs) if attrs else None)
         except Exception as exc:
             cmds.warning(
@@ -301,9 +327,15 @@ class MainController(QtCore.QObject):
         if not self._current_node:
             cmds.warning("set_driver_source_attrs: no current node")
             return False
+        multi_idx = self._list_idx_to_sparse("driver", index)
+        if multi_idx is None:
+            cmds.warning(
+                "set_driver_source_attrs: list_idx {} out of "
+                "range".format(index))
+            return False
         try:
             ok = core.set_driver_source_attrs(
-                self._current_node, int(index), list(new_attrs))
+                self._current_node, multi_idx, list(new_attrs))
         except Exception as exc:
             cmds.warning(
                 "set_driver_source_attrs failed: {}".format(exc))
@@ -323,6 +355,138 @@ class MainController(QtCore.QObject):
             cmds.warning(
                 "read_driver_sources failed: {}".format(exc))
             return []
+
+    # =================================================================
+    #  M_ROTORDER_UI_REFACTOR (2026-04-29) — driver-tab-synced
+    #  rotate-order self-heal.
+    # =================================================================
+
+    def _list_idx_to_sparse(self, role, list_idx):
+        """M_P0_TAB_REMOVE_SPARSE_FIX (2026-04-30) — translate a tab-
+        position index (0..n-1, dense) to the Maya multi-instance
+        sparse index that ``core.{remove,set,disconnect}_*_source``
+        expects.
+
+        Background: ``core.add_*_source`` allocates new entries via
+        ``max(indices) + 1`` (append-only, no hole reuse), so the
+        ``driverSource[]`` / ``drivenSource[]`` sparse multi grows
+        discontinuous after any remove. The view emits Qt
+        tabCloseRequested / list-enumerate indices (always dense
+        0..n-1); core takes sparse multi indices. The bug: the
+        first remove coincidentally hits ``list_pos == sparse_idx``
+        and works; every subsequent remove / attrs edit on a
+        sparse-discontinuous node lands on the wrong (or empty)
+        slot — the user-reported "only first ❌ works" repro.
+
+        Lesson #7 (project-methodology candidate): "view <-> core
+        index-space drift goes silent until sparse goes
+        discontinuous". Boundary translator at the controller
+        layer is the canonical fix — view and core both keep
+        their native conventions.
+
+        Args:
+          role:     "driver" or "driven" — selects the multi attr
+                    name (driverSource / drivenSource).
+          list_idx: dense list position from the view (0..n-1).
+
+        Returns:
+          int sparse index, or ``None`` when (a) no current node,
+          (b) shape unresolved, (c) multiIndices unavailable, or
+          (d) list_idx is out of range. Callers MUST treat None as
+          "abort the operation safely with a cmds.warning" — never
+          fall through to core with a list-pos that drifted.
+        """
+        if not self._current_node:
+            return None
+        try:
+            shape = core.get_shape(self._current_node)
+        except Exception:
+            return None
+        if not shape:
+            return None
+        multi_attr = "{}.{}Source".format(shape, role)
+        try:
+            sparse = sorted(
+                cmds.getAttr(multi_attr, multiIndices=True) or [])
+        except Exception:
+            return None
+        li = int(list_idx)
+        if 0 <= li < len(sparse):
+            return int(sparse[li])
+        return None
+
+    def _resync_rotate_order_length(self):
+        """Re-derive ``driverInputRotateOrder[]`` to match the current
+        driverSource[] population by routing through the canonical
+        M_ENC_AUTOPIPE auto-resolve path.
+
+        M_P0_ENCODING_OUTPUT_GLITCH (2026-04-30): the previous
+        implementation called ``core.write_driver_rotate_orders``
+        which delegates to ``core.set_node_multi_attr``. That helper's
+        clear-then-write contract (M2.4a refinement 2) calls
+        ``cmds.removeMultiInstance`` per index — and removeMultiInstance
+        TEARS DOWN any incoming connection. The M_ENC_AUTOPIPE fix
+        (commit 673ab13) had wired ``driver.rotateOrder ->
+        shape.driverInputRotateOrder[d]`` as a LIVE connection so the
+        C++ ``applyEncodingToBlock`` (cpp:1464-1483 / 2606-2624) reads
+        the right rotate-order at every evaluation. The clear-then-
+        write self-heal silently demoted those live connections to
+        static 0 (XYZ); for any non-XYZ driver under a non-Raw
+        encoding (Quaternion / BendRoll / ExpMap / SwingTwist) the
+        Euler -> Quaternion preconversion picked the wrong rotation
+        order and the driven outputs jumped on every viewport change.
+        Raw encoding short-circuits the rotate-order read in
+        applyEncodingToBlock and was not affected — matching the
+        user-reported "Raw 正常 + 其他编码乱跳" symptom verbatim.
+
+        Path C fix: replace the static write-back with a call into
+        ``core.auto_resolve_generic_rotate_orders`` — the same helper
+        that establishes the live connection in the first place. It
+        internally:
+
+          * For Raw / Quaternion encodings (rotate-order-independent
+            in C++), clears ``driverInputRotateOrder[]`` via the
+            transactional helper. Live connections are not relevant
+            here so the clear is correct.
+          * For BendRoll / ExpMap / SwingTwist encodings, walks
+            driverSource[] and ``connectAttr force=True`` per source
+            — re-establishing or refreshing each
+            ``driver.rotateOrder -> driverInputRotateOrder[d]`` live
+            connection. The force=True flag turns this into an
+            idempotent "ensure connection" without an intermediate
+            removeMultiInstance.
+
+        Length self-heal (the original purpose) is now an emergent
+        property of auto_resolve walking the live driverSource list:
+        new sources get a fresh connection, removed sources leave
+        their stale rotate-order slot which the next clear-on-bypass
+        cycle (Raw/Quat) cleans up. The TD-visible behaviour matches
+        what M_ROTORDER_UI_REFACTOR contracted; the Bug-1 mechanism
+        is the only thing removed.
+
+        Returns True iff the auto-resolve was invoked (test hook).
+        """
+        if not self._current_node:
+            return False
+        try:
+            shape = core.get_shape(self._current_node)
+        except Exception:
+            return False
+        if not shape:
+            return False
+        try:
+            encoding = int(cmds.getAttr(shape + ".inputEncoding"))
+        except Exception:
+            encoding = 0
+        try:
+            core.auto_resolve_generic_rotate_orders(
+                self._current_node, encoding)
+        except Exception as exc:
+            cmds.warning(
+                "_resync_rotate_order_length: auto-resolve failed "
+                "for {!r}: {}".format(self._current_node, exc))
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # M_DRIVEN_MULTI - multi-driven path A wiring (Item 4c)
@@ -352,14 +516,24 @@ class MainController(QtCore.QObject):
             cmds.warning("remove_driven_source: no current node")
             return False
         from RBFtools.ui.i18n import tr
+        # M_P0_TAB_REMOVE_SPARSE_FIX: list-pos -> sparse translation
+        # before the confirm dialog so a stale view index aborts
+        # cleanly. Driven mirror of remove_driver_source.
+        multi_idx = self._list_idx_to_sparse("driven", index)
+        if multi_idx is None:
+            cmds.warning(
+                "remove_driven_source: list_idx {} out of range "
+                "or no current node".format(index))
+            return False
         proceed = self.ask_confirm(
             action_id="remove_driven_source",
             title=tr("title_remove_driven_source"),
-            summary=tr("summary_remove_driven_source"))
+            summary=tr("summary_remove_driven_source"),
+            preview_text="")
         if not proceed:
             return False
         try:
-            core.remove_driven_source(self._current_node, int(index))
+            core.remove_driven_source(self._current_node, multi_idx)
         except Exception as exc:
             cmds.warning(
                 "remove_driven_source failed: {}".format(exc))
@@ -374,9 +548,15 @@ class MainController(QtCore.QObject):
             cmds.warning(
                 "disconnect_driven_source_attrs: no current node")
             return False
+        multi_idx = self._list_idx_to_sparse("driven", index)
+        if multi_idx is None:
+            cmds.warning(
+                "disconnect_driven_source_attrs: list_idx {} out "
+                "of range".format(index))
+            return False
         try:
             ok = core.disconnect_driven_source_attrs(
-                self._current_node, int(index),
+                self._current_node, multi_idx,
                 attrs=list(attrs) if attrs else None)
         except Exception as exc:
             cmds.warning(
@@ -392,9 +572,15 @@ class MainController(QtCore.QObject):
         if not self._current_node:
             cmds.warning("set_driven_source_attrs: no current node")
             return False
+        multi_idx = self._list_idx_to_sparse("driven", index)
+        if multi_idx is None:
+            cmds.warning(
+                "set_driven_source_attrs: list_idx {} out of "
+                "range".format(index))
+            return False
         try:
             ok = core.set_driven_source_attrs(
-                self._current_node, int(index), list(new_attrs))
+                self._current_node, multi_idx, list(new_attrs))
         except Exception as exc:
             cmds.warning(
                 "set_driven_source_attrs failed: {}".format(exc))
@@ -644,7 +830,8 @@ class MainController(QtCore.QObject):
             proceed = self.ask_confirm(
                 action_id="mirror_multi_source_info",
                 title=tr("title_mirror_multi_source"),
-                summary=tr("summary_mirror_multi_source"))
+                summary=tr("summary_mirror_multi_source"),
+                preview_text="")
             if not proceed:
                 return None
 
@@ -1123,7 +1310,7 @@ class MainController(QtCore.QObject):
             prog.end(tr("status_alias_done"))
         return result
 
-    def ask_confirm(self, title, summary, preview_text, action_id):
+    def ask_confirm(self, title, summary, preview_text="", action_id=""):
         """Synchronous user-confirmation prompt (addendum §M3.0).
 
         Returns True if the user clicked OK (or had previously silenced
@@ -1131,6 +1318,24 @@ class MainController(QtCore.QObject):
         Sub-tasks call this instead of importing ConfirmDialog
         directly — keeps MVC clean and centralises the parent-widget
         wiring.
+
+        M_P0_REMOVE_TAB_FIX (2026-04-30): ``preview_text`` and
+        ``action_id`` carry empty-string defaults so destructive ops
+        with no diff to preview (e.g. ``remove_driver_source`` /
+        ``remove_driven_source``) can omit them safely. ConfirmDialog
+        already coerces an empty / None preview to "" internally —
+        the defaults here close the historical drift between this
+        signature (introduced as 4-strict-positional in M3.0) and
+        the M_UIRECONCILE-era callers that only passed three kwargs,
+        which silently raised ``TypeError`` inside Qt slot dispatch
+        and made the tab-close X look unresponsive.
+
+        Defence in depth: the per-callsite fixes at lines 257 / 419 /
+        708 explicitly pass ``preview_text=""`` so a future signature
+        revert cannot silently re-introduce the same drift; the
+        defaults here are the catch-all guard. Lesson #6 — "call-site
+        contract drift static-grep cannot catch needs an AST guard"
+        — is implemented by T_REMOVE_TAB_CONFIRM_CONTRACT (e).
         """
         from RBFtools.ui.widgets.confirm_dialog import ConfirmDialog
         return ConfirmDialog.confirm(
@@ -1157,6 +1362,61 @@ class MainController(QtCore.QObject):
             core.set_node_multi_attr(self._current_node, attr, value)
         else:
             core.set_node_attr(self._current_node, attr, value)
+
+    # =================================================================
+    #  M_ENC_AUTOPIPE - inputEncoding side-effect: auto-derive
+    #  driverInputRotateOrder[] from connected drivers (Generic mode).
+    # =================================================================
+
+    def on_input_encoding_changed(self, idx):
+        """Side-effect slot for the inputEncoding combo (rbf_section
+        emits ``inputEncodingChanged`` immediately after the regular
+        ``attributeChanged`` write).
+
+        Generic-mode TDs expect "select an encoding -> RBF compute
+        uses it" with zero manual setup. The C++ math chain
+        (RBFtools.cpp:1182 + 2606-2624 + 3135) consumes
+        ``driverInputRotateOrder[]`` for BendRoll / ExpMap /
+        SwingTwist; without an auto-derive step the array stays
+        empty and the C++ falls back to xyz=0 for all drivers,
+        silently mis-encoding any non-XYZ joint.
+
+        :func:`core.auto_resolve_generic_rotate_orders` walks the
+        currently connected ``driverSource[]`` entries and
+        force-connects each ``driver_node.rotateOrder`` so the array
+        tracks the live driver topology. Emitting
+        :attr:`driverSourcesChanged` after the derive forces the
+        rbf_section list editor to reload from the now-populated
+        multi via its existing ``set_values`` path.
+        """
+        if not self._current_node:
+            return
+        try:
+            core.auto_resolve_generic_rotate_orders(
+                self._current_node, int(idx))
+        except Exception as exc:
+            cmds.warning(
+                "on_input_encoding_changed: auto-derive failed: "
+                "{}".format(exc))
+            return
+        # M_P1_ENC_COMBO_FIX: emit a NARROW signal carrying the
+        # freshly-derived rotate-order list. The earlier
+        # _load_settings() cascade re-emitted settingsLoaded which
+        # round-tripped through rbf_section.load() — that path
+        # called setCurrentIndex() on the inputEncoding combo from
+        # data.get("inputEncoding", 0), and because get_all_settings
+        # historically omitted the inputEncoding key the default 0
+        # bounced the combo back to Raw immediately after the user
+        # picked SwingTwist (TD repro 2026-04-29).
+        # The narrow signal touches ONLY the rotate-order editor;
+        # the combo selection that fired this slot is left alone.
+        try:
+            values = list(core.read_driver_rotate_orders(
+                self._current_node) or [])
+        except Exception:
+            values = []
+        self.rotateOrderEditorReload.emit(values)
+        self.driverSourcesChanged.emit()
 
     # =================================================================
     #  3. Kernel / radius interactions
@@ -1235,17 +1495,90 @@ class MainController(QtCore.QObject):
             self.editorLoaded.emit()
             return
 
-        # Discover wiring
-        driver_node, driver_attrs = core.read_driver_info(node)
-        driven_node, driven_attrs = core.read_driven_info(node)
+        # M_P0_LOAD_EDITOR_MULTI (2026-04-30): use multi-source
+        # readers to match main_window._gather_role_info's flatten
+        # contract. The DEPRECATED legacy single-source readers
+        # truncated to driverSource[0] only, causing
+        # pose_model.n_inputs to mismatch the view layer (e.g. 4 vs
+        # 8 with 2 driver sources), which produced two cascading
+        # symptoms reported by the user:
+        #   - read_all_poses returns rows with the FULL multi-
+        #     source dimension (e.g. 8 inputs across 2 driverSource
+        #     entries), but setup_columns was configured with the
+        #     truncated single-source count (4). The first
+        #     pose_model.add_pose raised "Input dimension mismatch:
+        #     expected 4, got 8", _load_editor aborted before
+        #     editorLoaded.emit, and the view-side cascade never
+        #     fired — pose grid stayed blank ("切换 RBF 节点后
+        #     pose 信息全部消失").
+        #   - After the partial abort, pose_model.n_inputs retained
+        #     the previous node's truncated value. The next UI
+        #     add_pose (which already walks the multi readers via
+        #     _gather_role_info) then compared its 8-attr count
+        #     against the stale n_inputs=4 and rejected with
+        #     "Driver attribute count (8) differs from existing
+        #     poses (4)" — the verbatim warning the user saw.
+        # Path A fix: read via the multi-source helpers and flat-
+        # concat their attrs. Dimensions exactly match what
+        # read_all_poses produces and what main_window
+        # _gather_role_info hands the controller's add_pose path.
+        # Complementary to M_P0_NODE_SWITCH_POSE_GRID (41f3e47):
+        # that commit closed the editorLoaded -> _refresh_pose_grid
+        # leg in the view layer; this commit closes the data-
+        # shape leg in the controller. Both are necessary.
+        # NOTE: alias-path callsites at line 1218 / 1292 (and a
+        # handful of others — 826 / 838 / 931 / 932 / 1757) still
+        # use the legacy single-source readers. They are recorded
+        # technical debt; deferring to an independent
+        # M_ALIAS_MULTI_AWARE sub-task keeps this commit's blast
+        # radius scoped to the user-reported failure.
+        try:
+            drv_sources = list(
+                core.read_driver_info_multi(node))
+        except Exception:
+            drv_sources = []
+        try:
+            dvn_sources = list(
+                core.read_driven_info_multi(node))
+        except Exception:
+            dvn_sources = []
+        driver_node = drv_sources[0].node if drv_sources else ""
+        driven_node = dvn_sources[0].node if dvn_sources else ""
+        driver_attrs = [a for src in drv_sources for a in src.attrs]
+        driven_attrs = [a for src in dvn_sources for a in src.attrs]
 
         # Configure columns (resets model)
         self._pose_model.setup_columns(driver_attrs, driven_attrs)
 
-        # Load poses
+        # Load poses — M_P0_POSE_GRID_DEEP_FIX (2026-04-30):
+        # per-pose try/except so a single malformed pose (e.g. a
+        # v5-pre-multi node with 4-dim poseInput vs the now 8-dim
+        # setup_columns) does NOT abort the whole loop and leave
+        # editorLoaded.emit unfired. The view-side cascade
+        # (41f3e47's _refresh_pose_grid + driver / driven tab
+        # rebuilds wired at 1249 / 1270) hard-depends on the
+        # signal landing — without it the user sees a blank pose
+        # grid AND blank driver/driven tabs even though
+        # _pose_model.setup_columns succeeded above. Per-pose
+        # warnings make the partial-load visible in the Script
+        # Editor so the TD knows to re-Apply on the current
+        # multi-source schema.
         poses = core.read_all_poses(node)
+        skipped = 0
         for p in poses:
-            self._pose_model.add_pose(p)
+            try:
+                self._pose_model.add_pose(p)
+            except ValueError as exc:
+                cmds.warning(
+                    "_load_editor: skipping malformed pose "
+                    "{!r}: {}".format(
+                        getattr(p, "index", "?"), exc))
+                skipped += 1
+        if skipped:
+            cmds.warning(
+                "_load_editor: {} pose(s) skipped due to "
+                "dimension mismatch — node may need re-Apply on "
+                "the current multi-source schema.".format(skipped))
 
         self.editorLoaded.emit()
 

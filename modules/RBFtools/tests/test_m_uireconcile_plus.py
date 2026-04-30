@@ -192,6 +192,8 @@ class TestM_UIRECONCILE_PLUS_ControllerSignal(unittest.TestCase):
         ctrl = MainController.__new__(MainController)
         ctrl._current_node = "RBF1"
         ctrl.driverSourcesChanged = mock.MagicMock()
+        # M_P0_TAB_REMOVE_SPARSE_FIX passthrough.
+        ctrl._list_idx_to_sparse = lambda role, idx: int(idx)
         return ctrl
 
     def test_emits_signal_on_success(self):

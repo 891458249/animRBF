@@ -351,6 +351,26 @@ def get_all_settings(node):
         "drawTwist":            g(shape + ".drawTwist",            False),
         "opposite":             g(shape + ".opposite",             False),
         "driverIndex":          g(shape + ".driverIndex",          0),
+        # M_P1_ENC_COMBO_FIX (2026-04-29) — 7 M2.x fields previously
+        # absent from the UI reload dict. Their absence forced
+        # rbf_section.load() to fall back to data.get(<key>, default)
+        # for every reload, surfacing as the "inputEncoding combo
+        # bounces back to Raw after pick" repro once enc-1
+        # (M_ENC_AUTOPIPE) added a post-write _load_settings cascade
+        # — and as the latent "node-switch shows wrong combo value"
+        # bug for every other M2.x field listed here.
+        # Keys mirror the C++ short attr names exactly (same
+        # convention as the rest of this dict). Defaults match each
+        # attribute's C++ schema default at RBFtools.cpp.
+        "inputEncoding":        g(shape + ".inputEncoding",        0),
+        "clampEnabled":         g(shape + ".clampEnabled",         False),
+        "clampInflation":       g(shape + ".clampInflation",       0.0),
+        "regularization":       g(shape + ".regularization",       1.0e-8),
+        "solverMethod":         g(shape + ".solverMethod",         0),
+        "driverInputRotateOrder":
+            read_driver_rotate_orders(node) or [],
+        "outputQuaternionGroupStart":
+            read_quat_group_starts(node) or [],
     }
 
 
@@ -2864,7 +2884,40 @@ def read_all_poses(node):
     except Exception:
         n_outputs = 0
 
+    # M_P0_POSE_GRID_DEEP_FIX (2026-04-30): fallback to multi-source
+    # metadata when wiring arrays are absent. shape.output[] is only
+    # populated when the user clicks Connect — an "Applied but not
+    # Connected" node has shape.poses[] populated AND the pose data
+    # is structurally sound, but ``cmds.getAttr(shape+".output",
+    # size=True)`` returns 0. The pre-fix early-return rejected
+    # such nodes as "no poses" and was the core read-side mechanism
+    # behind the user's "切换 RBF 节点 pose 信息全部消失" report
+    # (compounding 41f3e47 + 5799958 fixes which only addressed
+    # the view-timing and controller-data-shape legs).
+    #
+    # driverSource[] / drivenSource[] metadata always carries the
+    # intended attr count regardless of wiring state — read its
+    # flat-concat length as the reliable n_inputs / n_outputs when
+    # the input / output multi sizes are zero. Symmetric on both
+    # sides: an Applied-only node has populated driverSource[] but
+    # may have unwired output; a Connected-but-not-Applied node is
+    # the legitimate empty case.
+    if n_inputs == 0:
+        try:
+            drv_sources = read_driver_info_multi(node)
+            n_inputs = sum(len(s.attrs) for s in drv_sources)
+        except Exception:
+            n_inputs = 0
+    if n_outputs == 0:
+        try:
+            dvn_sources = read_driven_info_multi(node)
+            n_outputs = sum(len(s.attrs) for s in dvn_sources)
+        except Exception:
+            n_outputs = 0
+
     if n_inputs == 0 or n_outputs == 0:
+        # True empty node — neither wiring nor metadata exists.
+        # Legitimate "node created but never configured" case.
         return []
 
     pose_indices = _multi_indices(shape, "poses")
@@ -3404,6 +3457,106 @@ def write_driver_rotate_orders(node, values):
     set_node_multi_attr(node, "driverInputRotateOrder", list(values or []))
 
 
+# M_ENC_AUTOPIPE: encoding indices that consume per-driver-group
+# rotateOrder in C++ applyEncodingToBlock (RBFtools.cpp:2606-2624 +
+# encodeEulerToQuaternion at cpp:3135). Raw (0) bypasses encoding;
+# Quaternion (1) consumes pre-encoded 4-tuples and is rotateOrder-
+# independent. BendRoll (2) / ExpMap (3) / SwingTwist (4) all need
+# rotateOrder for the Euler→Quaternion preconversion.
+_ENCODINGS_NEED_ROTATE_ORDER = (2, 3, 4)
+
+
+def auto_resolve_generic_rotate_orders(node, encoding):
+    """M_ENC_AUTOPIPE: derive driverInputRotateOrder[] from currently
+    connected driverSource[] entries when the user switches Generic
+    inputEncoding to a rotateOrder-consuming mode.
+
+    Encoding semantics (mirrors C++ applyEncodingToBlock dispatch):
+
+      * ``encoding`` in ``{0, 1}`` (Raw / Quaternion) -> clear the
+        multi.  Raw bypasses encoding entirely; Quaternion consumes
+        pre-encoded 4-tuples and is rotateOrder-independent. The
+        clear keeps scene state honest so a later switch to ExpMap
+        rederives from the live driver topology rather than
+        re-using stale entries from a prior encoding.
+
+      * ``encoding`` in ``{2, 3, 4}`` (BendRoll / ExpMap / SwingTwist)
+        -> walk ``driverSource[]`` and connect each
+        ``driver_node.rotateOrder`` ->
+        ``shape.driverInputRotateOrder[idx]`` via the existing
+        :func:`_resolve_driver_rotate_order` helper. ``idx`` matches
+        the driverSource sparse multi index so per-source ordering is
+        preserved across re-derivations.
+
+    Matrix mode is left untouched: ``add_driver_source`` already
+    wires the rotateOrder at add time (cpp:1264) and the C++ math
+    chain for Matrix mode reads the same array.
+
+    No-op when the node has no driverSource entries or when the
+    shape cannot be resolved.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    # Clear-on-bypass branch (encodings that don't consume rotateOrder).
+    if int(encoding) not in _ENCODINGS_NEED_ROTATE_ORDER:
+        try:
+            existing = cmds.getAttr(
+                shape + ".driverInputRotateOrder",
+                multiIndices=True) or []
+        except Exception:
+            existing = []
+        if not existing:
+            return
+        # Best-effort disconnect of upstream .rotateOrder feeders before
+        # the multi clear so the connection layer doesn't leak into the
+        # next derivation. write_driver_rotate_orders ([]) below is the
+        # transactional clear.
+        for i in existing:
+            plug = "{}.driverInputRotateOrder[{}]".format(shape, i)
+            try:
+                srcs = cmds.listConnections(
+                    plug, source=True, destination=False,
+                    plugs=True) or []
+            except Exception:
+                srcs = []
+            for src in srcs:
+                try:
+                    cmds.disconnectAttr(src, plug)
+                except Exception:
+                    pass
+        try:
+            write_driver_rotate_orders(node, [])
+        except Exception:
+            pass
+        return
+    # Auto-derive branch. Walk driverSource[] (sparse multi) and connect
+    # rotateOrder per source.
+    try:
+        ds_indices = cmds.getAttr(
+            shape + ".driverSource", multiIndices=True) or []
+    except Exception:
+        ds_indices = []
+    for d in ds_indices:
+        node_plug = "{}.driverSource[{}].driverSource_node".format(
+            shape, d)
+        try:
+            conns = cmds.listConnections(
+                node_plug, source=True, destination=False) or []
+        except Exception:
+            conns = []
+        if not conns:
+            continue
+        driver_node = conns[0]
+        try:
+            _resolve_driver_rotate_order(shape, driver_node, d)
+        except Exception as exc:
+            cmds.warning(
+                "auto_resolve_generic_rotate_orders: failed for "
+                "driverSource[{}] driver={!r}: {}".format(
+                    d, driver_node, exc))
+
+
 def read_quat_group_starts(node):
     """Return ``outputQuaternionGroupStart[]`` as an ordered int list."""
     shape = get_shape(node)
@@ -3615,71 +3768,114 @@ def apply_poses(node, driver_node, driven_node,
         cmds.warning(
             "Upgrading node {} to v5 baseline schema".format(shape))
 
-    with undo_chunk("RBFtools: apply poses"):
-        # 1 — clear stale data (including any prior baseline arrays)
-        clear_node_data(node)
+    # M_P0_APPLY_NODESTATE_FIX (2026-04-30) — D-path instrumentation:
+    # each fatal step (1, 2, 4, 5, 7) is wrapped in its own try/except
+    # that records `failed_step` then re-raises so partial-apply isn't
+    # masked. The advisory steps (3, 6) keep their original swallow-
+    # and-warn behaviour. Step 8 (nodeState 2 -> 0 unblock) is moved
+    # OUTSIDE the with-undo_chunk into a finally clause so it runs
+    # whether the body succeeded or raised — without this the user-
+    # reported "Apply 后 Node State 仍 Blocking + 无 warning" repro
+    # surfaces because step 4/5 raised inside the original
+    # with-undo_chunk and the entire Step 8 block was unwound past.
+    apply_succeeded = False
+    failed_step = None
+    try:
+        with undo_chunk("RBFtools: apply poses"):
+            # 1 — clear stale data (including any prior baseline arrays)
+            try:
+                clear_node_data(node)
+            except Exception:
+                failed_step = "1 (clear_node_data)"
+                raise
 
-        # 2 — write pose data (packed sequential indices)
-        for seq_idx, pose in enumerate(poses):
-            _write_pose_to_node(shape, seq_idx, pose)
+            # 2 — write pose data (packed sequential indices)
+            try:
+                for seq_idx, pose in enumerate(poses):
+                    _write_pose_to_node(shape, seq_idx, pose)
+            except Exception:
+                failed_step = "2 (_write_pose_to_node)"
+                raise
 
-        # 3 — M2.5: per-pose SwingTwist decomposition cache. Populated
-        # for SwingTwist-encoded nodes (encoding == 4); other encodings
-        # write defaults (poseSigma = -1.0 sentinel = "cache not
-        # populated"). Cache is derived state — NOT in the JSON schema
-        # (addendum §M2.5 Cache vs Schema Boundary Contract).
-        # Failures emit warnings; cache miss falls back to live decompose
-        # in compute() (forward-compat to the M2.5b/M5 consumer).
-        try:
-            write_pose_swing_twist_cache(node, poses)
-        except Exception as exc:
-            cmds.warning(
-                "apply_poses: SwingTwist cache step failed: {} "
-                "(continuing — cache miss falls back to live decompose)"
-                .format(exc))
+            # 3 — M2.5: per-pose SwingTwist decomposition cache.
+            # Populated for SwingTwist-encoded nodes (encoding == 4);
+            # other encodings write defaults (poseSigma = -1.0
+            # sentinel = "cache not populated"). Cache is derived
+            # state — NOT in the JSON schema (addendum §M2.5 Cache
+            # vs Schema Boundary Contract). Failures emit warnings;
+            # cache miss falls back to live decompose in compute()
+            # (forward-compat to the M2.5b/M5 consumer).
+            try:
+                write_pose_swing_twist_cache(node, poses)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses step 3 (SwingTwist cache) failed: "
+                    "{} (continuing — cache miss falls back to "
+                    "live decompose)".format(exc))
 
-        # 4 — capture + write per-output baselines. pose[0] is the
-        # preferred source when it is a rest row (all driver inputs 0);
-        # otherwise the current scene value is used. Scale channels
-        # always anchor at 1.0. See v5 addendum 2026-04-24 §M1.2.
-        baselines = capture_output_baselines(
-            driven_node, driven_attrs, poses=poses)
-        write_output_baselines(node, baselines)
+            # 4 — capture + write per-output baselines. pose[0] is
+            # the preferred source when it is a rest row (all driver
+            # inputs 0); otherwise the current scene value is used.
+            # Scale channels always anchor at 1.0. See v5 addendum
+            # 2026-04-24 §M1.2.
+            try:
+                baselines = capture_output_baselines(
+                    driven_node, driven_attrs, poses=poses)
+                write_output_baselines(node, baselines)
+            except Exception:
+                failed_step = "4 (capture/write_output_baselines)"
+                raise
 
-        # 5 — M2.3: replay each pose through driven_node and snapshot
-        # its local Transform for engine-side consumption (PART D.5 /
-        # 铁律 B10). Single-sever / single-restore lifecycle keeps the
-        # scene clean. Non-driven channels are frozen at Apply-time
-        # scene state — users should reset driven_node to rest before
-        # Apply. See v5 addendum 2026-04-24 §M2.3.
-        local_xforms = capture_per_pose_local_transforms(
-            driven_node, driven_attrs, poses)
-        write_pose_local_transforms(node, local_xforms)
+            # 5 — M2.3: replay each pose through driven_node and
+            # snapshot its local Transform for engine-side
+            # consumption (PART D.5 / 铁律 B10). Single-sever /
+            # single-restore lifecycle keeps the scene clean.
+            # Non-driven channels are frozen at Apply-time scene
+            # state — users should reset driven_node to rest before
+            # Apply. See v5 addendum 2026-04-24 §M2.3.
+            try:
+                local_xforms = capture_per_pose_local_transforms(
+                    driven_node, driven_attrs, poses)
+                write_pose_local_transforms(node, local_xforms)
+            except Exception:
+                failed_step = "5 (capture/write_pose_local_transforms)"
+                raise
 
-        # 6 — M3.7: auto-generate human-readable aliases on input[] /
-        # output[] multi plugs. Preserves user-set aliases (E.1).
-        # Failures emit warnings but never break the Apply chain — see
-        # core_alias module docstring for the write-boundary contract.
-        try:
-            auto_alias_outputs(node, driver_attrs, driven_attrs,
-                               force=False)
-        except Exception as exc:
-            cmds.warning(
-                "apply_poses: auto-alias step failed: {} "
-                "(continuing — aliases are advisory)".format(exc))
+            # 6 — M3.7: auto-generate human-readable aliases on
+            # input[] / output[] multi plugs. Preserves user-set
+            # aliases (E.1). Failures emit warnings but never break
+            # the Apply chain — see core_alias module docstring for
+            # the write-boundary contract.
+            try:
+                auto_alias_outputs(node, driver_attrs, driven_attrs,
+                                   force=False)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses step 6 (auto-alias) failed: {} "
+                    "(continuing — aliases are advisory)".format(exc))
 
-        # 7 — trigger evaluation cycle
-        cmds.setAttr(shape + ".evaluate", 0)
-        cmds.setAttr(shape + ".evaluate", 1)
+            # 7 — trigger evaluation cycle
+            try:
+                cmds.setAttr(shape + ".evaluate", 0)
+                cmds.setAttr(shape + ".evaluate", 1)
+            except Exception:
+                failed_step = "7 (evaluate trigger)"
+                raise
 
-        # 8 — M_BLOCKING_DEFAULT (2026-04-29): unblock the node so
-        # compute() outputs reach driven channels. create_node()
-        # forces nodeState=2 (Blocking) on creation so an
-        # untrained RBF cannot misdrive the rig; the FIRST Apply
-        # is the contract point that flips it to nodeState=0
-        # (Normal). Idempotent on subsequent Applies — already-
-        # Normal nodes stay Normal. cmds.warning fires only on the
-        # 2->0 transition so the TD knows the node went live.
+            apply_succeeded = True
+    finally:
+        # 8 — M_BLOCKING_DEFAULT (2026-04-29) + M_P0_APPLY_NODESTATE_FIX
+        # (2026-04-30): unblock the node. create_node() forces
+        # nodeState=2 (Blocking) on creation so an untrained RBF cannot
+        # misdrive the rig; the FIRST Apply is the contract point that
+        # flips it to nodeState=0 (Normal). Idempotent on subsequent
+        # Applies. The finally placement guarantees the flip even if a
+        # prior step raised — without that guarantee the user-reported
+        # repro surfaces (Apply raised silently inside the
+        # with-undo_chunk, Step 8 was unwound past, and the node stayed
+        # in Blocking with no UI cue). The success vs partial-apply
+        # warning text discriminates so the TD can act on the right
+        # signal.
         try:
             current_state = cmds.getAttr(shape + ".nodeState")
         except Exception:
@@ -3687,15 +3883,24 @@ def apply_poses(node, driver_node, driven_node,
         if int(current_state) != 0:
             try:
                 cmds.setAttr(shape + ".nodeState", 0)
-                cmds.warning(
-                    "RBFtools: nodeState 2 (Blocking) -> 0 "
-                    "(Normal). RBF outputs now active on the "
-                    "driven channels.")
+                if apply_succeeded:
+                    cmds.warning(
+                        "RBFtools: nodeState 2 (Blocking) -> 0 "
+                        "(Normal). RBF outputs now active on the "
+                        "driven channels.")
+                else:
+                    cmds.warning(
+                        "RBFtools: Apply raised inside step {} — "
+                        "nodeState forced 2 -> 0 (Normal) so the "
+                        "node is live, but POSE STATE MAY BE "
+                        "PARTIAL. Review the Script Editor for the "
+                        "prior error and re-run Apply once the "
+                        "underlying issue is fixed.".format(
+                            failed_step or "<unknown>"))
             except Exception as exc:
                 cmds.warning(
                     "apply_poses: failed to flip nodeState to 0: "
-                    "{} (TD must set Normal manually).".format(
-                        exc))
+                    "{} (TD must set Normal manually).".format(exc))
 
 
 def connect_poses(node, driver_node, driven_node,

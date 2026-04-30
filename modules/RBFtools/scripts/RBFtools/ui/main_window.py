@@ -62,7 +62,7 @@ from RBFtools.ui.widgets.vector_angle_section import VectorAngleSection
 from RBFtools.ui.widgets.rbf_section import RBFSection
 from RBFtools.ui.widgets.collapsible import CollapsibleFrame
 from RBFtools.ui.widgets.attribute_list import AttributeList
-from RBFtools.ui.widgets.help_button import HelpButton
+from RBFtools.ui.widgets.help_button import HelpButton, ComboHelpButton
 
 
 # =====================================================================
@@ -91,6 +91,10 @@ class _PoseEditorPanel(CollapsibleFrame):
     # more flat_attr_idx). poseRadiusChanged + BasePose triplet
     # added for the M_PER_POSE_SIGMA + M_BASE_POSE wires.
     poseRecallRequested      = QtCore.Signal(int)
+    # M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): per-row Update button
+    # forwards through the panel as a distinct channel — pre-fix
+    # the click was misrouted through poseRecallRequested.
+    poseUpdateRequested      = QtCore.Signal(int)
     poseDeleteRequested      = QtCore.Signal(int)
     poseDeleteAllRequested   = QtCore.Signal()
     poseValueChangedV2       = QtCore.Signal(int, str, int, str, float)
@@ -120,6 +124,13 @@ class _PoseEditorPanel(CollapsibleFrame):
         # the pose table + the Add/Apply/Connect/Disconnect/Reload
         # action buttons.
         self._outer_tabs = QtWidgets.QTabWidget()
+        # M_HELPBUBBLE_BATCH: top-right corner HelpButton describing
+        # the three outer tabs together (DriverDriven / BaseDrivenPose
+        # / Pose). One bubble covers the navigation overview; the
+        # per-button HelpButtons inside each tab cover the widgets.
+        self._outer_tabs.setCornerWidget(
+            HelpButton("outer_tabs_overview"),
+            QtCore.Qt.TopRightCorner)
         lay.addWidget(self._outer_tabs, 1)
 
         # ---- Tab 1: DriverDriven ---------------------------------
@@ -229,6 +240,8 @@ class _PoseEditorPanel(CollapsibleFrame):
             self._on_grid_delete_all_poses)
         self._pose_grid.poseRecallRequested.connect(
             self._on_grid_recall_pose)
+        self._pose_grid.poseUpdateRequested.connect(
+            self._on_grid_update_pose)
         self._pose_grid.poseDeleteRequested.connect(
             self._on_grid_delete_pose)
         self._pose_grid.poseValueChangedV2.connect(
@@ -264,6 +277,13 @@ class _PoseEditorPanel(CollapsibleFrame):
 
     def _on_grid_recall_pose(self, pose_index):
         self.poseRecallRequested.emit(int(pose_index))
+
+    def _on_grid_update_pose(self, pose_index):
+        # M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): re-emit the
+        # per-row Update button click at the panel level so
+        # main_window can dispatch ctrl.update_pose. Distinct
+        # channel from poseRecallRequested.
+        self.poseUpdateRequested.emit(int(pose_index))
 
     def _on_grid_delete_pose(self, pose_index):
         self.poseDeleteRequested.emit(int(pose_index))
@@ -669,6 +689,22 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         _oe_row = QtWidgets.QHBoxLayout()
         _oe_row.addWidget(QtWidgets.QLabel(tr("output_encoding_label")))
         _oe_row.addWidget(self._output_encoding_combo, 1)
+        # M_P1_ENC_COMBO_FIX (2026-04-29): per-encoding ComboHelpButton
+        # so the bubble describes ONLY the currently-selected output
+        # encoding (Euler / Quaternion / ExpMap) instead of the merged
+        # 3-section blob. Mirrors the input-encoding combo paradigm
+        # (rbf_section.py:237 + M_HELPTEXT_ENC_PER_KEY). The plain
+        # HelpButton("output_encoding") added in M_HELPBUBBLE_BATCH
+        # (enc-2 / 6528211) is replaced because the ComboHelpButton
+        # constructor must receive the combo directly to subscribe
+        # to its currentIndexChanged + highlighted signals — this is
+        # only reachable as a sibling widget in the parent layout.
+        _oe_row.addWidget(ComboHelpButton(
+            self._output_encoding_combo, [
+                "output_enc_euler",
+                "output_enc_quaternion",
+                "output_enc_expmap",
+            ], fallback_key="output_encoding"))
         self._output_encoding_section.add_layout(_oe_row)
 
         # Phase 3 (Utility section 2026-04-27): below the pose
@@ -677,12 +713,20 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Connectionless Input/Output, Remove Redundant Pose).
         self._utility_section = CollapsibleFrame(
             tr("section_utility"), collapsed=True)
+        # M_HELPBUBBLE_BATCH: HelpButton next to Split RBFSolver.
+        _split_row = QtWidgets.QHBoxLayout()
         self._btn_split_solver = QtWidgets.QPushButton(
             tr("btn_split_solver_per_joint"))
         self._btn_split_solver.setToolTip(
             tr("btn_split_solver_per_joint_tip"))
-        self._utility_section.add_widget(self._btn_split_solver)
+        _split_row.addWidget(self._btn_split_solver, 1)
+        _split_row.addWidget(HelpButton("btn_split_solver_per_joint"))
+        self._utility_section.add_layout(_split_row)
         # Cleanup mode radio group + execute button.
+        # M_HELPBUBBLE_BATCH: ONE HelpButton at the end of the radio
+        # row covers all 3 cleanup modes + the Run button (the
+        # bubble walks through input / output / redundant-pose
+        # semantics together — they share the same execute path).
         cleanup_row = QtWidgets.QHBoxLayout()
         self._rb_cleanup_in = QtWidgets.QRadioButton(
             tr("rb_remove_connectionless_input"))
@@ -698,10 +742,14 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         cleanup_row.addWidget(self._rb_cleanup_in)
         cleanup_row.addWidget(self._rb_cleanup_out)
         cleanup_row.addWidget(self._rb_cleanup_pose)
+        cleanup_row.addWidget(HelpButton("cleanup_modes_overview"))
         self._utility_section.add_layout(cleanup_row)
+        _run_row = QtWidgets.QHBoxLayout()
         self._btn_run_cleanup = QtWidgets.QPushButton(
             tr("btn_remove_unnecessary_datas"))
-        self._utility_section.add_widget(self._btn_run_cleanup)
+        _run_row.addWidget(self._btn_run_cleanup, 1)
+        _run_row.addWidget(HelpButton("btn_remove_unnecessary_datas"))
+        self._utility_section.add_layout(_run_row)
 
         self._sections.addWidget(self._general)
         self._sections.addWidget(self._va_section)
@@ -1119,6 +1167,20 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._rbf_section.kernelChanged.connect(ctrl.on_kernel_changed)
         self._rbf_section.radiusTypeChanged.connect(ctrl.on_radius_type_changed)
         self._rbf_section.radiusEdited.connect(ctrl.on_radius_edited)
+        # M_ENC_AUTOPIPE: post-write side-effect — auto-derive
+        # driverInputRotateOrder[] from connected drivers when the
+        # user picks BendRoll / ExpMap / SwingTwist.
+        self._rbf_section.inputEncodingChanged.connect(
+            ctrl.on_input_encoding_changed)
+        # M_P1_ENC_COMBO_FIX: narrow rotate-order-editor reload that
+        # replaces the prior _load_settings cascade. The controller
+        # emits this signal AFTER auto_resolve_generic_rotate_orders
+        # with the freshly read values; the rbf_section repopulates
+        # only the OrderedEnumListEditor — combos and other M2.x
+        # widgets stay untouched, eliminating the inputEncoding
+        # combo bounce-back regression.
+        ctrl.rotateOrderEditorReload.connect(
+            self._rbf_section.set_rotate_order_values)
 
         # ---- Pose editor panel → handlers ----
         pe = self._pose_editor
@@ -1132,6 +1194,11 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         pe.autoFillChanged.connect(ctrl.set_auto_fill)
         # Phase 2 PoseGridEditor signals.
         pe.poseRecallRequested.connect(self._on_pose_grid_recall)
+        # M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): per-row Update
+        # button click -> ctrl.update_pose (snapshot viewport ->
+        # pose model). Distinct from poseRecallRequested
+        # (Go-to-Pose; pose -> viewport).
+        pe.poseUpdateRequested.connect(self._on_pose_grid_update)
         pe.poseDeleteRequested.connect(self._on_pose_grid_delete)
         pe.poseDeleteAllRequested.connect(
             self._on_pose_grid_delete_all)
@@ -1268,7 +1335,46 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._ctrl.delete_node()
 
     def _on_nodes_refreshed(self, names):
+        """M_P0_REFRESH_KEEPS_CURRENT (2026-04-30): the upstream
+        ``set_nodes`` rebuilds the combo from scratch (clear + re-
+        addItem with ``<None>`` at index 0), defaulting
+        ``currentIndex`` to 0. Without the restore call below, the
+        UI display drifts away from the controller's authoritative
+        ``_current_node`` and the user sees the combo blank-out on
+        every Refresh click — every downstream operation that
+        consults ``node_selector.current_node()`` then misreads
+        the active node as "none".
+
+        Idempotent fail-soft: if the saved node name is no longer
+        in the rebuilt list (e.g. the user deleted the node in the
+        outliner before clicking Refresh), ``set_current_node``'s
+        ``findText`` returns -1 and the call is a no-op. The combo
+        falls back to ``<None>`` cleanly without touching the
+        controller's ``_current_node`` — the controller only
+        learns about the deletion through the next user-initiated
+        node action.
+
+        Signal suppression: ``set_current_node`` calls
+        ``setCurrentIndex`` under the hood which would fire
+        ``currentTextChanged -> ctrl.on_node_changed`` with a name
+        that already equals ``ctrl._current_node`` — a spurious
+        trigger that re-runs ``_load_settings + _load_editor``
+        unnecessarily on every Refresh click. Wrapping the restore
+        in ``_combo.blockSignals`` suppresses the redundant cascade
+        without touching ``node_selector.py`` (the private access
+        is the pragmatic carve-out — adding a ``set_current_node_
+        silent`` public helper would be a wider API change).
+        """
         self._node_sel.set_nodes(names)
+        # Pragmatic private-member access (carve-out): keep
+        # node_selector.py untouched while still suppressing the
+        # currentTextChanged side-effect of the restore call.
+        combo = self._node_sel._combo
+        blocked = combo.blockSignals(True)
+        try:
+            self._node_sel.set_current_node(self._ctrl.current_node)
+        finally:
+            combo.blockSignals(blocked)
 
     # =================================================================
     #  Settings load
@@ -1553,6 +1659,26 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         drv_node, dvn_node, drv_attrs, dvn_attrs = (
             self._gather_role_info())
         self._ctrl.recall_pose(
+            int(pose_index), drv_node, dvn_node, drv_attrs, dvn_attrs)
+
+    def _on_pose_grid_update(self, pose_index):
+        """M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): per-row Update
+        button click -> ctrl.update_pose (re-capture current
+        viewport driver/driven values into the existing pose row).
+
+        Sibling to :meth:`_on_pose_grid_recall` (the inverse
+        Go-to-Pose path). Pre-fix the per-row Update button was
+        misrouted through poseRecallRequested + this same slot's
+        recall sibling, making the button literally function as a
+        second "Go to Pose" instead of as an Update.
+
+        Pose-index passes straight through to ctrl.update_pose's
+        ``row`` arg — the pose model's row order matches the
+        packed pose_index since :func:`apply_poses` writes
+        sequential indices."""
+        drv_node, dvn_node, drv_attrs, dvn_attrs = (
+            self._gather_role_info())
+        self._ctrl.update_pose(
             int(pose_index), drv_node, dvn_node, drv_attrs, dvn_attrs)
 
     def _on_pose_grid_delete(self, pose_index):
@@ -1991,6 +2117,13 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Phase 2: cascade the rebuild into the pose grid so its
         # column structure tracks the new driver source list.
         self._refresh_pose_grid()
+        # M_ROTORDER_UI_REFACTOR (2026-04-29): driver tabs are the
+        # single source of truth for the rotate-order list. Push
+        # the live driver-name list into rbf_section + run a one-
+        # shot self-heal to truncate / pad the persisted multi.
+        self._ctrl._resync_rotate_order_length()
+        self._rbf_section.set_driver_sources_for_rotate_order(
+            [s.node for s in sources])
 
     def _on_filters_changed(self, role, filters):
         """M_TABBED_EDITOR_INTEGRATION: filter UX lived on the
@@ -2022,6 +2155,21 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         for c in range(model.columnCount()):
             header.setSectionResizeMode(
                 c, QtWidgets.QHeaderView.Stretch)
+        # M_P0_NODE_SWITCH_POSE_GRID (2026-04-30): controller's
+        # _load_editor populates self._ctrl.pose_model from the new
+        # node's poses but the view's PoseGridEditor still needs
+        # an explicit rebuild to repaint rows. Without this call,
+        # switching the active node leaves the pose grid blank
+        # while the underlying model is correct — the user-
+        # reported "切换节点 pose 行不刷新" P0. Empty-node path
+        # (current_node="") is fine: _refresh_pose_grid passes
+        # ([], [], []) through to PoseGridEditor.set_data which
+        # clears the rows cleanly. The driver / driven editor
+        # rebuilds are already wired separately at line 1249 +
+        # 1270 (_reload_driver_sources / _reload_driven_sources);
+        # this completes the third leg of the editorLoaded
+        # cascade.
+        self._refresh_pose_grid()
 
     # =================================================================
     #  Pose CRUD (gather UI state → controller)
