@@ -1335,7 +1335,46 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._ctrl.delete_node()
 
     def _on_nodes_refreshed(self, names):
+        """M_P0_REFRESH_KEEPS_CURRENT (2026-04-30): the upstream
+        ``set_nodes`` rebuilds the combo from scratch (clear + re-
+        addItem with ``<None>`` at index 0), defaulting
+        ``currentIndex`` to 0. Without the restore call below, the
+        UI display drifts away from the controller's authoritative
+        ``_current_node`` and the user sees the combo blank-out on
+        every Refresh click — every downstream operation that
+        consults ``node_selector.current_node()`` then misreads
+        the active node as "none".
+
+        Idempotent fail-soft: if the saved node name is no longer
+        in the rebuilt list (e.g. the user deleted the node in the
+        outliner before clicking Refresh), ``set_current_node``'s
+        ``findText`` returns -1 and the call is a no-op. The combo
+        falls back to ``<None>`` cleanly without touching the
+        controller's ``_current_node`` — the controller only
+        learns about the deletion through the next user-initiated
+        node action.
+
+        Signal suppression: ``set_current_node`` calls
+        ``setCurrentIndex`` under the hood which would fire
+        ``currentTextChanged -> ctrl.on_node_changed`` with a name
+        that already equals ``ctrl._current_node`` — a spurious
+        trigger that re-runs ``_load_settings + _load_editor``
+        unnecessarily on every Refresh click. Wrapping the restore
+        in ``_combo.blockSignals`` suppresses the redundant cascade
+        without touching ``node_selector.py`` (the private access
+        is the pragmatic carve-out — adding a ``set_current_node_
+        silent`` public helper would be a wider API change).
+        """
         self._node_sel.set_nodes(names)
+        # Pragmatic private-member access (carve-out): keep
+        # node_selector.py untouched while still suppressing the
+        # currentTextChanged side-effect of the restore call.
+        combo = self._node_sel._combo
+        blocked = combo.blockSignals(True)
+        try:
+            self._node_sel.set_current_node(self._ctrl.current_node)
+        finally:
+            combo.blockSignals(blocked)
 
     # =================================================================
     #  Settings load
