@@ -326,30 +326,109 @@ class T_M_P0_INSTALLER_DARK_THEME(unittest.TestCase):
                 body.count('selectcolor=_DARK["bg"]')))
 
     def test_PERMANENT_n_log_scrollbar_uses_dark_palette(self):
-        # The pre-fix ScrolledText hid its Scrollbar inside the
-        # default ttk-style wrapper which defaults to OS-native
-        # white-on-grey. The post-fix uses an explicit tk.Frame +
-        # tk.Text + tk.Scrollbar so we can dial the trough +
-        # active background colours into the _DARK palette.
+        # M_P0_INSTALLER_DARK_TITLEBAR (2026-05-01) revision: the
+        # tk.Scrollbar approach (Round 1) honoured bg/troughcolor
+        # on Linux + macOS but NOT on Windows — the OS native
+        # widget renderer ignores those kwargs and renders a
+        # white thumb regardless. The fix moves to a
+        # ttk.Scrollbar driven by a style.configure block on the
+        # canonical "Vertical.TScrollbar" / "Horizontal.TScrollbar"
+        # style names. clam theme passes the colour kwargs through
+        # to the actual paint code instead of falling back to
+        # native chrome.
         body = self._gui_src.split(
             "def _build(self):"
         )[1].split("\n    def ")[0]
         self.assertIn(
-            "tk.Scrollbar(", body,
-            "_build MUST construct a raw tk.Scrollbar so its "
-            "trough / arrow / thumb colours are reachable via "
-            "kwargs (ttk-wrapped scrollbars default to OS "
-            "native white).")
+            "ttk.Scrollbar(", body,
+            "_build MUST construct a ttk.Scrollbar (NOT tk."
+            "Scrollbar) — on Windows the native tk.Scrollbar "
+            "renderer ignores bg / troughcolor and shows a white "
+            "thumb. The ttk path bypasses native chrome.")
         self.assertIn(
-            "troughcolor=_DARK[", body,
-            "Scrollbar MUST set troughcolor from _DARK so the "
-            "background channel of the scrollbar matches the "
-            "log panel.")
+            'style="Vertical.TScrollbar"', body,
+            "ttk.Scrollbar MUST point at the Vertical.TScrollbar "
+            "style name — that's what _apply_dark_theme's "
+            "style.configure call targets.")
+        # And the style block in _apply_dark_theme MUST exist.
+        theme_body = self._gui_src.split(
+            "def _apply_dark_theme(self):"
+        )[1].split("\n    def ")[0]
         self.assertIn(
-            "activebackground=_DARK[", body,
-            "Scrollbar MUST set activebackground from _DARK "
-            "so hovering the thumb stays inside the dark "
-            "palette.")
+            '"Vertical.TScrollbar"', theme_body,
+            "_apply_dark_theme MUST configure the "
+            "Vertical.TScrollbar style — without it ttk.Scrollbar "
+            "falls back to default light chrome.")
+        self.assertIn(
+            "troughcolor=_DARK[", theme_body,
+            "Scrollbar style MUST set troughcolor from _DARK.")
+        self.assertIn(
+            "arrowcolor=_DARK[", theme_body,
+            "Scrollbar style MUST set arrowcolor — without it "
+            "the up/down arrows stay default light grey on dark.")
+
+    # ----- M_P0_INSTALLER_DARK_TITLEBAR (2026-05-01) -----
+    # Windows DWM dark-mode title bar.
+
+    def test_PERMANENT_o_dark_titlebar_helper_present(self):
+        self.assertIn(
+            "def _apply_dark_titlebar(self):", self._gui_src,
+            "InstallerWindow MUST expose _apply_dark_titlebar "
+            "for the Windows-side immersive dark-mode opt-in.")
+        body = self._gui_src.split(
+            "def _apply_dark_titlebar(self):"
+        )[1].split("\n    def ")[0]
+        self.assertIn(
+            'sys.platform != "win32"', body,
+            "_apply_dark_titlebar MUST early-return on non-"
+            "Windows platforms (DWM is Windows-only).")
+        self.assertIn(
+            "DwmSetWindowAttribute", body,
+            "_apply_dark_titlebar MUST call "
+            "DwmSetWindowAttribute — that's the canonical "
+            "Win32 entry-point for the immersive dark-mode "
+            "attribute.")
+        # Both attribute IDs (20 + 19 fallback) must be present
+        # so the helper covers Win10 18362 (19) AND Win10 19H1+ /
+        # Win11 (20).
+        self.assertIn("20", body,
+            "DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (Win10 19H1+ / "
+            "Win11) MUST be tried first.")
+        self.assertIn("19", body,
+            "DWMWA attribute 19 (Win10 1809..18362) MUST be the "
+            "fallback retry value — older Windows builds map "
+            "the dark-mode attribute to 19.")
+
+    def test_PERMANENT_p_titlebar_helper_invoked_at_startup(self):
+        # AST guard: __init__ MUST call _apply_dark_titlebar
+        # so the DWM attribute actually fires on launch.
+        tree = ast.parse(self._gui_src)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if node.name != "InstallerWindow":
+                continue
+            for func in node.body:
+                if not (isinstance(func, ast.FunctionDef)
+                        and func.name == "__init__"):
+                    continue
+                seen = []
+                for sub in ast.walk(func):
+                    if not isinstance(sub, ast.Call):
+                        continue
+                    f = sub.func
+                    if isinstance(f, ast.Attribute) \
+                            and isinstance(f.value, ast.Name) \
+                            and f.value.id == "self":
+                        seen.append(f.attr)
+                self.assertIn(
+                    "_apply_dark_titlebar", seen,
+                    "InstallerWindow.__init__ MUST invoke "
+                    "_apply_dark_titlebar so the DWM attribute "
+                    "fires on every launch, not just a "
+                    "hand-triggered call.")
+                return
+        self.fail("InstallerWindow.__init__ not found.")
 
 
 # ----------------------------------------------------------------------

@@ -365,8 +365,63 @@ class InstallerWindow(object):
         # feather.
         self._apply_dark_theme()
         self._apply_window_icon()
+        self._apply_dark_titlebar()
 
         self._build()
+
+    def _apply_dark_titlebar(self):
+        """Windows-only: opt the window's title bar into the
+        immersive dark mode introduced in Windows 10 build 17763
+        and standardized in Windows 11. Without this DWM call the
+        OS draws the title bar with the system Light theme even
+        when the desktop is set to Dark, leaving a bright bar
+        above an otherwise dark window.
+
+        Implementation:
+          - Resolve the native HWND of the Tk root window.
+          - Call DwmSetWindowAttribute with attribute index 20
+            (DWMWA_USE_IMMERSIVE_DARK_MODE on the post-19H1 SDK)
+            and value 1.
+          - If 20 returns nonzero (older Windows 10 builds where
+            the constant was 19) retry with 19. Both attributes
+            are documented at
+            learn.microsoft.com/windows/win32/api/dwmapi.
+          - The whole call chain is wrapped in a single
+            try/except so any error path (non-Windows, missing
+            dwmapi, weird virtualization) silently leaves the
+            default light bar instead of crashing the GUI.
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            self._root.update_idletasks()
+            # Tk's winfo_id returns the window's child HWND;
+            # the title-bar attribute applies to the OS-level
+            # parent. GetParent walks up to it.
+            hwnd = ctypes.windll.user32.GetParent(
+                self._root.winfo_id())
+            if not hwnd:
+                hwnd = self._root.winfo_id()
+            value = ctypes.c_int(1)
+            DWMWA_NEW = 20   # Windows 10 19H1+ / Windows 11
+            DWMWA_OLD = 19   # Windows 10 1809..18362
+            res = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                wintypes.HWND(hwnd),
+                ctypes.c_int(DWMWA_NEW),
+                ctypes.byref(value),
+                ctypes.sizeof(value))
+            if res != 0:
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    wintypes.HWND(hwnd),
+                    ctypes.c_int(DWMWA_OLD),
+                    ctypes.byref(value),
+                    ctypes.sizeof(value))
+        except Exception:
+            # Any failure -> default Light title bar; do not
+            # propagate (this is purely cosmetic).
+            pass
 
     def _apply_dark_theme(self):
         """Configure ttk.Style + raw Tk option_add so every widget
@@ -461,6 +516,40 @@ class InstallerWindow(object):
             bordercolor=_DARK["border"])
         style.configure(
             "TSeparator", background=_DARK["border"])
+        # Scrollbar — ttk.Scrollbar honours these style configs
+        # under the clam theme. tk.Scrollbar (raw) was the prior
+        # implementation; on Windows the native widget renderer
+        # ignores ``bg`` kwargs and shows a white thumb. The
+        # ttk-Style path bypasses the OS native renderer entirely.
+        style.configure(
+            "Vertical.TScrollbar",
+            background=_DARK["btn_bg"],
+            troughcolor=_DARK["log_bg"],
+            bordercolor=_DARK["bg"],
+            arrowcolor=_DARK["fg"],
+            lightcolor=_DARK["btn_bg"],
+            darkcolor=_DARK["btn_bg"],
+            gripcount=0)
+        style.map(
+            "Vertical.TScrollbar",
+            background=[
+                ("active", _DARK["btn_bg_hover"]),
+                ("pressed", _DARK["btn_bg_pressed"])],
+            arrowcolor=[("disabled", _DARK["fg_muted"])])
+        style.configure(
+            "Horizontal.TScrollbar",
+            background=_DARK["btn_bg"],
+            troughcolor=_DARK["log_bg"],
+            bordercolor=_DARK["bg"],
+            arrowcolor=_DARK["fg"],
+            lightcolor=_DARK["btn_bg"],
+            darkcolor=_DARK["btn_bg"],
+            gripcount=0)
+        style.map(
+            "Horizontal.TScrollbar",
+            background=[
+                ("active", _DARK["btn_bg_hover"]),
+                ("pressed", _DARK["btn_bg_pressed"])])
 
     def _apply_window_icon(self):
         """Load the RBF-node PNG icon as the window's title-bar +
@@ -620,15 +709,15 @@ class InstallerWindow(object):
             selectbackground=_DARK["select_bg"],
             selectforeground=_DARK["fg"],
             borderwidth=0, highlightthickness=0)
-        log_scroll = tk.Scrollbar(
+        # ttk.Scrollbar (NOT tk.Scrollbar) so the clam-themed
+        # Vertical.TScrollbar style configured in
+        # _apply_dark_theme actually drives the rendering.
+        # tk.Scrollbar on Windows uses native chrome and ignores
+        # bg / troughcolor kwargs, leaving a white thumb.
+        log_scroll = ttk.Scrollbar(
             log_frame, command=self._log.yview,
-            bg=_DARK["btn_bg"],
-            troughcolor=_DARK["log_bg"],
-            activebackground=_DARK["btn_bg_hover"],
-            highlightthickness=0,
-            borderwidth=0,
-            elementborderwidth=0,
-            width=14)
+            orient="vertical",
+            style="Vertical.TScrollbar")
         self._log.config(yscrollcommand=log_scroll.set)
         log_scroll.pack(side="right", fill="y")
         self._log.pack(side="left", fill="both", expand=True)
