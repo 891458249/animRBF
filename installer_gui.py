@@ -60,6 +60,93 @@ if _REPO_ROOT not in sys.path:
 
 
 # ----------------------------------------------------------------------
+# i18n — minimal embedded EN + ZH dictionary.
+#
+# Self-contained so the standalone .exe does not need to import the
+# project's full ui/i18n.py (which would pull maya / PySide via
+# transitive imports). Keys cover every user-visible string in the
+# installer GUI; missing keys fall back to the EN value.
+# ----------------------------------------------------------------------
+
+
+_TR = {
+    "en": {
+        "window_title":     "RBFtools Installer",
+        "language_label":   "Language:",
+        "lang_en":          "English",
+        "lang_zh":          "中文",
+        "header_versions":  "Detected Maya versions on this machine:",
+        "no_maya_detected":
+            "  (none — install Maya 2022 / 2025 first, "
+            "or check repo plug-ins/win64/<ver>/ "
+            "RBFtools.mll exists)",
+        "version_row":      "Maya {ver}   ({path})",
+        "action_label":     "Action:",
+        "action_install":   "Install",
+        "action_uninstall": "Uninstall",
+        "install_path":     "Install path:",
+        "install_path_hint":
+            "  (leave blank for default: "
+            "<user>/Documents/maya/modules/RBFtools)",
+        "log_label":        "Progress log:",
+        "btn_run":          "Run",
+        "btn_close":        "Close",
+        "err_no_version":
+            "[ERROR] No Maya version selected; check at "
+            "least one box.",
+        "log_done_install": "[DONE] install ok={ok}",
+        "log_done_uninstall": "[DONE] uninstall ok={ok}",
+        "log_fatal":        "[FATAL] {exc}",
+        "headless_warn":    "[WARN] No installable Maya version detected.",
+        "headless_running": "[HEADLESS] Installing for: {versions}",
+    },
+    "zh": {
+        "window_title":     "RBFtools 安装器",
+        "language_label":   "语言：",
+        "lang_en":          "English",
+        "lang_zh":          "中文",
+        "header_versions":  "本机检测到的 Maya 版本：",
+        "no_maya_detected":
+            "  （未检测到——请先安装 Maya 2022 / 2025，"
+            "或确认仓库 plug-ins/win64/<版本>/RBFtools.mll 存在）",
+        "version_row":      "Maya {ver}   ({path})",
+        "action_label":     "操作：",
+        "action_install":   "安装",
+        "action_uninstall": "卸载",
+        "install_path":     "安装路径：",
+        "install_path_hint":
+            "  （留空使用默认：<用户>/Documents/maya/modules/RBFtools）",
+        "log_label":        "进度日志：",
+        "btn_run":          "运行",
+        "btn_close":        "关闭",
+        "err_no_version":
+            "[错误] 未选中任何 Maya 版本；请至少勾选一项。",
+        "log_done_install": "[完成] 安装 ok={ok}",
+        "log_done_uninstall": "[完成] 卸载 ok={ok}",
+        "log_fatal":        "[严重错误] {exc}",
+        "headless_warn":    "[警告] 未检测到可安装的 Maya 版本。",
+        "headless_running": "[无界面模式] 正在安装：{versions}",
+    },
+}
+
+
+def _tr(lang, key, **fmt):
+    """Look up *key* in the active language; fall back to EN if
+    missing. ``fmt`` keyword arguments are str.format applied to
+    the result."""
+    table = _TR.get(lang) or _TR["en"]
+    text = table.get(key)
+    if text is None:
+        text = _TR["en"].get(key, key)
+    if fmt:
+        try:
+            return text.format(**fmt)
+        except (KeyError, IndexError):
+            return text
+    return text
+
+
+# ----------------------------------------------------------------------
 # Maya version detection (filesystem + registry fallback).
 # ----------------------------------------------------------------------
 
@@ -196,7 +283,7 @@ class InstallerWindow(object):
     """Single-window installer UI. Constructed lazily so unit tests
     can import this module without spinning up tkinter."""
 
-    def __init__(self, root=None):
+    def __init__(self, root=None, language="en"):
         import tkinter as tk
         from tkinter import ttk
         from tkinter import scrolledtext
@@ -204,15 +291,38 @@ class InstallerWindow(object):
         self._tk = tk
         self._ttk = ttk
         self._root = root or tk.Tk()
-        self._root.title("RBFtools Installer")
-        self._root.geometry("680x520")
+
+        # Language state — defaults to English; the user picks via
+        # the top-of-window Language radio. _retranslate() walks
+        # every tracked widget on switch.
+        self._lang = language if language in _TR else "en"
+        self._lang_var = tk.StringVar(value=self._lang)
 
         self._installable = compute_installable_versions()
         self._version_vars = {}    # version -> BooleanVar
         self._mode_var = tk.StringVar(value="install")
         self._install_dir_var = tk.StringVar(value="")
 
+        # Tracked widgets that need retranslation on language
+        # switch. Each entry maps a widget to the (key, fmt) pair
+        # used to populate its text. Stored in
+        # ``self._tr_widgets`` so _retranslate can re-render every
+        # label / button / radio without rebuilding the whole UI.
+        self._tr_widgets = []
+
+        self._root.title(_tr(self._lang, "window_title"))
+        self._root.geometry("720x560")
+
         self._build()
+
+    def _track(self, widget, key, **fmt):
+        """Register *widget* for retranslation. *key* is the i18n
+        key; *fmt* is the optional str.format payload (e.g. for
+        the Maya-version row label that interpolates ver + path).
+        Sets the widget's text to the current language immediately
+        and remembers the binding for future _retranslate calls."""
+        self._tr_widgets.append((widget, key, fmt))
+        widget.configure(text=_tr(self._lang, key, **fmt))
 
     def _build(self):
         tk = self._tk
@@ -221,76 +331,88 @@ class InstallerWindow(object):
         outer = ttk.Frame(self._root, padding=8)
         outer.pack(fill="both", expand=True)
 
+        # Language switch row — first thing the user sees so the
+        # whole UI is reachable in either language regardless of
+        # which one defaulted at startup.
+        lang_frame = ttk.Frame(outer)
+        lang_frame.pack(fill="x", anchor="w")
+        lang_lbl = ttk.Label(lang_frame, font=("Segoe UI", 9))
+        lang_lbl.pack(side="left")
+        self._track(lang_lbl, "language_label")
+        for code in ("en", "zh"):
+            rb = ttk.Radiobutton(
+                lang_frame,
+                value=code,
+                variable=self._lang_var,
+                command=self._on_language_changed)
+            rb.pack(side="left", padx=(6, 0))
+            self._track(rb, "lang_{}".format(code))
+
+        ttk.Separator(outer, orient="horizontal").pack(
+            fill="x", pady=(6, 6))
+
         # Header.
-        ttk.Label(
-            outer,
-            text="Detected Maya versions on this machine:",
-            font=("Segoe UI", 10, "bold"),
-        ).pack(anchor="w")
+        header_lbl = ttk.Label(outer, font=("Segoe UI", 10, "bold"))
+        header_lbl.pack(anchor="w")
+        self._track(header_lbl, "header_versions")
 
         # Version checkboxes.
         ver_frame = ttk.Frame(outer, padding=(12, 4))
         ver_frame.pack(fill="x")
         if not self._installable:
-            ttk.Label(
-                ver_frame,
-                text=(
-                    "  (none — install Maya 2022 / 2025 first, "
-                    "or check repo plug-ins/win64/<ver>/ "
-                    "RBFtools.mll exists)"),
-                foreground="#A05000",
-            ).pack(anchor="w")
+            empty_lbl = ttk.Label(
+                ver_frame, foreground="#A05000")
+            empty_lbl.pack(anchor="w")
+            self._track(empty_lbl, "no_maya_detected")
         else:
             for version, maya_path in self._installable:
                 var = tk.BooleanVar(value=True)
                 self._version_vars[version] = var
-                ttk.Checkbutton(
-                    ver_frame,
-                    text="Maya {}   ({})".format(
-                        version, maya_path),
-                    variable=var,
-                ).pack(anchor="w")
+                rb = ttk.Checkbutton(
+                    ver_frame, variable=var)
+                rb.pack(anchor="w")
+                # Per-row label uses the version_row template so
+                # the localized prefix ("Maya") stays consistent
+                # even if a future locale changes the wording.
+                self._track(
+                    rb, "version_row",
+                    ver=version, path=maya_path)
 
         # Mode radio.
         ttk.Separator(outer, orient="horizontal").pack(
             fill="x", pady=(8, 4))
         mode_frame = ttk.Frame(outer)
         mode_frame.pack(fill="x")
-        ttk.Label(
-            mode_frame, text="Action:",
-            font=("Segoe UI", 10, "bold"),
-        ).pack(side="left")
-        for value, label in (("install", "Install"),
-                              ("uninstall", "Uninstall")):
-            ttk.Radiobutton(
-                mode_frame, text=label, value=value,
-                variable=self._mode_var,
-            ).pack(side="left", padx=(8, 0))
+        action_lbl = ttk.Label(
+            mode_frame, font=("Segoe UI", 10, "bold"))
+        action_lbl.pack(side="left")
+        self._track(action_lbl, "action_label")
+        for value, key in (("install", "action_install"),
+                            ("uninstall", "action_uninstall")):
+            rb = ttk.Radiobutton(
+                mode_frame, value=value,
+                variable=self._mode_var)
+            rb.pack(side="left", padx=(8, 0))
+            self._track(rb, key)
 
         # Install path.
         path_frame = ttk.Frame(outer, padding=(0, 8, 0, 0))
         path_frame.pack(fill="x")
-        ttk.Label(
-            path_frame, text="Install path:",
-            font=("Segoe UI", 9),
-        ).pack(side="left")
+        path_lbl = ttk.Label(path_frame, font=("Segoe UI", 9))
+        path_lbl.pack(side="left")
+        self._track(path_lbl, "install_path")
         ttk.Entry(
             path_frame, textvariable=self._install_dir_var,
             width=60,
         ).pack(side="left", padx=(8, 0), fill="x", expand=True)
-        ttk.Label(
-            outer,
-            text=(
-                "  (leave blank for default: "
-                "<user>/Documents/maya/modules/RBFtools)"),
-            foreground="#606060",
-        ).pack(anchor="w")
+        hint_lbl = ttk.Label(outer, foreground="#606060")
+        hint_lbl.pack(anchor="w")
+        self._track(hint_lbl, "install_path_hint")
 
         # Log panel.
-        ttk.Label(
-            outer, text="Progress log:",
-            font=("Segoe UI", 10, "bold"),
-        ).pack(anchor="w", pady=(8, 2))
+        log_lbl = ttk.Label(outer, font=("Segoe UI", 10, "bold"))
+        log_lbl.pack(anchor="w", pady=(8, 2))
+        self._track(log_lbl, "log_label")
         from tkinter import scrolledtext
         self._log = scrolledtext.ScrolledText(
             outer, height=14, state="disabled",
@@ -300,14 +422,31 @@ class InstallerWindow(object):
         # Buttons.
         btn_frame = ttk.Frame(outer, padding=(0, 8, 0, 0))
         btn_frame.pack(fill="x")
-        ttk.Button(
-            btn_frame, text="Run",
-            command=self._on_run_clicked,
-        ).pack(side="right")
-        ttk.Button(
-            btn_frame, text="Close",
-            command=self._root.destroy,
-        ).pack(side="right", padx=(0, 8))
+        run_btn = ttk.Button(
+            btn_frame, command=self._on_run_clicked)
+        run_btn.pack(side="right")
+        self._track(run_btn, "btn_run")
+        close_btn = ttk.Button(
+            btn_frame, command=self._root.destroy)
+        close_btn.pack(side="right", padx=(0, 8))
+        self._track(close_btn, "btn_close")
+
+    def _on_language_changed(self):
+        """User flipped the Language radio. Re-render every
+        tracked widget through the new locale's lookup. Window
+        title is also refreshed."""
+        new_lang = self._lang_var.get()
+        if new_lang not in _TR:
+            return
+        self._lang = new_lang
+        self._root.title(_tr(self._lang, "window_title"))
+        for widget, key, fmt in self._tr_widgets:
+            try:
+                widget.configure(
+                    text=_tr(self._lang, key, **fmt))
+            except Exception:
+                # Widget destroyed; skip silently.
+                continue
 
     def _selected_versions(self):
         return [v for v, var in self._version_vars.items()
@@ -324,9 +463,7 @@ class InstallerWindow(object):
         versions = self._selected_versions()
         install_dir = self._resolve_install_dir()
         if mode == "install" and not versions:
-            self._log_line(
-                "[ERROR] No Maya version selected; check at "
-                "least one box.")
+            self._log_line(_tr(self._lang, "err_no_version"))
             return
         worker = threading.Thread(
             target=self._run_action,
@@ -347,15 +484,17 @@ class InstallerWindow(object):
                     versions=versions,
                     verbose=True)
                 self._log_line(
-                    "[DONE] install ok={}".format(ok))
+                    _tr(self._lang,
+                        "log_done_install", ok=ok))
             elif mode == "uninstall":
                 ok = install.uninstall(
                     install_dir=install_dir, verbose=True)
                 self._log_line(
-                    "[DONE] uninstall ok={}".format(ok))
+                    _tr(self._lang,
+                        "log_done_uninstall", ok=ok))
         except Exception as exc:
             self._log_line(
-                "[FATAL] {}".format(exc))
+                _tr(self._lang, "log_fatal", exc=exc))
         finally:
             sys.stdout = saved
 
@@ -377,26 +516,45 @@ class InstallerWindow(object):
 # ----------------------------------------------------------------------
 
 
-def _headless_install_all():
+def _headless_install_all(lang="en"):
     """Install RBFtools onto every detected Maya version that the
-    repo carries a binary for. Used by CI / silent deployment."""
+    repo carries a binary for. Used by CI / silent deployment.
+
+    *lang* selects the locale for the two console messages
+    (no GUI in this path)."""
     import install
     versions = [
         v for v, _ in compute_installable_versions()]
     if not versions:
-        print("[WARN] No installable Maya version detected.")
+        print(_tr(lang, "headless_warn"))
         return False
-    print("[HEADLESS] Installing for: {}".format(
-        ", ".join(versions)))
+    print(_tr(lang, "headless_running",
+              versions=", ".join(versions)))
     return install.install(versions=versions, verbose=True)
+
+
+def _parse_lang_arg(argv):
+    """Extract ``--lang en|zh`` from argv (default 'en'). Unknown
+    locales fall back to 'en'."""
+    for i, a in enumerate(argv):
+        if a == "--lang" and i + 1 < len(argv):
+            cand = argv[i + 1]
+            if cand in _TR:
+                return cand
+        elif a.startswith("--lang="):
+            cand = a.split("=", 1)[1]
+            if cand in _TR:
+                return cand
+    return "en"
 
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    lang = _parse_lang_arg(argv)
     if "--headless" in argv:
-        ok = _headless_install_all()
+        ok = _headless_install_all(lang=lang)
         sys.exit(0 if ok else 1)
-    InstallerWindow().mainloop()
+    InstallerWindow(language=lang).mainloop()
 
 
 if __name__ == "__main__":

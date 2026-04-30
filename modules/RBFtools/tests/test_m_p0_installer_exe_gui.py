@@ -165,13 +165,19 @@ class T_M_P0_INSTALLER_EXE_GUI(unittest.TestCase):
             "self-contained.")
 
     def test_PERMANENT_e_gui_required_functions_present(self):
+        # M_P0_INSTALLER_I18N (2026-05-01) relaxation:
+        # _headless_install_all gained a ``lang`` kwarg so the
+        # console messages can localize. Match on the prefix
+        # rather than the exact-paren shape so the substring
+        # check tolerates kwarg additions without breaking the
+        # PERMANENT contract.
         for sym in (
                 "def detect_installed_maya():",
                 "def discover_available_versions():",
                 "def compute_installable_versions():",
                 "class InstallerWindow",
                 "def main(",
-                "def _headless_install_all():"):
+                "def _headless_install_all("):
             self.assertIn(
                 sym, self._gui_src,
                 "installer_gui missing required symbol "
