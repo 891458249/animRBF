@@ -2155,6 +2155,21 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         for c in range(model.columnCount()):
             header.setSectionResizeMode(
                 c, QtWidgets.QHeaderView.Stretch)
+        # M_P0_NODE_SWITCH_POSE_GRID (2026-04-30): controller's
+        # _load_editor populates self._ctrl.pose_model from the new
+        # node's poses but the view's PoseGridEditor still needs
+        # an explicit rebuild to repaint rows. Without this call,
+        # switching the active node leaves the pose grid blank
+        # while the underlying model is correct — the user-
+        # reported "切换节点 pose 行不刷新" P0. Empty-node path
+        # (current_node="") is fine: _refresh_pose_grid passes
+        # ([], [], []) through to PoseGridEditor.set_data which
+        # clears the rows cleanly. The driver / driven editor
+        # rebuilds are already wired separately at line 1249 +
+        # 1270 (_reload_driver_sources / _reload_driven_sources);
+        # this completes the third leg of the editorLoaded
+        # cascade.
+        self._refresh_pose_grid()
 
     # =================================================================
     #  Pose CRUD (gather UI state → controller)
