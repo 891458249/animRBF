@@ -3735,71 +3735,114 @@ def apply_poses(node, driver_node, driven_node,
         cmds.warning(
             "Upgrading node {} to v5 baseline schema".format(shape))
 
-    with undo_chunk("RBFtools: apply poses"):
-        # 1 — clear stale data (including any prior baseline arrays)
-        clear_node_data(node)
+    # M_P0_APPLY_NODESTATE_FIX (2026-04-30) — D-path instrumentation:
+    # each fatal step (1, 2, 4, 5, 7) is wrapped in its own try/except
+    # that records `failed_step` then re-raises so partial-apply isn't
+    # masked. The advisory steps (3, 6) keep their original swallow-
+    # and-warn behaviour. Step 8 (nodeState 2 -> 0 unblock) is moved
+    # OUTSIDE the with-undo_chunk into a finally clause so it runs
+    # whether the body succeeded or raised — without this the user-
+    # reported "Apply 后 Node State 仍 Blocking + 无 warning" repro
+    # surfaces because step 4/5 raised inside the original
+    # with-undo_chunk and the entire Step 8 block was unwound past.
+    apply_succeeded = False
+    failed_step = None
+    try:
+        with undo_chunk("RBFtools: apply poses"):
+            # 1 — clear stale data (including any prior baseline arrays)
+            try:
+                clear_node_data(node)
+            except Exception:
+                failed_step = "1 (clear_node_data)"
+                raise
 
-        # 2 — write pose data (packed sequential indices)
-        for seq_idx, pose in enumerate(poses):
-            _write_pose_to_node(shape, seq_idx, pose)
+            # 2 — write pose data (packed sequential indices)
+            try:
+                for seq_idx, pose in enumerate(poses):
+                    _write_pose_to_node(shape, seq_idx, pose)
+            except Exception:
+                failed_step = "2 (_write_pose_to_node)"
+                raise
 
-        # 3 — M2.5: per-pose SwingTwist decomposition cache. Populated
-        # for SwingTwist-encoded nodes (encoding == 4); other encodings
-        # write defaults (poseSigma = -1.0 sentinel = "cache not
-        # populated"). Cache is derived state — NOT in the JSON schema
-        # (addendum §M2.5 Cache vs Schema Boundary Contract).
-        # Failures emit warnings; cache miss falls back to live decompose
-        # in compute() (forward-compat to the M2.5b/M5 consumer).
-        try:
-            write_pose_swing_twist_cache(node, poses)
-        except Exception as exc:
-            cmds.warning(
-                "apply_poses: SwingTwist cache step failed: {} "
-                "(continuing — cache miss falls back to live decompose)"
-                .format(exc))
+            # 3 — M2.5: per-pose SwingTwist decomposition cache.
+            # Populated for SwingTwist-encoded nodes (encoding == 4);
+            # other encodings write defaults (poseSigma = -1.0
+            # sentinel = "cache not populated"). Cache is derived
+            # state — NOT in the JSON schema (addendum §M2.5 Cache
+            # vs Schema Boundary Contract). Failures emit warnings;
+            # cache miss falls back to live decompose in compute()
+            # (forward-compat to the M2.5b/M5 consumer).
+            try:
+                write_pose_swing_twist_cache(node, poses)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses step 3 (SwingTwist cache) failed: "
+                    "{} (continuing — cache miss falls back to "
+                    "live decompose)".format(exc))
 
-        # 4 — capture + write per-output baselines. pose[0] is the
-        # preferred source when it is a rest row (all driver inputs 0);
-        # otherwise the current scene value is used. Scale channels
-        # always anchor at 1.0. See v5 addendum 2026-04-24 §M1.2.
-        baselines = capture_output_baselines(
-            driven_node, driven_attrs, poses=poses)
-        write_output_baselines(node, baselines)
+            # 4 — capture + write per-output baselines. pose[0] is
+            # the preferred source when it is a rest row (all driver
+            # inputs 0); otherwise the current scene value is used.
+            # Scale channels always anchor at 1.0. See v5 addendum
+            # 2026-04-24 §M1.2.
+            try:
+                baselines = capture_output_baselines(
+                    driven_node, driven_attrs, poses=poses)
+                write_output_baselines(node, baselines)
+            except Exception:
+                failed_step = "4 (capture/write_output_baselines)"
+                raise
 
-        # 5 — M2.3: replay each pose through driven_node and snapshot
-        # its local Transform for engine-side consumption (PART D.5 /
-        # 铁律 B10). Single-sever / single-restore lifecycle keeps the
-        # scene clean. Non-driven channels are frozen at Apply-time
-        # scene state — users should reset driven_node to rest before
-        # Apply. See v5 addendum 2026-04-24 §M2.3.
-        local_xforms = capture_per_pose_local_transforms(
-            driven_node, driven_attrs, poses)
-        write_pose_local_transforms(node, local_xforms)
+            # 5 — M2.3: replay each pose through driven_node and
+            # snapshot its local Transform for engine-side
+            # consumption (PART D.5 / 铁律 B10). Single-sever /
+            # single-restore lifecycle keeps the scene clean.
+            # Non-driven channels are frozen at Apply-time scene
+            # state — users should reset driven_node to rest before
+            # Apply. See v5 addendum 2026-04-24 §M2.3.
+            try:
+                local_xforms = capture_per_pose_local_transforms(
+                    driven_node, driven_attrs, poses)
+                write_pose_local_transforms(node, local_xforms)
+            except Exception:
+                failed_step = "5 (capture/write_pose_local_transforms)"
+                raise
 
-        # 6 — M3.7: auto-generate human-readable aliases on input[] /
-        # output[] multi plugs. Preserves user-set aliases (E.1).
-        # Failures emit warnings but never break the Apply chain — see
-        # core_alias module docstring for the write-boundary contract.
-        try:
-            auto_alias_outputs(node, driver_attrs, driven_attrs,
-                               force=False)
-        except Exception as exc:
-            cmds.warning(
-                "apply_poses: auto-alias step failed: {} "
-                "(continuing — aliases are advisory)".format(exc))
+            # 6 — M3.7: auto-generate human-readable aliases on
+            # input[] / output[] multi plugs. Preserves user-set
+            # aliases (E.1). Failures emit warnings but never break
+            # the Apply chain — see core_alias module docstring for
+            # the write-boundary contract.
+            try:
+                auto_alias_outputs(node, driver_attrs, driven_attrs,
+                                   force=False)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses step 6 (auto-alias) failed: {} "
+                    "(continuing — aliases are advisory)".format(exc))
 
-        # 7 — trigger evaluation cycle
-        cmds.setAttr(shape + ".evaluate", 0)
-        cmds.setAttr(shape + ".evaluate", 1)
+            # 7 — trigger evaluation cycle
+            try:
+                cmds.setAttr(shape + ".evaluate", 0)
+                cmds.setAttr(shape + ".evaluate", 1)
+            except Exception:
+                failed_step = "7 (evaluate trigger)"
+                raise
 
-        # 8 — M_BLOCKING_DEFAULT (2026-04-29): unblock the node so
-        # compute() outputs reach driven channels. create_node()
-        # forces nodeState=2 (Blocking) on creation so an
-        # untrained RBF cannot misdrive the rig; the FIRST Apply
-        # is the contract point that flips it to nodeState=0
-        # (Normal). Idempotent on subsequent Applies — already-
-        # Normal nodes stay Normal. cmds.warning fires only on the
-        # 2->0 transition so the TD knows the node went live.
+            apply_succeeded = True
+    finally:
+        # 8 — M_BLOCKING_DEFAULT (2026-04-29) + M_P0_APPLY_NODESTATE_FIX
+        # (2026-04-30): unblock the node. create_node() forces
+        # nodeState=2 (Blocking) on creation so an untrained RBF cannot
+        # misdrive the rig; the FIRST Apply is the contract point that
+        # flips it to nodeState=0 (Normal). Idempotent on subsequent
+        # Applies. The finally placement guarantees the flip even if a
+        # prior step raised — without that guarantee the user-reported
+        # repro surfaces (Apply raised silently inside the
+        # with-undo_chunk, Step 8 was unwound past, and the node stayed
+        # in Blocking with no UI cue). The success vs partial-apply
+        # warning text discriminates so the TD can act on the right
+        # signal.
         try:
             current_state = cmds.getAttr(shape + ".nodeState")
         except Exception:
@@ -3807,15 +3850,24 @@ def apply_poses(node, driver_node, driven_node,
         if int(current_state) != 0:
             try:
                 cmds.setAttr(shape + ".nodeState", 0)
-                cmds.warning(
-                    "RBFtools: nodeState 2 (Blocking) -> 0 "
-                    "(Normal). RBF outputs now active on the "
-                    "driven channels.")
+                if apply_succeeded:
+                    cmds.warning(
+                        "RBFtools: nodeState 2 (Blocking) -> 0 "
+                        "(Normal). RBF outputs now active on the "
+                        "driven channels.")
+                else:
+                    cmds.warning(
+                        "RBFtools: Apply raised inside step {} — "
+                        "nodeState forced 2 -> 0 (Normal) so the "
+                        "node is live, but POSE STATE MAY BE "
+                        "PARTIAL. Review the Script Editor for the "
+                        "prior error and re-run Apply once the "
+                        "underlying issue is fixed.".format(
+                            failed_step or "<unknown>"))
             except Exception as exc:
                 cmds.warning(
                     "apply_poses: failed to flip nodeState to 0: "
-                    "{} (TD must set Normal manually).".format(
-                        exc))
+                    "{} (TD must set Normal manually).".format(exc))
 
 
 def connect_poses(node, driver_node, driven_node,

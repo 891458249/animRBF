@@ -431,7 +431,12 @@ class T9_ApplyPosesWiring(unittest.TestCase):
         text = core_path.read_text(encoding="utf-8")
         idx = text.find("def apply_poses(")
         self.assertGreater(idx, 0)
-        body = text[idx:idx + 4000]
+        # M_P0_APPLY_NODESTATE_FIX (2026-04-30): apply_poses grew
+        # per-step instrumentation + try/finally Step 8; the body is
+        # now > 4000 chars. Slice to the next top-level def so the
+        # assertion covers the whole function regardless of size.
+        end = text.find("\ndef ", idx + 1)
+        body = text[idx:end if end > 0 else idx + 12000]
         self.assertIn("auto_alias_outputs", body,
             "apply_poses does not call auto_alias_outputs — M3.7 wiring lost")
 
