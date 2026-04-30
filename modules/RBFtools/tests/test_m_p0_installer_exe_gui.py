@@ -1,46 +1,31 @@
 # -*- coding: utf-8 -*-
 """M_P0_INSTALLER_EXE_GUI (2026-05-01) — standalone tkinter GUI
-installer + PyInstaller-bundled .exe.
+installer + PyInstaller-bundled .exe (post-inline revision).
 
-User mandate 2026-05-01: ship a single standalone .exe that any
-user can double-click on a fresh Windows machine to install
-RBFtools onto user-selected Maya versions, with no Python
-installation required on the target.
+Original commit (e9f6d52) shipped a separate install.py backend
+that installer_gui.py imported at runtime. M_P0_INSTALLER_INLINE
+(2026-05-01) folded install.py into installer_gui.py so the .exe
+is now built from a single self-contained module — no separate
+import path, no second public entry point. dragDropInstaller.py
+was deleted in the same refactor.
 
-Design (recap of installer_gui.py docstring):
+This test file is the surviving structural-API guard. The two
+deleted companion files (install.py + dragDropInstaller.py) had
+their own dedicated test modules (test_m_p0_install_dual_version
++ test_m_p0_dragdrop_permerr_retry) — those are gone alongside
+their targets.
 
-  * Tkinter GUI on top of install.py's existing public API
-    (install / uninstall). install.py is reused — no duplicate
-    file copy / remove logic.
-  * Auto-detect Maya versions on the host (filesystem +
-    registry fallback covering Maya 2018..2030).
-  * Auto-discover Maya versions the repo carries pre-built
-    .mll binaries for (mirrors install._discover_maya_versions
-    so cross-installer parity holds).
-  * Intersection -> checkbox list -> user picks any subset.
-  * Run dispatches to install.install(versions=...) or
-    install.uninstall(...) with stdout redirected into the
-    GUI's ScrolledText panel for live progress.
-  * --headless argv switch skips the GUI and installs onto
-    every detected version (CI / silent deploy).
-
-install.py extension (M_P0_INSTALLER_EXE_GUI):
-  * install() signature gains optional ``versions`` kwarg. Default
-    None preserves the legacy behaviour (use the full
-    MAYA_VERSIONS list resolved at module import). Subset support
-    routes the .mod file to a TD-selected slice.
-  * _build_mod_content gains the same ``versions`` kwarg and
-    passes through.
-
-PyInstaller wiring:
-  * build_installer.spec specifies onefile + windowed +
-    bundles modules/ + resources/ trees so the .exe ships the
-    full content including .mll binaries for every supported
-    Maya version.
-  * build_installer.bat one-shot wrapper (pip install
-    pyinstaller, run the .spec).
-
-PERMANENT GUARD T_M_P0_INSTALLER_EXE_GUI.
+PERMANENT GUARD T_M_P0_INSTALLER_EXE_GUI (post-inline):
+  * Source-scan: installer_gui defines install + uninstall +
+    _build_mod_content + _discover_maya_versions + the
+    detection helpers.
+  * AST: install() declares versions kwarg with default None.
+  * Runtime: dynamic version discovery returns the live
+    plug-ins/win64 subset; _build_mod_content emits subset
+    routing blocks; main(--headless) dispatches without GUI.
+  * .spec / .bat: PyInstaller wiring still bundles modules/ +
+    resources/, windowed mode, exe name unchanged.
+  * .gitignore: dist/ + build/ exclude PyInstaller artifacts.
 """
 
 from __future__ import absolute_import
@@ -55,10 +40,10 @@ from unittest import mock
 _REPO_ROOT = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..")
 )
-_INSTALL_PY = os.path.join(_REPO_ROOT, "install.py")
 _GUI_PY = os.path.join(_REPO_ROOT, "installer_gui.py")
 _SPEC = os.path.join(_REPO_ROOT, "build_installer.spec")
 _BAT = os.path.join(_REPO_ROOT, "build_installer.bat")
+_GITIGNORE = os.path.join(_REPO_ROOT, ".gitignore")
 
 
 def _read(p):
@@ -66,41 +51,41 @@ def _read(p):
         return fh.read()
 
 
-def _import_module(name, path):
-    """Import a module from a specific path (works for repo-root
-    files that are not on the default sys.path)."""
+def _import_gui():
     if _REPO_ROOT not in sys.path:
         sys.path.insert(0, _REPO_ROOT)
-    if name in sys.modules:
-        del sys.modules[name]
-    return __import__(name)
+    if "installer_gui" in sys.modules:
+        del sys.modules["installer_gui"]
+    import installer_gui   # noqa: F401
+    return sys.modules["installer_gui"]
 
 
 # ----------------------------------------------------------------------
-# PERMANENT GUARD T_M_P0_INSTALLER_EXE_GUI
+# PERMANENT GUARD T_M_P0_INSTALLER_EXE_GUI (post-inline)
 # ----------------------------------------------------------------------
 
 
 class T_M_P0_INSTALLER_EXE_GUI(unittest.TestCase):
     """PERMANENT GUARD — DO NOT REMOVE.
 
-    Locks the 5-file deliverable: installer_gui.py + install.py
-    versions kwarg + build_installer.spec/.bat + .gitignore for
-    PyInstaller artifacts."""
+    Locks the structural surface of installer_gui.py + the
+    PyInstaller wiring + the gitignore covering build artifacts.
+    install.py + dragDropInstaller.py are gone; their PERMANENT
+    suites (test_m_p0_install_dual_version +
+    test_m_p0_dragdrop_permerr_retry) were removed alongside."""
 
     @classmethod
     def setUpClass(cls):
-        cls._install_src = _read(_INSTALL_PY)
         cls._gui_src = _read(_GUI_PY)
         cls._spec_src = _read(_SPEC)
         cls._bat_src = _read(_BAT)
 
-    # ----- install.py extension -------------------------------------
+    # ----- installer_gui surface -----------------------------------
 
     def test_PERMANENT_a_install_signature_has_versions_kwarg(self):
-        # AST guard (lesson #6): install() FunctionDef MUST
-        # declare a ``versions`` parameter with default None.
-        tree = ast.parse(self._install_src)
+        # AST guard (lesson #6 reapplied): install() declares
+        # ``versions`` kwarg with default None.
+        tree = ast.parse(self._gui_src)
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef):
                 continue
@@ -109,10 +94,8 @@ class T_M_P0_INSTALLER_EXE_GUI(unittest.TestCase):
             kwargs = [a.arg for a in node.args.args]
             self.assertIn(
                 "versions", kwargs,
-                "install() MUST declare a 'versions' kwarg so the "
-                "GUI can pass a user-selected Maya-version subset.")
-            # Find the default for 'versions' — must be Constant
-            # value None.
+                "installer_gui.install() MUST declare a "
+                "'versions' kwarg.")
             defaults = node.args.defaults
             offset = len(kwargs) - len(defaults)
             ver_idx = kwargs.index("versions")
@@ -120,236 +103,182 @@ class T_M_P0_INSTALLER_EXE_GUI(unittest.TestCase):
             self.assertTrue(
                 isinstance(default, ast.Constant)
                 and default.value is None,
-                "install() versions kwarg MUST default to None "
-                "for legacy back-compat (None means use the full "
-                "MAYA_VERSIONS).")
+                "install() versions kwarg MUST default to None.")
             return
-        self.fail("install() FunctionDef not found in install.py.")
+        self.fail("install() FunctionDef not found.")
 
     def test_PERMANENT_b_build_mod_content_versions_kwarg(self):
-        tree = ast.parse(self._install_src)
+        tree = ast.parse(self._gui_src)
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef):
                 continue
             if node.name != "_build_mod_content":
                 continue
             kwargs = [a.arg for a in node.args.args]
-            self.assertIn(
-                "versions", kwargs,
-                "_build_mod_content MUST accept a 'versions' "
-                "kwarg so install() can pass through a subset.")
+            self.assertIn("versions", kwargs)
             return
         self.fail(
             "_build_mod_content FunctionDef not found.")
 
     def test_PERMANENT_c_uninstall_function_present(self):
-        # Pre-existing uninstall() at install.py:330 — locked
-        # so a future refactor cannot drop the GUI's dispatch
-        # target.
         self.assertIn(
-            "def uninstall(", self._install_src,
-            "install.py MUST keep its uninstall() public "
+            "def uninstall(", self._gui_src,
+            "installer_gui MUST keep its uninstall() public "
             "function — the GUI's Uninstall radio dispatches "
             "to it.")
 
-    # ----- installer_gui.py surface ---------------------------------
-
     def test_PERMANENT_d_gui_imports_tkinter(self):
-        # The GUI MUST import tkinter (stdlib only — zero
-        # external runtime dependency beyond the PyInstaller
-        # bundle).
         self.assertIn(
             "import tkinter", self._gui_src,
-            "installer_gui MUST import tkinter — the stdlib-only "
-            "GUI is the design constraint that keeps the .exe "
-            "self-contained.")
+            "installer_gui MUST import tkinter.")
 
     def test_PERMANENT_e_gui_required_functions_present(self):
-        # M_P0_INSTALLER_I18N (2026-05-01) relaxation:
-        # _headless_install_all gained a ``lang`` kwarg so the
-        # console messages can localize. Match on the prefix
-        # rather than the exact-paren shape so the substring
-        # check tolerates kwarg additions without breaking the
-        # PERMANENT contract.
         for sym in (
                 "def detect_installed_maya():",
                 "def discover_available_versions():",
                 "def compute_installable_versions():",
                 "class InstallerWindow",
                 "def main(",
-                "def _headless_install_all("):
+                "def _headless_install_all(",
+                "def install(",
+                "def uninstall(",
+                "def _discover_maya_versions(",
+                "def _build_mod_content(",
+                "def _default_modules_dir(",
+                "def _copy_tree(",
+                "def _remove_tree("):
             self.assertIn(
                 sym, self._gui_src,
                 "installer_gui missing required symbol "
                 "{!r}.".format(sym))
 
-    def test_PERMANENT_f_gui_dispatches_to_install_py(self):
-        # The GUI's _run_action MUST call install.install() and
-        # install.uninstall() — never reimplement the file-copy
-        # logic. AST walk to confirm.
-        tree = ast.parse(self._gui_src)
-        seen_install_call = False
-        seen_uninstall_call = False
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if not isinstance(func, ast.Attribute):
-                continue
-            if func.attr == "install" and \
-                    isinstance(func.value, ast.Name) and \
-                    func.value.id == "install":
-                seen_install_call = True
-            if func.attr == "uninstall" and \
-                    isinstance(func.value, ast.Name) and \
-                    func.value.id == "install":
-                seen_uninstall_call = True
-        self.assertTrue(
-            seen_install_call,
-            "installer_gui MUST call install.install() — not "
-            "reimplement copy logic. Drift between the two "
-            "installers is the lesson #4 + #8 recurrence shape.")
-        self.assertTrue(
-            seen_uninstall_call,
-            "installer_gui MUST call install.uninstall() for "
-            "the Uninstall radio path.")
+    def test_PERMANENT_f_legacy_install_module_gone(self):
+        # The original install.py + dragDropInstaller.py are
+        # deleted post-inline. Their absence from the repo root
+        # is part of the contract — re-introducing either would
+        # split the install entry-point surface again.
+        for legacy in ("install.py", "dragDropInstaller.py"):
+            path = os.path.join(_REPO_ROOT, legacy)
+            self.assertFalse(
+                os.path.exists(path),
+                "Legacy installer file {!r} MUST stay deleted "
+                "— installer_gui.py is now the single entry "
+                "point. Re-introducing would re-fork the "
+                "install code path that M_P0_INSTALL_DUAL_VERSION "
+                "+ M_P0_DRAGDROP_PERMERR_RETRY just unified.".format(
+                    legacy))
 
-    def test_PERMANENT_g_gui_passes_versions_to_install(self):
-        # Source-scan: the install() call inside _run_action MUST
-        # pass versions=... kwarg.
-        body = self._gui_src.split("def _run_action(")[1].split(
-            "\n    def ")[0]
+    def test_PERMANENT_g_gui_uses_inline_install_uninstall(self):
+        # Defence-in-depth: _run_action MUST call the local
+        # install / uninstall (not import install). The
+        # post-inline call shape is bare ``install(...)`` /
+        # ``uninstall(...)`` since the helpers live at module
+        # scope.
+        body = self._gui_src.split(
+            "def _run_action(self, mode, versions, install_dir):"
+        )[1].split("\n    def ")[0]
+        self.assertNotIn(
+            "import install", body,
+            "_run_action MUST NOT import a separate install "
+            "module — the helpers are inlined.")
         self.assertIn(
-            "versions=versions", body,
-            "_run_action MUST forward the GUI-selected versions "
-            "list into install.install() — the whole point of "
-            "the subset-selection UX.")
-
-    # ----- PyInstaller build wiring ---------------------------------
+            "install(", body)
+        self.assertIn(
+            "uninstall(", body)
 
     def test_PERMANENT_h_spec_bundles_modules_tree(self):
         self.assertIn(
             "('modules', 'modules')", self._spec_src,
-            "build_installer.spec MUST bundle the modules/ tree "
-            "so the .exe ships RBFtools.mll for every supported "
-            "Maya version. Without this datas entry the runtime "
-            "_MEIPASS unpacks an empty modules/ and install fails.")
+            "build_installer.spec MUST bundle modules/ tree.")
         self.assertIn(
-            "('resources', 'resources')", self._spec_src,
-            "build_installer.spec MUST bundle resources/ for "
-            "module_template.mod + future asset additions.")
+            "('resources', 'resources')", self._spec_src)
 
     def test_PERMANENT_i_spec_onefile_windowed(self):
-        self.assertIn(
-            "console=False", self._spec_src,
-            "build_installer.spec MUST use windowed mode "
-            "(console=False) so the user does not see a black "
-            "cmd window behind the GUI.")
-        self.assertIn(
-            "name='RBFtoolsInstaller'", self._spec_src,
-            "Output exe MUST be named RBFtoolsInstaller.")
+        self.assertIn("console=False", self._spec_src)
+        self.assertIn("name='RBFtoolsInstaller'", self._spec_src)
 
-    def test_PERMANENT_j_bat_invokes_pyinstaller(self):
-        self.assertIn(
-            "pyinstaller", self._bat_src.lower(),
-            "build_installer.bat MUST invoke pyinstaller.")
-        self.assertIn(
-            "build_installer.spec", self._bat_src,
-            "build_installer.bat MUST point pyinstaller at the "
-            ".spec file (so onefile + windowed + datas all fire).")
+    def test_PERMANENT_j_spec_does_not_hidden_import_install(self):
+        # install.py is gone — the spec MUST NOT list it as a
+        # hidden import (PyInstaller would error on the missing
+        # module name).
+        self.assertNotIn(
+            "'install',", self._spec_src,
+            "build_installer.spec MUST NOT list 'install' in "
+            "hiddenimports — that module no longer exists.")
 
-    # ----- .gitignore ----------------------------------------------
+    def test_PERMANENT_k_bat_invokes_pyinstaller(self):
+        self.assertIn(
+            "pyinstaller", self._bat_src.lower())
+        self.assertIn(
+            "build_installer.spec", self._bat_src)
 
-    def test_PERMANENT_k_gitignore_excludes_pyinstaller_outputs(self):
-        gitignore = _read(os.path.join(_REPO_ROOT, ".gitignore"))
+    def test_PERMANENT_l_gitignore_excludes_pyinstaller_outputs(self):
+        gitignore = _read(_GITIGNORE)
         for pat in ("dist/", "build/"):
-            self.assertIn(
-                pat, gitignore,
-                ".gitignore MUST exclude {!r} so PyInstaller "
-                "build artifacts never enter git.".format(pat))
+            self.assertIn(pat, gitignore)
 
 
 # ----------------------------------------------------------------------
-# Mock E2E — install/uninstall API + GUI dispatch + headless mode.
+# Mock E2E — runtime (post-inline).
 # ----------------------------------------------------------------------
 
 
 class TestM_P0_INSTALLER_EXE_GUI_RuntimeBehavior(unittest.TestCase):
 
-    # ----- install() versions kwarg --------------------------------
-
     def test_install_default_uses_full_maya_versions(self):
-        install = _import_module("install", _INSTALL_PY)
-        # Default versions=None branch in _build_mod_content.
-        text = install._build_mod_content("/fake")
+        gui = _import_gui()
+        text = gui._build_mod_content("/fake")
         self.assertIn("MAYAVERSION:2022", text)
         self.assertIn("MAYAVERSION:2025", text)
 
     def test_install_subset_routes_only_selected_version(self):
-        install = _import_module("install", _INSTALL_PY)
-        text = install._build_mod_content(
+        gui = _import_gui()
+        text = gui._build_mod_content(
             "/fake", versions=["2025"])
         self.assertNotIn("MAYAVERSION:2022", text)
         self.assertIn("MAYAVERSION:2025", text)
 
     def test_install_subset_can_be_empty_list(self):
-        # Edge: empty selection is legal; the .mod ends up with
-        # no routing blocks. The GUI guards against this in
-        # _on_run_clicked, but the API itself MUST not raise.
-        install = _import_module("install", _INSTALL_PY)
-        text = install._build_mod_content("/fake", versions=[])
-        # Empty list -> no MAYAVERSION lines.
+        gui = _import_gui()
+        text = gui._build_mod_content("/fake", versions=[])
         self.assertNotIn("MAYAVERSION:", text)
 
     def test_install_subset_unknown_version_routes_only_present(self):
-        # Pass a version NOT in the repo. _build_mod_content's
-        # ``if not os.path.isdir(plug_dir): continue`` filter
-        # drops it silently — the .mod still has the valid
-        # entries.
-        install = _import_module("install", _INSTALL_PY)
-        text = install._build_mod_content(
+        gui = _import_gui()
+        text = gui._build_mod_content(
             "/fake", versions=["2025", "2099"])
         self.assertIn("MAYAVERSION:2025", text)
         self.assertNotIn("MAYAVERSION:2099", text)
 
-    # ----- detect / discover ---------------------------------------
-
     def test_detect_returns_dict_of_versions(self):
-        gui = _import_module("installer_gui", _GUI_PY)
+        gui = _import_gui()
         result = gui.detect_installed_maya()
         self.assertIsInstance(result, dict)
-        # Every value MUST be a path string; every key a 4-digit
-        # version string.
         for ver, path in result.items():
             self.assertEqual(len(ver), 4)
             self.assertTrue(ver.isdigit())
             self.assertIsInstance(path, str)
 
     def test_detect_handles_missing_program_files(self):
-        # Simulate a machine with no Autodesk/ folder. Detection
-        # MUST return an empty dict, NOT raise.
-        gui = _import_module("installer_gui", _GUI_PY)
+        gui = _import_gui()
         with mock.patch("os.path.isdir", return_value=False):
             with mock.patch("os.listdir",
                             side_effect=FileNotFoundError):
                 result = gui.detect_installed_maya()
         self.assertEqual(result, {})
 
-    def test_discover_matches_install_module_versions(self):
-        gui = _import_module("installer_gui", _GUI_PY)
-        install = _import_module("install", _INSTALL_PY)
+    def test_discover_matches_inline_helper(self):
+        gui = _import_gui()
         self.assertEqual(
             gui.discover_available_versions(),
-            install._discover_maya_versions(),
-            "Cross-installer parity: GUI's discover MUST match "
-            "install._discover_maya_versions exactly. Drift "
-            "would mean the GUI exposes a version checkbox that "
-            "the .mod routing then drops.")
+            gui._discover_maya_versions(),
+            "discover_available_versions MUST stay a thin "
+            "wrapper over _discover_maya_versions — drift would "
+            "mean a GUI selection silently no-ops.")
 
     def test_compute_installable_intersection_on_live_repo(self):
-        gui = _import_module("installer_gui", _GUI_PY)
+        gui = _import_gui()
         result = gui.compute_installable_versions()
-        # Result is a list of (version, path) tuples.
         self.assertIsInstance(result, list)
         for entry in result:
             self.assertEqual(len(entry), 2)
@@ -358,9 +287,7 @@ class TestM_P0_INSTALLER_EXE_GUI_RuntimeBehavior(unittest.TestCase):
             self.assertTrue(ver.isdigit())
 
     def test_compute_installable_filters_to_intersection(self):
-        # Mock detected = {2022, 2024, 2025} but repo = {2022,
-        # 2025}. compute MUST return only 2022 + 2025.
-        gui = _import_module("installer_gui", _GUI_PY)
+        gui = _import_gui()
         with mock.patch.object(
                 gui, "detect_installed_maya",
                 return_value={
@@ -374,44 +301,37 @@ class TestM_P0_INSTALLER_EXE_GUI_RuntimeBehavior(unittest.TestCase):
         versions = [v for v, _ in result]
         self.assertEqual(sorted(versions), ["2022", "2025"])
 
-    # ----- headless dispatch ---------------------------------------
-
     def test_headless_calls_install_with_detected_versions(self):
-        gui = _import_module("installer_gui", _GUI_PY)
+        gui = _import_gui()
         with mock.patch.object(
                 gui, "compute_installable_versions",
                 return_value=[
                     ("2022", "C:/Maya2022"),
                     ("2025", "C:/Maya2025")]):
-            import install as install_mod
             with mock.patch.object(
-                    install_mod, "install",
+                    gui, "install",
                     return_value=True) as install_call:
                 ok = gui._headless_install_all()
         self.assertTrue(ok)
         install_call.assert_called_once()
-        # Versions kwarg MUST equal the detected list.
         kwargs = install_call.call_args.kwargs
         self.assertEqual(
             kwargs.get("versions"), ["2022", "2025"])
 
     def test_headless_warns_when_no_maya_detected(self):
-        gui = _import_module("installer_gui", _GUI_PY)
+        gui = _import_gui()
         with mock.patch.object(
                 gui, "compute_installable_versions",
                 return_value=[]):
-            import install as install_mod
             with mock.patch.object(
-                    install_mod, "install",
+                    gui, "install",
                     return_value=True) as install_call:
                 ok = gui._headless_install_all()
         self.assertFalse(ok)
         install_call.assert_not_called()
 
-    # ----- main entry ----------------------------------------------
-
     def test_main_headless_argv_skips_gui(self):
-        gui = _import_module("installer_gui", _GUI_PY)
+        gui = _import_gui()
         with mock.patch.object(
                 gui, "_headless_install_all",
                 return_value=True) as headless:

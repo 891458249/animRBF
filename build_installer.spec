@@ -38,7 +38,9 @@ a = Analysis(
         ('resources', 'resources'),
     ],
     hiddenimports=[
-        'install',
+        # M_P0_INSTALLER_INLINE (2026-05-01): install.py was
+        # folded into installer_gui.py; no separate hidden
+        # import needed.
         'installer_gui',
     ],
     hookspath=[],

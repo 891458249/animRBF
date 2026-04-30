@@ -39,10 +39,15 @@ Design constraints
 
 from __future__ import absolute_import
 
+import errno
 import io
 import os
+import platform
+import shutil
+import stat
 import sys
 import threading
+import time
 
 
 # Repository root resolved relative to this file. PyInstaller's
@@ -101,6 +106,296 @@ def _icon_path():
         if os.path.exists(path):
             return path
     return None
+
+
+# ----------------------------------------------------------------------
+# Embedded install backend (M_P0_INSTALLER_INLINE 2026-05-01).
+#
+# Folded in from the previously-separate install.py so this single
+# module — and the .exe it bundles into — is the only entry point
+# users see for RBFtools deployment. The pre-existing
+# dragDropInstaller.py is gone; install.py is gone; both flows
+# converge here.
+#
+# Hot-install / hot-teardown logic from install.py is intentionally
+# NOT inlined: the .exe always runs OUTSIDE Maya (PyInstaller spec
+# excludes the maya / maya.cmds modules), so the legacy
+# `if _in_maya():` branches were dead code in this path. Users
+# therefore restart Maya after install — the canonical .exe-installer
+# UX, matched by every other plug-in installer in the DCC space.
+# ----------------------------------------------------------------------
+
+
+_MODULE_NAME = "RBFtools"
+_MODULE_VERSION = "4.0.1"
+_MODULES_SRC = os.path.join(_REPO_ROOT, "modules")
+
+_PLATFORMS = {
+    "Windows": "win64",
+    "Darwin":  "macOS",
+    "Linux":   "linux64",
+}
+
+
+def _current_platform():
+    """Return the Maya-style platform string for the running OS."""
+    return _PLATFORMS.get(platform.system(), "linux64")
+
+
+def _maya_platform_tag():
+    """Return the PLATFORM tag used in .mod files."""
+    tags = {"win64": "win64", "macOS": "mac", "linux64": "linux"}
+    return tags.get(_current_platform(), "linux")
+
+
+def _discover_maya_versions():
+    """Scan ``modules/<MODULE_NAME>/plug-ins/<platform>/`` for
+    available Maya version subdirs. Filters to 4-digit numeric
+    names that actually carry a plugin binary (.mll / .so /
+    .bundle) so an empty version directory created but never
+    built is skipped instead of producing a broken .mod route.
+
+    Defensive fallback: if the plug-ins directory is missing or
+    the scan raises, return ``["2022", "2025"]`` so the
+    installer can still produce a usable .mod for the
+    historically-common 2-version case.
+    """
+    plat = _current_platform()
+    plug_dir = os.path.join(
+        _MODULES_SRC, _MODULE_NAME, "plug-ins", plat)
+    try:
+        entries = sorted(os.listdir(plug_dir))
+    except (OSError, FileNotFoundError):
+        return ["2022", "2025"]
+    result = []
+    for v in entries:
+        sub = os.path.join(plug_dir, v)
+        if not (os.path.isdir(sub)
+                and v.isdigit()
+                and len(v) == 4):
+            continue
+        try:
+            files = os.listdir(sub)
+        except OSError:
+            continue
+        if any(f.lower().endswith((".mll", ".so", ".bundle"))
+               for f in files):
+            result.append(v)
+    return result if result else ["2022", "2025"]
+
+
+# Resolved at module-import time so other code can reference
+# the constant directly.
+_MAYA_VERSIONS = _discover_maya_versions()
+
+
+def _default_modules_dir():
+    """Return the default Maya modules directory for the current
+    user."""
+    home = os.path.expanduser("~")
+    sys_name = platform.system()
+    if sys_name == "Windows":
+        docs = os.path.join(home, "Documents")
+        if os.path.isdir(os.path.join(home, "maya")):
+            return os.path.join(home, "maya", "modules")
+        return os.path.join(docs, "maya", "modules")
+    elif sys_name == "Darwin":
+        return os.path.join(home, "Library", "Preferences",
+                            "Autodesk", "maya", "modules")
+    else:
+        return os.path.join(home, "maya", "modules")
+
+
+def _ensure_dir(path):
+    """Create directory (and parents) if it does not exist."""
+    try:
+        os.makedirs(path)
+    except OSError as exc:
+        if exc.errno != errno.EEXIST:
+            raise
+
+
+def _remove_tree(path):
+    """Safely remove a directory tree. Uses an onerror handler to
+    force-remove read-only or locked files on Windows."""
+    if not os.path.isdir(path):
+        return
+
+    def _on_rm_error(func, fpath, exc_info):
+        os.chmod(fpath, stat.S_IWRITE)
+        func(fpath)
+
+    shutil.rmtree(path, onerror=_on_rm_error)
+
+
+def _copy_tree(src, dst):
+    """Copy *src* directory to *dst*, removing *dst* first if it
+    exists. Retries removal up to 3 times with a 1-second delay
+    to absorb Windows file-handle release lag from a recently
+    unloaded Maya plugin."""
+    for attempt in range(3):
+        try:
+            _remove_tree(dst)
+            break
+        except PermissionError:
+            if attempt < 2:
+                time.sleep(1)
+            else:
+                raise
+    shutil.copytree(src, dst)
+
+
+def _flatten_icons(icons_dir):
+    """Move files from icon sub-directories to the top-level
+    icons dir. Required on Linux where Maya does not recursively
+    search icon paths."""
+    if not os.path.isdir(icons_dir):
+        return
+    for folder in os.listdir(icons_dir):
+        folder_path = os.path.join(icons_dir, folder)
+        if os.path.isdir(folder_path):
+            for item in os.listdir(folder_path):
+                if not item.startswith("."):
+                    src = os.path.join(folder_path, item)
+                    dst = os.path.join(icons_dir, item)
+                    if not os.path.exists(dst):
+                        shutil.move(src, icons_dir)
+            _remove_tree(folder_path)
+
+
+def _build_mod_content(content_path, versions=None):
+    """Return the text for the RBFtools.mod file.
+
+    *content_path* is where the module content folder lives.
+    *versions* — optional list of Maya version strings to route
+    the .mod to. ``None`` (default) falls back to the
+    full ``_MAYA_VERSIONS`` discovered at module import."""
+    plat = _current_platform()
+    plat_tag = _maya_platform_tag()
+    recursive_icons = (plat != "linux64")
+
+    if versions is None:
+        versions = _MAYA_VERSIONS
+
+    lines = []
+    for ver in versions:
+        plug_dir = os.path.join(
+            _MODULES_SRC, _MODULE_NAME, "plug-ins", plat, ver)
+        if not os.path.isdir(plug_dir):
+            continue
+        lines.append(
+            "+ MAYAVERSION:{ver} PLATFORM:{plat} {name} "
+            "{version} {path}".format(
+                ver=ver, plat=plat_tag,
+                name=_MODULE_NAME,
+                version=_MODULE_VERSION,
+                path=content_path))
+        lines.append(
+            "plug-ins: plug-ins/{plat}/{ver}".format(
+                plat=plat, ver=ver))
+        if recursive_icons:
+            lines.append("[r] icons: icons")
+        else:
+            lines.append("icons: icons")
+        lines.append("[r] scripts: scripts")
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def install(install_dir=None, mod_dir=None, verbose=True,
+            versions=None):
+    """Install the RBF Tools module.
+
+    Returns True on success.
+    """
+    log = print if verbose else (lambda *a, **k: None)
+
+    modules_base = os.path.normpath(_default_modules_dir())
+    if install_dir is None:
+        install_dir = os.path.normpath(
+            os.path.join(modules_base, _MODULE_NAME))
+    else:
+        install_dir = os.path.normpath(install_dir)
+    if mod_dir is None:
+        mod_dir = os.path.normpath(
+            os.path.dirname(install_dir))
+    else:
+        mod_dir = os.path.normpath(mod_dir)
+
+    source = os.path.join(_MODULES_SRC, _MODULE_NAME)
+    if not os.path.isdir(source):
+        log("[ERROR] Source folder not found: {}".format(source))
+        return False
+
+    log("=" * 60)
+    log("  RBF Tools Installer")
+    log("=" * 60)
+    log("")
+    log("  Source       : {}".format(source))
+    log("  Install to   : {}".format(install_dir))
+    log("  .mod file in : {}".format(mod_dir))
+    log("")
+
+    log("[1/3] Copying module content ...")
+    _ensure_dir(os.path.dirname(install_dir))
+    _copy_tree(source, install_dir)
+    log("      -> {}".format(install_dir))
+
+    if _current_platform() == "linux64":
+        _flatten_icons(os.path.join(install_dir, "icons"))
+        log("      -> Flattened icons for Linux.")
+
+    log("[2/3] Writing .mod file ...")
+    _ensure_dir(mod_dir)
+    mod_path = os.path.join(mod_dir, _MODULE_NAME + ".mod")
+    mod_content = _build_mod_content(install_dir, versions=versions)
+    with open(mod_path, "w") as fh:
+        fh.write(mod_content)
+    log("      -> {}".format(mod_path))
+
+    log("[3/3] Installation complete!")
+    log("      Start Maya and RBF Tools will be available.")
+    log("")
+    return True
+
+
+def uninstall(install_dir=None, mod_dir=None, verbose=True):
+    """Remove a previous RBF Tools installation."""
+    log = print if verbose else (lambda *a, **k: None)
+
+    modules_base = os.path.normpath(_default_modules_dir())
+    if install_dir is None:
+        install_dir = os.path.normpath(
+            os.path.join(modules_base, _MODULE_NAME))
+    else:
+        install_dir = os.path.normpath(install_dir)
+    if mod_dir is None:
+        mod_dir = os.path.normpath(
+            os.path.dirname(install_dir))
+    else:
+        mod_dir = os.path.normpath(mod_dir)
+
+    log("=" * 60)
+    log("  RBF Tools Uninstaller")
+    log("=" * 60)
+    log("")
+
+    mod_path = os.path.normpath(
+        os.path.join(mod_dir, _MODULE_NAME + ".mod"))
+    if os.path.isfile(mod_path):
+        os.remove(mod_path)
+        log("  Removed .mod file : {}".format(mod_path))
+    else:
+        log("  No .mod file found at: {}".format(mod_path))
+
+    if os.path.isdir(install_dir):
+        _remove_tree(install_dir)
+        log("  Removed content   : {}".format(install_dir))
+    else:
+        log("  No content folder found at: {}".format(
+            install_dir))
+    log("")
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -261,13 +556,11 @@ def detect_installed_maya():
 
 def discover_available_versions():
     """Return the list of Maya versions the repo carries pre-
-    built RBFtools binaries for. Mirrors
-    ``install._discover_maya_versions`` so the two paths stay in
-    lock-step — drift would mean a GUI selection silently no-ops
-    when the user picks a version that the repo lacks a .mll for.
+    built RBFtools binaries for. Thin wrapper over the embedded
+    ``_discover_maya_versions`` so test code + GUI code share a
+    single source of truth.
     """
-    import install
-    return list(install._discover_maya_versions())
+    return list(_discover_maya_versions())
 
 
 def compute_installable_versions():
@@ -775,14 +1068,13 @@ class InstallerWindow(object):
         worker.start()
 
     def _run_action(self, mode, versions, install_dir):
-        import install
-        # Redirect stdout for the duration of the action so
-        # install.py's verbose prints land in the GUI panel.
+        # Redirect stdout for the duration of the action so the
+        # backend's verbose=True prints land in the GUI panel.
         saved = sys.stdout
         sys.stdout = _StdoutRedirector(self._log)
         try:
             if mode == "install":
-                ok = install.install(
+                ok = install(
                     install_dir=install_dir,
                     versions=versions,
                     verbose=True)
@@ -790,7 +1082,7 @@ class InstallerWindow(object):
                     _tr(self._lang,
                         "log_done_install", ok=ok))
             elif mode == "uninstall":
-                ok = install.uninstall(
+                ok = uninstall(
                     install_dir=install_dir, verbose=True)
                 self._log_line(
                     _tr(self._lang,
@@ -825,7 +1117,6 @@ def _headless_install_all(lang="en"):
 
     *lang* selects the locale for the two console messages
     (no GUI in this path)."""
-    import install
     versions = [
         v for v, _ in compute_installable_versions()]
     if not versions:
@@ -833,7 +1124,7 @@ def _headless_install_all(lang="en"):
         return False
     print(_tr(lang, "headless_running",
               versions=", ".join(versions)))
-    return install.install(versions=versions, verbose=True)
+    return install(versions=versions, verbose=True)
 
 
 def _parse_lang_arg(argv):
