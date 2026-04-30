@@ -57,7 +57,7 @@ _REPO_ROOT = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..")
 )
 _GUI_PY = os.path.join(_REPO_ROOT, "installer_gui.py")
-_SPEC = os.path.join(_REPO_ROOT, "build_installer.spec")
+_SPEC = os.path.join(_REPO_ROOT, "tools", "build_installer.spec")
 _ICON_PATH = os.path.join(
     _REPO_ROOT, "modules", "RBFtools", "icons", "RBFtools.png")
 

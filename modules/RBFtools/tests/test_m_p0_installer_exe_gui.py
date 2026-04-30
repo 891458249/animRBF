@@ -41,8 +41,8 @@ _REPO_ROOT = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..")
 )
 _GUI_PY = os.path.join(_REPO_ROOT, "installer_gui.py")
-_SPEC = os.path.join(_REPO_ROOT, "build_installer.spec")
-_BAT = os.path.join(_REPO_ROOT, "build_installer.bat")
+_SPEC = os.path.join(_REPO_ROOT, "tools", "build_installer.spec")
+_BAT = os.path.join(_REPO_ROOT, "tools", "build_installer.bat")
 _GITIGNORE = os.path.join(_REPO_ROOT, ".gitignore")
 
 
@@ -187,11 +187,17 @@ class T_M_P0_INSTALLER_EXE_GUI(unittest.TestCase):
             "uninstall(", body)
 
     def test_PERMANENT_h_spec_bundles_modules_tree(self):
+        # M_P0_REPO_ROOT_TIDY (2026-05-01): datas list now joins on
+        # the SPEC-derived HERE so the build is cwd-independent.
+        # Match the path-explicit form, with the destination still
+        # 'modules' / 'resources' relative to _MEIPASS at runtime.
         self.assertIn(
-            "('modules', 'modules')", self._spec_src,
+            "os.path.join(HERE, 'modules'), 'modules'",
+            self._spec_src,
             "build_installer.spec MUST bundle modules/ tree.")
         self.assertIn(
-            "('resources', 'resources')", self._spec_src)
+            "os.path.join(HERE, 'resources'), 'resources'",
+            self._spec_src)
 
     def test_PERMANENT_i_spec_onefile_windowed(self):
         self.assertIn("console=False", self._spec_src)

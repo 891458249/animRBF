@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller spec for RBFtools standalone installer GUI.
 
-Run via ``build_installer.bat`` or directly:
+Run via ``tools/build_installer.bat`` or directly:
 
-    python -m PyInstaller build_installer.spec --noconfirm --clean
+    python -m PyInstaller tools/build_installer.spec --noconfirm --clean
 
 Produces ``dist/RBFtoolsInstaller.exe`` — a single self-contained
 binary that ships:
@@ -22,11 +22,15 @@ machine — no Python installation needed on the target.
 import os
 
 block_cipher = None
-HERE = os.getcwd()
+# M_P0_REPO_ROOT_TIDY (2026-05-01): SPEC is a global injected by
+# PyInstaller pointing at this .spec file's absolute path. Resolve
+# the repo root from SPEC (one level up from tools/) so the build
+# works regardless of cwd at invocation time.
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(SPEC)))
 
 
 a = Analysis(
-    ['installer_gui.py'],
+    [os.path.join(HERE, 'installer_gui.py')],
     pathex=[HERE],
     binaries=[],
     datas=[
@@ -34,8 +38,8 @@ a = Analysis(
         # copy the module content into the user's Maya modules
         # directory at runtime. The (src, dst) tuple's dst is
         # relative to the unpacked _MEIPASS root at runtime.
-        ('modules', 'modules'),
-        ('resources', 'resources'),
+        (os.path.join(HERE, 'modules'), 'modules'),
+        (os.path.join(HERE, 'resources'), 'resources'),
     ],
     hiddenimports=[
         # M_P0_INSTALLER_INLINE (2026-05-01): install.py was

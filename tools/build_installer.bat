@@ -15,7 +15,10 @@ REM   double-click this file, or run from a PowerShell / cmd prompt
 REM   in the repo root.
 REM ====================================================================
 
-cd /d "%~dp0"
+REM M_P0_REPO_ROOT_TIDY (2026-05-01): bat lives in tools/, so %~dp0
+REM is the tools\ absolute path. Step up one level so PyInstaller
+REM treats the repo root as cwd; dist/ + build/ land there.
+cd /d "%~dp0..\"
 
 echo.
 echo [1/3] Ensuring PyInstaller is installed...
@@ -28,7 +31,7 @@ if errorlevel 1 (
 
 echo.
 echo [2/3] Building RBFtoolsInstaller.exe ^(this takes ~30s^)...
-python -m PyInstaller build_installer.spec --noconfirm --clean
+python -m PyInstaller tools\build_installer.spec --noconfirm --clean
 if errorlevel 1 (
     echo [ERROR] PyInstaller build failed.
     pause
