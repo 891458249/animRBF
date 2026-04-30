@@ -11,7 +11,9 @@ import errno
 import logging
 import os
 import shutil
+import stat
 import subprocess
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -252,17 +254,46 @@ def copyDir(source, destination):
 
     :return: True, if copying was successful.
     :rtype: bool
+
+    M_P0_DRAGDROP_PERMERR_RETRY (2026-04-30): mirrors install.py
+    _copy_tree's 3-retry + sleep(1) loop. Maya unloadPlugin does
+    NOT immediately release the Windows OS file handle on the
+    underlying .mll — there is a 1-3s settle window during which
+    a follow-up shutil.copytree to the same install path raises
+    PermissionError. Catches PermissionError + OSError in addition
+    to the original shutil.Error, retries up to 3 times with a
+    1-second backoff between attempts, and clears any partial
+    destination tree between retries so the next copytree starts
+    clean.
     """
-    try:
-        shutil.copytree(str(source), str(destination))
-        logInfo("Copying: {} to: {}".format(source, destination))
-    except shutil.Error as error:
-        message = "Error copying: {} to: {}".format(source, destination)
-        logInfo(message)
-        logInfo(str(error))
-        om2.MGlobal.displayError(message)
-        return False
-    return True
+    for attempt in range(3):
+        try:
+            shutil.copytree(str(source), str(destination))
+            logInfo("Copying: {} to: {}".format(source, destination))
+            return True
+        except (shutil.Error, OSError, PermissionError) as error:
+            if attempt < 2:
+                logInfo(
+                    "Retry {} after lock on copy to: {} ({})".format(
+                        attempt + 1, destination, error))
+                time.sleep(1)
+                # Partial residue defeats the next copytree (it
+                # rejects an existing destination); best-effort
+                # clean before the retry.
+                try:
+                    if os.path.isdir(str(destination)):
+                        shutil.rmtree(
+                            str(destination), ignore_errors=True)
+                except Exception:
+                    pass
+                continue
+            message = "Error copying: {} to: {}".format(
+                source, destination)
+            logInfo(message)
+            logInfo(str(error))
+            om2.MGlobal.displayError(message)
+            return False
+    return False
 
 
 def removeDir(path):
@@ -273,17 +304,47 @@ def removeDir(path):
 
     :return: True, if deleting was successful.
     :rtype: bool
+
+    M_P0_DRAGDROP_PERMERR_RETRY (2026-04-30): mirrors install.py
+    _remove_tree's onerror + retry pattern. Maya unloadPlugin
+    leaves the Windows OS file handle on the .mll briefly held
+    (1-3s); shutil.rmtree raises PermissionError during that
+    window. The onerror callback force-clears the read-only flag
+    (the rarer chmod-locked case) and the outer 3-retry loop
+    absorbs the file-handle settle delay. Idempotent: returns
+    True without raising when the path is already gone.
     """
-    try:
-        shutil.rmtree(str(path))
-        logInfo("Removed: {}".format(path))
-    except shutil.Error as error:
-        message = "Error deleting folder: {}".format(path)
-        logInfo(message)
-        logInfo(str(error))
-        om2.MGlobal.displayError(message)
-        return False
-    return True
+    if not os.path.isdir(str(path)):
+        logInfo("Removed (already gone): {}".format(path))
+        return True
+
+    def _on_rm_error(func, fpath, exc_info):
+        try:
+            os.chmod(fpath, stat.S_IWRITE)
+            func(fpath)
+        except Exception:
+            # Outer retry loop is the canonical recovery — silent
+            # here so the original exception bubbles cleanly.
+            pass
+
+    for attempt in range(3):
+        try:
+            shutil.rmtree(str(path), onerror=_on_rm_error)
+            logInfo("Removed: {}".format(path))
+            return True
+        except (shutil.Error, OSError, PermissionError) as error:
+            if attempt < 2:
+                logInfo(
+                    "Retry {} after lock on: {} ({})".format(
+                        attempt + 1, path, error))
+                time.sleep(1)
+                continue
+            message = "Error deleting folder: {}".format(path)
+            logInfo(message)
+            logInfo(str(error))
+            om2.MGlobal.displayError(message)
+            return False
+    return False
 
 
 def removeFile(fileName):
