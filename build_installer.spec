@@ -85,4 +85,11 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # Windows file-explorer / taskbar icon. PyInstaller 6.x
+    # accepts a .png path and converts internally; for older
+    # versions provide a .ico instead. The same image is also
+    # loaded at runtime via tk.PhotoImage(file=...) so the
+    # title-bar matches the file-explorer thumbnail.
+    icon=os.path.join(
+        HERE, 'modules', 'RBFtools', 'icons', 'RBFtools.png'),
 )

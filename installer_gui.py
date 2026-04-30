@@ -60,6 +60,50 @@ if _REPO_ROOT not in sys.path:
 
 
 # ----------------------------------------------------------------------
+# Dark theme palette + asset paths.
+#
+# Self-contained — no external theme library (sv-ttk / customtkinter
+# would bloat the PyInstaller bundle and are not stdlib). The
+# palette below is hand-tuned against ttk's "clam" base theme which
+# is the most customizable of the three built-ins.
+# ----------------------------------------------------------------------
+
+
+_DARK = {
+    "bg":              "#2b2b2b",   # window + frame background
+    "fg":              "#e0e0e0",   # default text
+    "fg_muted":        "#9a9a9a",   # hint / "leave blank for default" label
+    "fg_warn":         "#e6a040",   # "no Maya detected" warning
+    "field_bg":        "#3c3c3c",   # entry / log input background
+    "field_fg":        "#e6e6e6",
+    "border":          "#4a4a4a",   # separator + entry border
+    "btn_bg":          "#404040",
+    "btn_bg_hover":    "#505050",
+    "btn_bg_pressed":  "#5a5a5a",
+    "log_bg":          "#1e1e1e",   # darker than field for code-area feel
+    "log_fg":          "#d0d0d0",
+    "select_bg":       "#264f78",   # VS Code blue selection
+    "indicator":       "#4ea1ff",   # checkbox / radio indicator
+}
+
+
+def _icon_path():
+    """Return the absolute path to the window icon, or None if it
+    cannot be located. Searches both the live repo layout and the
+    PyInstaller _MEIPASS unpacked-resources directory so the same
+    code path works in both dev runs and the bundled .exe."""
+    candidates = [
+        os.path.join(
+            _REPO_ROOT, "modules", "RBFtools", "icons",
+            "RBFtools.png"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+# ----------------------------------------------------------------------
 # i18n — minimal embedded EN + ZH dictionary.
 #
 # Self-contained so the standalone .exe does not need to import the
@@ -313,7 +357,128 @@ class InstallerWindow(object):
         self._root.title(_tr(self._lang, "window_title"))
         self._root.geometry("720x560")
 
+        # Theme + icon — both are fail-soft. If the dark theme
+        # configuration raises (extreme rare; only seen on truly
+        # broken Tk installs) the GUI falls back to default light
+        # appearance rather than crashing on startup. Same for
+        # the icon: a missing file just leaves the default Tk
+        # feather.
+        self._apply_dark_theme()
+        self._apply_window_icon()
+
         self._build()
+
+    def _apply_dark_theme(self):
+        """Configure ttk.Style + raw Tk option_add so every widget
+        the GUI uses renders with the _DARK palette. The ``clam``
+        base theme is the most customizable of the stdlib trio
+        (default / clam / alt); it accepts background + bordercolor
+        overrides on every widget class without falling back to
+        the OS native renderer."""
+        try:
+            style = self._ttk.Style(self._root)
+        except Exception:
+            return
+        try:
+            style.theme_use("clam")
+        except Exception:
+            # clam should always be available; skip theming if not.
+            return
+
+        # Root window background (raw Tk).
+        try:
+            self._root.configure(bg=_DARK["bg"])
+        except Exception:
+            pass
+
+        # ttk widget classes — the ones the GUI uses.
+        style.configure(
+            ".",
+            background=_DARK["bg"],
+            foreground=_DARK["fg"],
+            fieldbackground=_DARK["field_bg"],
+            bordercolor=_DARK["border"],
+            lightcolor=_DARK["bg"],
+            darkcolor=_DARK["bg"],
+            insertcolor=_DARK["fg"],
+        )
+        style.configure(
+            "TFrame", background=_DARK["bg"])
+        style.configure(
+            "TLabel",
+            background=_DARK["bg"], foreground=_DARK["fg"])
+        # "Hint" + "Warn" subclasses for the muted / warning labels.
+        style.configure(
+            "Hint.TLabel",
+            background=_DARK["bg"], foreground=_DARK["fg_muted"])
+        style.configure(
+            "Warn.TLabel",
+            background=_DARK["bg"], foreground=_DARK["fg_warn"])
+        style.configure(
+            "Header.TLabel",
+            background=_DARK["bg"], foreground=_DARK["fg"],
+            font=("Segoe UI", 10, "bold"))
+        style.configure(
+            "TCheckbutton",
+            background=_DARK["bg"], foreground=_DARK["fg"],
+            indicatorcolor=_DARK["field_bg"],
+            focuscolor=_DARK["bg"])
+        style.map(
+            "TCheckbutton",
+            background=[("active", _DARK["bg"])],
+            foreground=[("active", _DARK["fg"])],
+            indicatorcolor=[
+                ("selected", _DARK["indicator"]),
+                ("!selected", _DARK["field_bg"])])
+        style.configure(
+            "TRadiobutton",
+            background=_DARK["bg"], foreground=_DARK["fg"],
+            indicatorcolor=_DARK["field_bg"],
+            focuscolor=_DARK["bg"])
+        style.map(
+            "TRadiobutton",
+            background=[("active", _DARK["bg"])],
+            foreground=[("active", _DARK["fg"])],
+            indicatorcolor=[
+                ("selected", _DARK["indicator"]),
+                ("!selected", _DARK["field_bg"])])
+        style.configure(
+            "TButton",
+            background=_DARK["btn_bg"], foreground=_DARK["fg"],
+            bordercolor=_DARK["border"],
+            focuscolor=_DARK["bg"])
+        style.map(
+            "TButton",
+            background=[
+                ("pressed", _DARK["btn_bg_pressed"]),
+                ("active", _DARK["btn_bg_hover"])],
+            foreground=[("disabled", _DARK["fg_muted"])])
+        style.configure(
+            "TEntry",
+            fieldbackground=_DARK["field_bg"],
+            foreground=_DARK["field_fg"],
+            insertcolor=_DARK["fg"],
+            bordercolor=_DARK["border"])
+        style.configure(
+            "TSeparator", background=_DARK["border"])
+
+    def _apply_window_icon(self):
+        """Load the RBF-node PNG icon as the window's title-bar +
+        taskbar image. Held on ``self._icon_image`` to defeat the
+        Tk garbage collector — a dropped reference would silently
+        revert to the default feather icon."""
+        path = _icon_path()
+        if not path:
+            return
+        try:
+            self._icon_image = self._tk.PhotoImage(file=path)
+            # iconphoto(True, ...) makes the image the default for
+            # this window AND every subsequent Toplevel created by
+            # the same Tk root, which is what the user wants for a
+            # consistent title-bar look.
+            self._root.iconphoto(True, self._icon_image)
+        except Exception:
+            self._icon_image = None
 
     def _track(self, widget, key, **fmt):
         """Register *widget* for retranslation. *key* is the i18n
@@ -352,7 +517,7 @@ class InstallerWindow(object):
             fill="x", pady=(6, 6))
 
         # Header.
-        header_lbl = ttk.Label(outer, font=("Segoe UI", 10, "bold"))
+        header_lbl = ttk.Label(outer, style="Header.TLabel")
         header_lbl.pack(anchor="w")
         self._track(header_lbl, "header_versions")
 
@@ -361,7 +526,7 @@ class InstallerWindow(object):
         ver_frame.pack(fill="x")
         if not self._installable:
             empty_lbl = ttk.Label(
-                ver_frame, foreground="#A05000")
+                ver_frame, style="Warn.TLabel")
             empty_lbl.pack(anchor="w")
             self._track(empty_lbl, "no_maya_detected")
         else:
@@ -384,7 +549,7 @@ class InstallerWindow(object):
         mode_frame = ttk.Frame(outer)
         mode_frame.pack(fill="x")
         action_lbl = ttk.Label(
-            mode_frame, font=("Segoe UI", 10, "bold"))
+            mode_frame, style="Header.TLabel")
         action_lbl.pack(side="left")
         self._track(action_lbl, "action_label")
         for value, key in (("install", "action_install"),
@@ -398,25 +563,32 @@ class InstallerWindow(object):
         # Install path.
         path_frame = ttk.Frame(outer, padding=(0, 8, 0, 0))
         path_frame.pack(fill="x")
-        path_lbl = ttk.Label(path_frame, font=("Segoe UI", 9))
+        path_lbl = ttk.Label(path_frame)
         path_lbl.pack(side="left")
         self._track(path_lbl, "install_path")
         ttk.Entry(
             path_frame, textvariable=self._install_dir_var,
             width=60,
         ).pack(side="left", padx=(8, 0), fill="x", expand=True)
-        hint_lbl = ttk.Label(outer, foreground="#606060")
+        hint_lbl = ttk.Label(outer, style="Hint.TLabel")
         hint_lbl.pack(anchor="w")
         self._track(hint_lbl, "install_path_hint")
 
-        # Log panel.
-        log_lbl = ttk.Label(outer, font=("Segoe UI", 10, "bold"))
+        # Log panel — uses raw Tk ScrolledText (not ttk) so we set
+        # its colors directly instead of via the Style system.
+        log_lbl = ttk.Label(outer, style="Header.TLabel")
         log_lbl.pack(anchor="w", pady=(8, 2))
         self._track(log_lbl, "log_label")
         from tkinter import scrolledtext
         self._log = scrolledtext.ScrolledText(
             outer, height=14, state="disabled",
-            font=("Consolas", 9))
+            font=("Consolas", 9),
+            bg=_DARK["log_bg"], fg=_DARK["log_fg"],
+            insertbackground=_DARK["fg"],
+            selectbackground=_DARK["select_bg"],
+            selectforeground=_DARK["fg"],
+            borderwidth=0,
+            highlightthickness=0)
         self._log.pack(fill="both", expand=True)
 
         # Buttons.
