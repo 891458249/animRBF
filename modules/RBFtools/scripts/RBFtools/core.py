@@ -25,13 +25,12 @@ import contextlib
 import math
 import re
 import warnings
-from dataclasses import dataclass
 
 import maya.cmds as cmds
 
 
 # =====================================================================
-#  M_B24a2-1 — Multi-source driver public API + dataclass
+#  M_B24a2-1 — Multi-source driver public API
 # =====================================================================
 
 # Module-level per-session flag for legacy migration warning. Reset to
@@ -40,30 +39,103 @@ import maya.cmds as cmds
 _MIGRATION_WARNING_ISSUED = False
 
 
-@dataclass(frozen=True)
-class DriverSource:
+class DriverSource(object):
     """Per-driver companion metadata for the M_B24 multi-source schema.
 
     Mirrors C++ ``driverSource[d]`` compound (see RBFtools.h M_B24a1).
-    Frozen for safety; ``attrs`` is a tuple (not list) to satisfy
-    immutability. Construct from a list via ``tuple(attrs_list)``.
+    Frozen-style: fields exposed as read-only properties; equality +
+    hash + repr defined explicitly. ``attrs`` is a tuple (not list)
+    to satisfy immutability — construct from a list via
+    ``tuple(attrs_list)``.
 
     encoding values match inputEncoding enum:
         0 = Raw, 1 = Quaternion, 2 = BendRoll, 3 = ExpMap, 4 = SwingTwist
-    """
-    node: str
-    attrs: tuple
-    weight: float = 1.0
-    encoding: int = 0
 
-    def __post_init__(self):
-        if self.weight < 0.0:
+    M_P0_PY2_COMPAT (2026-05-01): rewritten from @dataclass(frozen=True)
+    to a hand-written ``__slots__`` class so the module imports under
+    Maya 2022's optional py2 runtime (mayapy2). The dataclasses module
+    is py3.7+ only. DrivenSource (below) has used the same hand-rolled
+    pattern since M_DRIVEN_MULTI; this aligns DriverSource with it.
+    """
+
+    __slots__ = ("_node", "_attrs", "_weight", "_encoding")
+
+    def __init__(self, node, attrs, weight=1.0, encoding=0):
+        if not isinstance(node, str):
+            raise TypeError(
+                "DriverSource.node must be a str, got {!r}".format(
+                    type(node).__name__))
+        weight = float(weight)
+        encoding = int(encoding)
+        if weight < 0.0:
             raise ValueError(
-                "DriverSource.weight must be >= 0, got {}".format(self.weight))
-        if self.encoding not in (0, 1, 2, 3, 4):
+                "DriverSource.weight must be >= 0, got {}".format(
+                    weight))
+        if encoding not in (0, 1, 2, 3, 4):
             raise ValueError(
                 "DriverSource.encoding must be 0..4, got {}".format(
-                    self.encoding))
+                    encoding))
+        # Bypass __setattr__ guard for the initial assignment.
+        object.__setattr__(self, "_node", node)
+        object.__setattr__(self, "_attrs", tuple(attrs))
+        object.__setattr__(self, "_weight", weight)
+        object.__setattr__(self, "_encoding", encoding)
+
+    # --- read-only field accessors --------------------------------
+
+    @property
+    def node(self):
+        return self._node
+
+    @property
+    def attrs(self):
+        return self._attrs
+
+    @property
+    def weight(self):
+        return self._weight
+
+    @property
+    def encoding(self):
+        return self._encoding
+
+    # --- frozen guard ---------------------------------------------
+
+    def __setattr__(self, name, value):
+        # Allow internal slot writes from __init__; reject everything
+        # else (matches @dataclass(frozen=True) behaviour, which
+        # raises FrozenInstanceError -- a subclass of AttributeError).
+        raise AttributeError(
+            "cannot assign to field {!r}: DriverSource is frozen"
+            .format(name))
+
+    # --- equality / hash / repr -----------------------------------
+
+    def __eq__(self, other):
+        if not isinstance(other, DriverSource):
+            return NotImplemented
+        return (
+            self._node == other._node
+            and self._attrs == other._attrs
+            and self._weight == other._weight
+            and self._encoding == other._encoding)
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self):
+        return hash(
+            (self._node, self._attrs, self._weight, self._encoding))
+
+    def __repr__(self):
+        return (
+            "DriverSource(node={!r}, attrs={!r}, weight={!r}, "
+            "encoding={!r})").format(
+                self._node, list(self._attrs),
+                self._weight, self._encoding)
 
 from RBFtools.constants import (
     PLUGIN_NAME,

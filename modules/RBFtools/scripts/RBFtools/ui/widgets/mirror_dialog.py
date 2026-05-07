@@ -19,10 +19,14 @@ from __future__ import absolute_import
 from RBFtools.ui.compat import QtWidgets, QtCore
 from RBFtools.ui.i18n import tr
 from RBFtools.ui.widgets.help_button import HelpButton
-from RBFtools.constants import (
-    # No M3.2-specific constant additions; we read the naming rule
-    # presets directly from RBFtools.core_mirror at run time.
-)
+
+# M_P0_PY2_COMPAT (2026-05-01): the original M3.2 commit left a
+# placeholder ``from RBFtools.constants import ()`` block here for
+# future M3.2 additions. An empty import list is a SyntaxError in
+# every Python version (py2 + py3) — the file would fail to import
+# the moment any caller actually references it. Live tests just
+# happened never to import it. Block removed; if M3.2 wants
+# constants later, add a normal import statement.
 
 
 class MirrorDialog(QtWidgets.QDialog):
