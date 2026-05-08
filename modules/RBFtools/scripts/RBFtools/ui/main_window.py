@@ -2243,12 +2243,17 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             raw_dvn = list(dvn_editor.routed_targets())
         except (AttributeError, Exception):
             raw_dvn = []
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): plain ``(node or "")``
+        # / ``a`` instead of ``str(...)``. Under py2, ``str(u"中文")``
+        # raises UnicodeEncodeError; Maya node names are usually
+        # ASCII but the routing list may carry tr()-translated
+        # placeholders during retranslate.
         driver_targets = [
-            (str(node or ""), [str(a) for a in (attrs or [])])
+            ((node or ""), [a for a in (attrs or [])])
             for node, attrs in raw_drv
         ]
         driven_targets = [
-            (str(node or ""), [str(a) for a in (attrs or [])])
+            ((node or ""), [a for a in (attrs or [])])
             for node, attrs in raw_dvn
         ]
         # M_LIVE_DEBUG: explicit Script-Editor traces so a live

@@ -65,7 +65,10 @@ class BoneDataGroupBox(QtWidgets.QGroupBox):
 
     def __init__(self, bone_name, attrs, side, parent=None):
         super(BoneDataGroupBox, self).__init__(parent)
-        self._bone_name = str(bone_name or "<unset>")
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): plain ``(... or fallback)``
+        # without ``str()`` — under py2, ``str(u"中文")`` raises
+        # UnicodeEncodeError via the ASCII codec.
+        self._bone_name = bone_name or "<unset>"
         self._attrs = list(attrs or [])
         self._side = side
 

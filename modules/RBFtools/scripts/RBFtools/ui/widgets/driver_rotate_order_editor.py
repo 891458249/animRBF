@@ -93,12 +93,19 @@ class DriverRotateOrderEditor(QtWidgets.QWidget):
     # ------------------------------------------------------------------
 
     def set_label(self, text):
-        self._label_text = str(text or "")
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): plain ``(text or "")``
+        # instead of ``str(text or "")``. Under py2, ``str(u"中文")``
+        # tries ASCII codec and raises UnicodeEncodeError; the
+        # surrounding _retranslate_all() loop then aborts mid-way,
+        # which is why "only some labels switch language". Qt
+        # accepts unicode/str interchangeably.
+        self._label_text = text or ""
         self._lbl_title.setText(self._label_text)
         self._lbl_title.setVisible(bool(self._label_text))
 
     def set_empty_hint(self, text):
-        self._empty_hint_text = str(text or "")
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): see set_label.
+        self._empty_hint_text = text or ""
         self._refresh_empty_hint()
 
     def set_driver_sources(self, names):
@@ -112,7 +119,8 @@ class DriverRotateOrderEditor(QtWidgets.QWidget):
         ``tr("driver_rotate_order_row_label").format(idx=i+1, name=...)``
         so the user sees ``"Driver 1 (joint_arm_L)"`` per row.
         """
-        names = [str(n or "") for n in (names or [])]
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): see set_label.
+        names = [(n or "") for n in (names or [])]
         # Capture existing values so we can carry them forward.
         existing = self.get_values()
         # Tear down current rows.

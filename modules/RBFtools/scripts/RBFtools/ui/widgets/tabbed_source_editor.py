@@ -116,7 +116,10 @@ class _SourceTabContent(QtWidgets.QWidget):
     def set_node_name(self, name):
         # Python cache + LineEdit display kept in lockstep. The
         # cache is the source of truth read by _tab_node().
-        self._node_name = str(name or "")
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): plain ``(name or "")``
+        # instead of ``str(name or "")``. Under py2, ``str(u"...")``
+        # of a non-ASCII unicode raises UnicodeEncodeError.
+        self._node_name = name or ""
         self._field_node.setText(self._node_name)
 
     def node_name(self):
@@ -380,11 +383,13 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         content = self._tabs.widget(idx)
         if content is None:
             return ""
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): plain ``(... or "")``
+        # without ``str()`` — see set_node_name.
         try:
-            return str(content.node_name() or "")
+            return content.node_name() or ""
         except AttributeError:
             try:
-                return str(getattr(content, "_node_name", "") or "")
+                return getattr(content, "_node_name", "") or ""
             except Exception:
                 return ""
 
