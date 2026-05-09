@@ -37,6 +37,7 @@
 #include <maya/MMatrix.h>
 #include <maya/MPlugArray.h>
 #include <maya/MPoint.h>
+#include <maya/MEulerRotation.h>
 #include <maya/MQuaternion.h>
 #include <maya/MString.h>
 #include <maya/MStringArray.h>
@@ -142,6 +143,30 @@ public:
     // double-cover discontinuity; caller does not need to canonicalize.
     static void encodeQuaternionToExpMap(double qx, double qy, double qz, double qw,
                                          double &lx, double &ly, double &lz);
+    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): inverse of
+    // encodeEulerToQuaternion. Routes through MEulerRotation::reorderIt
+    // so the result matches Maya's native rotateOrder convention.
+    static void decodeQuaternionToEuler(double qx, double qy, double qz, double qw,
+                                        short rotateOrder,
+                                        double &rx, double &ry, double &rz);
+    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): inverse of
+    // encodeQuaternionToExpMap, then to Euler. Taylor branch for θ → 0
+    // mirrors the encode side so log(identity) round-trips to (0, 0, 0).
+    static void decodeExpMapToEuler(double lx, double ly, double lz,
+                                    short rotateOrder,
+                                    double &rx, double &ry, double &rz);
+    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): nlerp blend of N
+    // unit quaternions with antipodal correction against the first
+    // quaternion as the reference hemisphere. Returns the normalized
+    // weighted sum; degenerate (sum near zero) falls back to the
+    // reference. Ordering of (qx, qy, qz, qw) matches MQuaternion.
+    static void nlerpQuaternions(const std::vector<double> &qxs,
+                                 const std::vector<double> &qys,
+                                 const std::vector<double> &qzs,
+                                 const std::vector<double> &qws,
+                                 const std::vector<double> &weights,
+                                 double &outX, double &outY,
+                                 double &outZ, double &outW);
     // M2.1b: Swing-Twist decomposition of a unit quaternion about a
     // principal axis. q = q_swing · q_twist. When the projection norm
     // (q_w² + axis_component²) collapses below a numeric epsilon the
@@ -225,6 +250,38 @@ public:
                                short kernelType);
     static double interpolateRbf(double value, double width, short kernelType);
     static std::vector<double> normalizeVector(std::vector<double> vec, std::vector<double> factors);
+    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): replay the per-pose
+    // distance + interpolateRbf loop without doing the per-channel
+    // weighted sum. Used by applyOutputEncodingBlend so the quat
+    // blend can see per-pose phi values that getPoseWeights folds
+    // away. Cheap enough — same arithmetic getPoseWeights already
+    // performs once per compute.
+    static void computePerPosePhi(MDoubleArray &outPhi,
+                                  BRMatrix poses,
+                                  std::vector<double> norms,
+                                  std::vector<double> driver,
+                                  MIntArray poseModes,
+                                  const std::vector<double> &widths,
+                                  double widthFallback,
+                                  int distType,
+                                  int encoding,
+                                  bool isMatrixMode,
+                                  short kernelType);
+    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): rebuild the entries
+    // of weightsArray that fall inside Euler 3-blocks under the
+    // node-level outputEncoding. For each 3-block (output[s..s+2])
+    // collects per-pose Euler triples, encodes to quat, nlerp blends
+    // with per-pose phi (Quaternion mode) or weights ExpMap vectors
+    // linearly (ExpMap mode), then decodes back to Euler and
+    // overwrites weightsArray[s..s+2]. Channels outside any block
+    // (count not divisible by 3, or trailing tail) keep their
+    // legacy weighted-sum value. outEncoding 2 / 4 fall through;
+    // the caller emits the once-per-rig "deferred to v5.x" warning.
+    static void applyOutputEncodingBlend(MDoubleArray &weightsArray,
+                                         const MDoubleArray &perPosePhi,
+                                         const BRMatrix &poseVals,
+                                         short outputEncoding,
+                                         short rotateOrder);
     // Commit 0b (M_PER_POSE_SIGMA): width parameter is now per-pose.
     // widths[i] is consumed inside the i-th pose loop iteration as
     // the σ for interpolateRbf(dist, σ_i, kernel). Empty vector or
@@ -463,6 +520,12 @@ private:
     // on every DG evaluation.
     bool  inputEncodingWarningIssued;
     short prevInputEncodingVal;
+
+    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): once-per-rig flag
+    // for the BendRoll(2) / SwingTwist(4) outputEncoding deferral
+    // warning. Quat (1) / ExpMap (3) backends are implemented; the
+    // other two are deferred to v5.x post-final.
+    bool  outputEncodingDeferredWarningIssued;
 
     // M2.2: three independent once-per-config warning flags for the
     // QWA path. `qwaConfigWarningIssued` is for invalid quat-group

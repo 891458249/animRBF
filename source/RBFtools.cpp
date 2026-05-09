@@ -158,6 +158,7 @@ RBFtools::RBFtools()
       prevSolverMethodVal(0),          // M1.4: Auto; matches solverMethod default.
       inputEncodingWarningIssued(false), // M2.1a: fresh warning on first fall-back.
       prevInputEncodingVal(0),         // M2.1a: Raw; matches inputEncoding default.
+      outputEncodingDeferredWarningIssued(false), // M_P0_QUATERNION_BACKEND_LAND: BendRoll/SwingTwist deferral notice.
       qwaConfigWarningIssued(false),   // M2.2: fresh warnings on first config / edge hit.
       qwaClippedWarningIssued(false),
       qwaDegenerateWarningIssued(false),
@@ -1973,6 +1974,61 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     showArray(weightsArray, thisName + " : RBF Weights");
 
                 // -----------------------------------------------
+                // M_P0_QUATERNION_BACKEND_LAND (2026-05-10):
+                // node-level outputEncoding inverse transform.
+                // Generic mode only — Matrix mode's output is one-hot
+                // pose weights, not Euler triples, so the encoding has
+                // no semantic anchor there.
+                //
+                // Quaternion / ExpMap rebuild the per-channel weighted
+                // sum that getPoseWeights produced into a quat-blended
+                // value. BendRoll (2) / SwingTwist (4) fall through to
+                // the legacy weighted sum and emit a once-per-rig
+                // warning — backend support deferred to v5.x post-final
+                // (each requires bespoke decomposition + composition
+                // math distinct from the Quat / ExpMap pair).
+                // -----------------------------------------------
+                MPlug outEncRebuildPlug(thisNode, RBFtools::outputEncoding);
+                short outEncRebuildVal = outEncRebuildPlug.asShort();
+                if (genericMode && outEncRebuildVal != 0)
+                {
+                    if (outEncRebuildVal == 1 || outEncRebuildVal == 3)
+                    {
+                        MDoubleArray perPosePhi;
+                        computePerPosePhi(perPosePhi,
+                                          matPoses,
+                                          inputNorms,
+                                          driver,
+                                          poseModes,
+                                          perPoseWidths,
+                                          getRadiusValue(),
+                                          distanceTypeVal,
+                                          (int)effectiveEncoding,
+                                          /*isMatrixMode*/ !genericMode,
+                                          kernelVal);
+                        // rotateOrder = 0 (XYZ default). Per-driven-source
+                        // rotateOrder schema (drivenInputRotateOrder) does
+                        // not yet exist — see addendum
+                        // §M_P0_QUATERNION_BACKEND_LAND for the v5.x
+                        // forward pointer.
+                        applyOutputEncodingBlend(weightsArray,
+                                                 perPosePhi,
+                                                 matValues,
+                                                 outEncRebuildVal,
+                                                 /*rotateOrder*/ 0);
+                    }
+                    else if (!outputEncodingDeferredWarningIssued)
+                    {
+                        MGlobal::displayWarning(thisName + MString(
+                            ": outputEncoding=BendRoll(2)/SwingTwist(4) "
+                            "not yet implemented; falling back to per-"
+                            "channel weighted sum. Backend land "
+                            "deferred to v5.x post-final."));
+                        outputEncodingDeferredWarningIssued = true;
+                    }
+                }
+
+                // -----------------------------------------------
                 // define the final values
                 // -----------------------------------------------
 
@@ -3176,6 +3232,294 @@ void RBFtools::encodeEulerToQuaternion(double rx, double ry, double rz,
 
 //
 // Description:
+//      M_P0_QUATERNION_BACKEND_LAND (2026-05-10) — inverse of
+//      encodeEulerToQuaternion. Maya's MQuaternion::asEulerRotation
+//      returns the canonical XYZ Tait-Bryan extraction; reorderIt
+//      then rewrites the same orientation under the requested
+//      rotateOrder so the result matches the convention the encode
+//      side used. Output (rx, ry, rz) is in radians.
+//
+void RBFtools::decodeQuaternionToEuler(double qx, double qy, double qz,
+                                       double qw, short rotateOrder,
+                                       double &rx, double &ry, double &rz)
+{
+    MQuaternion q(qx, qy, qz, qw);
+    MEulerRotation e = q.asEulerRotation();
+    MEulerRotation::RotationOrder order;
+    switch (rotateOrder)
+    {
+        case 1:  order = MEulerRotation::kYZX; break;
+        case 2:  order = MEulerRotation::kZXY; break;
+        case 3:  order = MEulerRotation::kXZY; break;
+        case 4:  order = MEulerRotation::kYXZ; break;
+        case 5:  order = MEulerRotation::kZYX; break;
+        case 0:
+        default: order = MEulerRotation::kXYZ; break;
+    }
+    e.reorderIt(order);
+    rx = e.x;
+    ry = e.y;
+    rz = e.z;
+}
+
+
+//
+// Description:
+//      M_P0_QUATERNION_BACKEND_LAND (2026-05-10) — inverse of
+//      encodeQuaternionToExpMap, then to Euler. ExpMap → Quat uses
+//      the standard q = (axis * sin(θ/2), cos(θ/2)) reconstruction
+//      with a Taylor branch (sin(θ/2)/θ → 1/2) for the θ → 0
+//      neighbourhood so log(identity) round-trips to (0, 0, 0)
+//      without a divide-by-zero. The encode side canonicalises to
+//      the q_w ≥ 0 hemisphere; the decode side reproduces a quat
+//      with q_w = cos(θ/2) ≥ 0 for θ ∈ [0, π], matching that.
+//
+void RBFtools::decodeExpMapToEuler(double lx, double ly, double lz,
+                                   short rotateOrder,
+                                   double &rx, double &ry, double &rz)
+{
+    const double angle = sqrt(lx * lx + ly * ly + lz * lz);
+    double qx, qy, qz, qw;
+    if (angle < 1.0e-9)
+    {
+        // Taylor: sin(θ/2) / θ → 1/2 as θ → 0; cos(θ/2) → 1.
+        qx = lx * 0.5;
+        qy = ly * 0.5;
+        qz = lz * 0.5;
+        qw = 1.0;
+    }
+    else
+    {
+        const double half = angle * 0.5;
+        const double s = sin(half) / angle;
+        qx = lx * s;
+        qy = ly * s;
+        qz = lz * s;
+        qw = cos(half);
+    }
+    decodeQuaternionToEuler(qx, qy, qz, qw, rotateOrder, rx, ry, rz);
+}
+
+
+//
+// Description:
+//      M_P0_QUATERNION_BACKEND_LAND (2026-05-10) — nlerp blend of
+//      N unit quaternions weighted by RBF activations. Antipodal
+//      correction picks the short-arc representative of each input
+//      quat against the first one as the reference hemisphere; this
+//      avoids the double-cover producing a near-zero average for
+//      two inputs that geometrically agree but differ in sign. The
+//      degenerate fallback (sum norm below 1e-9) returns the
+//      reference quat verbatim — this only happens when all weights
+//      collapse to zero or the inputs cancel exactly, both of which
+//      already mean "no signal"; identity rotation is the safest
+//      observable result.
+//
+//      nlerp (normalised linear interpolation) is the right blend
+//      for RBF: associative, commutative, and gradient-continuous
+//      under varying weights. SLERP would give constant angular
+//      speed but loses gradient smoothness when the active pose set
+//      changes; nlerp is what Maya-style rigging tools (Pose Space
+//      Deformer, etc.) use in production.
+//
+void RBFtools::nlerpQuaternions(const std::vector<double> &qxs,
+                                const std::vector<double> &qys,
+                                const std::vector<double> &qzs,
+                                const std::vector<double> &qws,
+                                const std::vector<double> &weights,
+                                double &outX, double &outY,
+                                double &outZ, double &outW)
+{
+    const size_t n = qxs.size();
+    if (n == 0)
+    {
+        outX = 0.0; outY = 0.0; outZ = 0.0; outW = 1.0;
+        return;
+    }
+    const double rx = qxs[0], ry = qys[0], rz = qzs[0], rw = qws[0];
+    double sumX = 0.0, sumY = 0.0, sumZ = 0.0, sumW = 0.0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        double qx = qxs[i], qy = qys[i], qz = qzs[i], qw = qws[i];
+        // Short-arc selection against the reference.
+        const double dot = qx * rx + qy * ry + qz * rz + qw * rw;
+        if (dot < 0.0)
+        {
+            qx = -qx; qy = -qy; qz = -qz; qw = -qw;
+        }
+        const double w = (i < weights.size()) ? weights[i] : 0.0;
+        sumX += w * qx;
+        sumY += w * qy;
+        sumZ += w * qz;
+        sumW += w * qw;
+    }
+    const double norm = sqrt(sumX*sumX + sumY*sumY + sumZ*sumZ + sumW*sumW);
+    if (norm < 1.0e-9)
+    {
+        outX = rx; outY = ry; outZ = rz; outW = rw;
+        return;
+    }
+    const double inv = 1.0 / norm;
+    outX = sumX * inv;
+    outY = sumY * inv;
+    outZ = sumZ * inv;
+    outW = sumW * inv;
+}
+
+
+//
+// Description:
+//      M_P0_QUATERNION_BACKEND_LAND (2026-05-10) — replay the per-
+//      pose distance + interpolateRbf loop without folding the
+//      result into a per-channel weighted sum. getPoseWeights
+//      already does exactly this on its way to the per-channel
+//      accumulate; we cannot read those phi values back out because
+//      the sum has been reduced. Re-running the loop keeps the math
+//      identical (same dist / sigma / kernel inputs) so the per-pose
+//      phi here matches what getPoseWeights used internally.
+//
+void RBFtools::computePerPosePhi(MDoubleArray &outPhi,
+                                 BRMatrix poses,
+                                 std::vector<double> norms,
+                                 std::vector<double> driver,
+                                 MIntArray poseModes,
+                                 const std::vector<double> &widths,
+                                 double widthFallback,
+                                 int distType,
+                                 int encoding,
+                                 bool isMatrixMode,
+                                 short kernelType)
+{
+    const unsigned int poseCount = poses.getRowSize();
+    outPhi.setLength(poseCount);
+    driver = normalizeVector(driver, norms);
+    for (unsigned int i = 0; i < poseCount; ++i)
+    {
+        std::vector<double> dv = driver;
+        std::vector<double> ps = poses.getRowVector(i);
+        if (isMatrixMode && dv.size() >= 4)
+        {
+            if (poseModes[i] == 1)
+                dv[3] = 0.0;
+            else if (poseModes[i] == 2)
+            {
+                dv[0] = 0.0;
+                dv[1] = 0.0;
+                dv[2] = 0.0;
+            }
+        }
+        const double dist = getPoseDelta(dv, ps, distType, encoding,
+                                          isMatrixMode);
+        const double sigma_i =
+            (i < widths.size() && widths[i] > 0.0)
+                ? widths[i]
+                : (widthFallback > 0.0 ? widthFallback : 1.0);
+        outPhi.set(interpolateRbf(dist, sigma_i, kernelType), i);
+    }
+}
+
+
+//
+// Description:
+//      M_P0_QUATERNION_BACKEND_LAND (2026-05-10) — overwrite the
+//      Euler 3-blocks of weightsArray with quat-blended values.
+//
+//      For each contiguous 3-block (output[s..s+2]):
+//        Quaternion (1): per-pose Euler → quat (encodeEulerToQuat),
+//                        nlerp with per-pose phi (antipodal short-arc),
+//                        decode back to Euler → overwrite [s..s+2].
+//        ExpMap (3):     per-pose Euler → quat → ExpMap, weighted
+//                        sum in ℝ³ (linear blend is the natural
+//                        Lie-algebra interpolation), decode back to
+//                        Euler → overwrite [s..s+2].
+//
+//      Channels not covered by a full 3-block (count % 3 != 0; tail
+//      remainder) keep their legacy per-channel weighted sum. This
+//      matches the assumption that Euler rotations are stored as
+//      contiguous (rx, ry, rz) triples — which is how recall_pose
+//      and add_pose write them.
+//
+//      rotateOrder is the node-level default for now; per-driven-source
+//      rotateOrder schema (drivenInputRotateOrder) does not yet exist
+//      and is deferred to v5.x.
+//
+void RBFtools::applyOutputEncodingBlend(MDoubleArray &weightsArray,
+                                        const MDoubleArray &perPosePhi,
+                                        const BRMatrix &poseVals,
+                                        short outputEncoding,
+                                        short rotateOrder)
+{
+    if (outputEncoding != 1 && outputEncoding != 3) return;
+    const unsigned int count = weightsArray.length();
+    const unsigned int poseCount = perPosePhi.length();
+    if (count == 0 || poseCount == 0) return;
+    const unsigned int blocks = count / 3;
+    if (blocks == 0) return;
+
+    std::vector<double> wts(poseCount);
+    for (unsigned int p = 0; p < poseCount; ++p)
+        wts[p] = perPosePhi[p];
+
+    for (unsigned int b = 0; b < blocks; ++b)
+    {
+        const unsigned int s = b * 3;
+        if (outputEncoding == 1)
+        {
+            // Quaternion path: encode → nlerp → decode.
+            std::vector<double> qxs(poseCount), qys(poseCount),
+                                 qzs(poseCount), qws(poseCount);
+            for (unsigned int p = 0; p < poseCount; ++p)
+            {
+                const double rx = poseVals(p, s + 0);
+                const double ry = poseVals(p, s + 1);
+                const double rz = poseVals(p, s + 2);
+                double qx, qy, qz, qw;
+                encodeEulerToQuaternion(rx, ry, rz, rotateOrder,
+                                        qx, qy, qz, qw);
+                qxs[p] = qx; qys[p] = qy; qzs[p] = qz; qws[p] = qw;
+            }
+            double oqx, oqy, oqz, oqw;
+            nlerpQuaternions(qxs, qys, qzs, qws, wts,
+                             oqx, oqy, oqz, oqw);
+            double rx, ry, rz;
+            decodeQuaternionToEuler(oqx, oqy, oqz, oqw, rotateOrder,
+                                    rx, ry, rz);
+            weightsArray.set(rx, s + 0);
+            weightsArray.set(ry, s + 1);
+            weightsArray.set(rz, s + 2);
+        }
+        else // outputEncoding == 3 (ExpMap)
+        {
+            // ExpMap path: linear weighted sum in ℝ³.
+            double sumLx = 0.0, sumLy = 0.0, sumLz = 0.0;
+            for (unsigned int p = 0; p < poseCount; ++p)
+            {
+                const double rx = poseVals(p, s + 0);
+                const double ry = poseVals(p, s + 1);
+                const double rz = poseVals(p, s + 2);
+                double qx, qy, qz, qw;
+                encodeEulerToQuaternion(rx, ry, rz, rotateOrder,
+                                        qx, qy, qz, qw);
+                double lx, ly, lz;
+                encodeQuaternionToExpMap(qx, qy, qz, qw, lx, ly, lz);
+                const double w = wts[p];
+                sumLx += w * lx;
+                sumLy += w * ly;
+                sumLz += w * lz;
+            }
+            double rx, ry, rz;
+            decodeExpMapToEuler(sumLx, sumLy, sumLz, rotateOrder,
+                                rx, ry, rz);
+            weightsArray.set(rx, s + 0);
+            weightsArray.set(ry, s + 1);
+            weightsArray.set(rz, s + 2);
+        }
+    }
+}
+
+
+//
+// Description:
 //      Quaternion → log-map ∈ ℝ³ (v5 PART G.5). Canonicalises to the
 //      q_w ≥ 0 hemisphere internally so callers do not need to worry
 //      about the double cover. Uses a Taylor expansion for θ → 0 so
@@ -4054,17 +4398,20 @@ void RBFtools::setOutputValues(MDoubleArray weightsArray, MDataBlock data, bool 
         ids = poseMatrixIds;
     }
 
-    // M_B24a1: read outputEncoding plug. a1 forward-compat — schema +
-    // read path + DG dirty live; actual inverse transform deferred to
-    // M_B24b. The thread_local sink (加固 K.1-2) prevents MSVC O2 dead-
-    // read elimination from removing the read, which would otherwise
-    // let the attributeAffects(outputEncoding, output) edge appear
-    // dead under DG dirty propagation analysis.
+    // M_B24a1 + M_P0_QUATERNION_BACKEND_LAND (2026-05-10): the
+    // actual outputEncoding inverse transform now lives in
+    // compute() (the per-channel weighted sum is rebuilt via
+    // applyOutputEncodingBlend before this method ever sees
+    // weightsArray). The thread_local sink (加固 K.1-2) is
+    // retained here purely to keep the legacy DG dirty edge proof
+    // alive — MSVC O2 dead-read elimination would otherwise drop
+    // the plug read in compute() too if both sites collapsed to
+    // unused. The sink does no functional work; the real read +
+    // dispatch is the one in compute().
     MPlug outEncPlug(thisNode, RBFtools::outputEncoding);
     short outEncVal = outEncPlug.asShort();
     if (outEncVal != 0) {
-        // Forward-compat placeholder — see addendum §M_B24a1.
-        // Touch outEncVal in a way the optimizer cannot elide.
+        // Forward-compat placeholder retained for DG-edge protection.
         static thread_local short s_outEncSink = 0;
         s_outEncSink = outEncVal;
         (void)s_outEncSink;
