@@ -101,7 +101,18 @@ class TestV5ParityB2Live(unittest.TestCase):
 
 
 class TestV5ParityB4Live(unittest.TestCase):
-    """#30 v5.0 FINAL CONSTITUTIONAL EVENT 2/6 - B4 outputEncoding."""
+    """#30 v5.0 FINAL CONSTITUTIONAL EVENT 2/6 - B4 outputEncoding.
+
+    NOTE (M_P0_QUATERNION_HONEST_DISCLOSURE 2026-05-10): this test
+    verifies schema-level B4 land only -- header decl, addAttribute
+    regex, JSON dict key, and UI widget importability. The backend
+    inverse transform behavior (Quat / ExpMap output decode) is
+    deferred to T_M_B24_OUTPUT_QUAT_ROUNDTRIP, which lands with
+    M_P0_QUATERNION_BACKEND_LAND. The original M_B24b2 docstring
+    overstated B4 status as "complete (full)"; see
+    addendum row 4114 audit correction for the corrected partial
+    status.
+    """
 
     def test_a_combo_widget_importable(self):
         from RBFtools.ui.widgets.output_encoding_combo import (

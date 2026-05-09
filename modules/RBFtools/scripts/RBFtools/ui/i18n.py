@@ -189,9 +189,23 @@ _EN = {
         "Per-source weight; reserved for M_B24b downstream consumption.",
     "driver_source_encoding_tip":
         "Per-source input encoding (0=Raw, 1=Quat, 2=BendRoll, 3=ExpMap, 4=SwingTwist).",
+    # M_P0_QUATERNION_HONEST_DISCLOSURE (2026-05-10): per-source
+    # encoding is metadata-only (forward-compat M5+); compute()
+    # actually reads node-level inputEncoding. The combo is disabled
+    # in the row widget so users do not silently set a no-op value.
+    "source_encoding_disabled_tip":
+        "Per-source encoding is metadata-only (forward-compat M5+); "
+        "compute reads node-level inputEncoding instead.",
     "output_encoding_label":           "Output encoding:",
+    # M_P0_QUATERNION_HONEST_DISCLOSURE (2026-05-10): backend inverse
+    # transform never landed; selecting Quaternion / ExpMap currently
+    # has no effect on compute() output. Honest disclosure prevents
+    # users wasting time on a non-functional path.
     "output_encoding_combo_tip":
-        "Node-level output encoding (forward-compat; M_B24b business consumption deferred).",
+        "Output encoding mode. NOTE: Quaternion / ExpMap modes are "
+        "forward-compat -- backend inverse transform lands in "
+        "M_P0_QUATERNION_BACKEND_LAND. Selecting non-Euler currently "
+        "has no effect on compute output.",
     "output_encoding_euler":           "Euler",
     "output_encoding_quaternion":      "Quaternion",
     "output_encoding_expmap":          "ExpMap",
@@ -701,9 +715,22 @@ _ZH = {
         u"\u6bcf\u6e90\u6743\u91cd\uff1bM_B24b \u4e0b\u6e38\u6d88\u8d39\u4fdd\u7559\u3002",
     "driver_source_encoding_tip":
         u"\u6bcf\u6e90\u8f93\u5165\u7f16\u7801\u679a\u4e3e (0..4)\u3002",
+    # M_P0_QUATERNION_HONEST_DISCLOSURE (2026-05-10)
+    "source_encoding_disabled_tip":
+        u"\u6bcf\u6e90\u7f16\u7801\u4ec5\u4e3a\u5143\u6570\u636e "
+        u"(forward-compat M5+)\uff1b"
+        u"compute \u5b9e\u9645\u8bfb\u53d6\u8282\u70b9\u7ea7 "
+        u"inputEncoding\u3002",
     "output_encoding_label":           u"\u8f93\u51fa\u7f16\u7801\uff1a",
+    # M_P0_QUATERNION_HONEST_DISCLOSURE (2026-05-10)
     "output_encoding_combo_tip":
-        u"\u8282\u70b9\u7ea7\u8f93\u51fa\u7f16\u7801 (forward-compat)\u3002",
+        u"\u8282\u70b9\u7ea7\u8f93\u51fa\u7f16\u7801\u6a21\u5f0f\u3002"
+        u"\u6ce8\u610f\uff1aQuaternion / ExpMap "
+        u"\u4e3a forward-compat \u2014\u2014 "
+        u"\u540e\u7aef\u53cd\u53d8\u6362\u5728 "
+        u"M_P0_QUATERNION_BACKEND_LAND "
+        u"\u843d\u5730\u3002\u5f53\u524d\u9009\u975e Euler \u5bf9 "
+        u"compute \u8f93\u51fa\u65e0\u6548\u679c\u3002",
     "output_encoding_euler":           u"Euler",
     "output_encoding_quaternion":      u"Quaternion",
     "output_encoding_expmap":          u"ExpMap",

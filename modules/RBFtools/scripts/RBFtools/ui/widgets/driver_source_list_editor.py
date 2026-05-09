@@ -107,12 +107,22 @@ class _DriverSourceRow(QtWidgets.QWidget):
         self._spin_weight.valueChanged.connect(self._on_changed)
         lay.addWidget(self._spin_weight)
 
-        # Encoding (editable enum combo).
+        # Encoding combo. M_P0_QUATERNION_HONEST_DISCLOSURE
+        # (2026-05-10): the per-source ``driverSource_encoding``
+        # field is metadata-only (forward-compat M5+). C++
+        # ``compute()`` reads the node-level ``inputEncoding`` plug,
+        # not the per-source value -- changing this combo has no
+        # effect on the solver. Disabling the widget prevents users
+        # from setting a silent no-op while keeping the field
+        # readable for round-trip JSON / mirror integrity. The
+        # current value is still displayed so saved-rig audits stay
+        # transparent.
         self._combo_enc = QtWidgets.QComboBox()
         for label, value in _ENCODING_LABELS:
             self._combo_enc.addItem(label, value)
         self._combo_enc.setCurrentIndex(int(self._source.encoding))
-        self._combo_enc.setToolTip(tr("driver_source_encoding_tip"))
+        self._combo_enc.setEnabled(False)
+        self._combo_enc.setToolTip(tr("source_encoding_disabled_tip"))
         self._combo_enc.currentIndexChanged.connect(self._on_changed)
         lay.addWidget(self._combo_enc)
 
@@ -272,7 +282,10 @@ def _row_retranslate(self):
     self._lbl_node.setToolTip(tr("driver_source_node_tip"))
     self._lbl_attrs.setToolTip(tr("driver_source_attrs_tip"))
     self._spin_weight.setToolTip(tr("driver_source_weight_tip"))
-    self._combo_enc.setToolTip(tr("driver_source_encoding_tip"))
+    # M_P0_QUATERNION_HONEST_DISCLOSURE (2026-05-10): keep the
+    # disabled-state tooltip aligned with the combo's render-time
+    # state across language switches.
+    self._combo_enc.setToolTip(tr("source_encoding_disabled_tip"))
 
 
 _DriverSourceRow.retranslate = _row_retranslate

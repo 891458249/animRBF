@@ -4111,7 +4111,24 @@ in M4.1（处理 pre-M_B24 节点同时承受 driver schema + solverType schema
 | **B1** | 六类 Solver | ❌ 致命 | **❌ 仅 RBF + Vector-Angle 二类** (`type` + `rbfMode` 双 enum 切 2 路径) | —— | **M4** (a/b/c/d) |
 | **B2** | 多源驱动异构 | ⚠️ 高 | **✅ complete (Generic + Matrix + UI + downstream + Generic-mode multi-source mirror)** *(Matrix-mode multi-source mirror DEFERRED to M_B24c2)* | M_B24a1 `d73d6b9` + a2-1 `a43f0de` + a2-2 `1719056` + b1 `2da2059` + b2 `000d127` + d `62fa87c` + d_matrix_followup `c7fd289` + c (this commit, Generic-mode multi-source mirror) | M_B24 (a1+a2+b+d+d_matrix_followup+c) |
 | B3 | 输入编码枚举 5 档 | ❌ 致命 | **✅ 完整** | M2.1a (`8541d4d`-pre) / M2.1b | 已完成 |
-| **B4** | 输入 Quat / 输出 Euler 分离 | ❌ 高 | **✅ complete (full)** | M_B24a1 `d73d6b9` (schema) + a2-2 `1719056` (JSON versioned) + b1 `2da2059` (UI combo) + b2 (this commit, T_V5_PARITY_B4_LIVE #30) | M_B24 (a1+a2-2+b1+b2) |
+| **B4** | 输入 Quat / 输出 Euler 分离 | ❌ 高 | **⚠️ partial** (schema/UI/JSON ✅; backend inverse transform deferred to **M_P0_QUATERNION_BACKEND_LAND**) *(audit corrected M_P0_QUATERNION_HONEST_DISCLOSURE 2026-05-10)* | M_B24a1 `d73d6b9` (schema) + a2-2 `1719056` (JSON versioned) + b1 `2da2059` (UI combo) + b2 (this commit, T_V5_PARITY_B4_LIVE #30) | M_B24 (a1+a2-2+b1+b2) → backend in M_P0_QUATERNION_BACKEND_LAND |
+
+> **Audit correction (M_P0_QUATERNION_HONEST_DISCLOSURE, 2026-05-10)**:
+> the original `M_B24b2` commit prematurely marked B4 "✅ complete (full)".
+> Empirical re-audit found the backend inverse transform
+> (`Quat → Euler` / `ExpMap → Euler` decode functions) was **never
+> implemented** — only schema (`RBFtools.cpp:291-296`), UI combo
+> (`i18n.py:192-197`), and JSON versioned schema (`core_json.py:261`).
+> The C++ consumption path at `RBFtools.cpp:4063-4071` is a `thread_local`
+> sink placeholder: `if (outEncVal != 0) { s_outEncSink = outEncVal; }`
+> with no inverse transform. Selecting `outputEncoding =
+> Quaternion / ExpMap` in the UI currently has zero effect on
+> `compute()` output; users see Euler regardless. Backend land
+> (`decodeQuaternionToEuler` + `decodeExpMapToEuler` + `setOutputValues`
+> dispatch) is scheduled as **M_P0_QUATERNION_BACKEND_LAND** (~120 LoC
+> C++ + ~170 LoC tests; reuses `outputQuaternionGroupStart[]` for
+> output-side block partitioning).
+>
 | B5 | Driver Clamp | ❌ 致命 | **✅ 完整** (`clampEnabled` + `clampInflation` + `poseMinVec/MaxVec`) | M1.3 | 已完成 |
 | B6 | Output Base Value + Scale | ❌ 致命 | **✅ 完整** (`baseValue[]` + `outputIsScale[]`) | M1.2 | 已完成 |
 | **B7** | 按补助骨拆分工具 | ❌ 中 | **⚠️ 仅 `core_profile.py:358` split 建议字符串; ❌ 无实际拆分** | (M3.5 part) | **M_B7** |
