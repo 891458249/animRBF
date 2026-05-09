@@ -4111,23 +4111,35 @@ in M4.1（处理 pre-M_B24 节点同时承受 driver schema + solverType schema
 | **B1** | 六类 Solver | ❌ 致命 | **❌ 仅 RBF + Vector-Angle 二类** (`type` + `rbfMode` 双 enum 切 2 路径) | —— | **M4** (a/b/c/d) |
 | **B2** | 多源驱动异构 | ⚠️ 高 | **✅ complete (Generic + Matrix + UI + downstream + Generic-mode multi-source mirror)** *(Matrix-mode multi-source mirror DEFERRED to M_B24c2)* | M_B24a1 `d73d6b9` + a2-1 `a43f0de` + a2-2 `1719056` + b1 `2da2059` + b2 `000d127` + d `62fa87c` + d_matrix_followup `c7fd289` + c (this commit, Generic-mode multi-source mirror) | M_B24 (a1+a2+b+d+d_matrix_followup+c) |
 | B3 | 输入编码枚举 5 档 | ❌ 致命 | **✅ 完整** | M2.1a (`8541d4d`-pre) / M2.1b | 已完成 |
-| **B4** | 输入 Quat / 输出 Euler 分离 | ❌ 高 | **⚠️ partial** (schema/UI/JSON ✅; backend inverse transform deferred to **M_P0_QUATERNION_BACKEND_LAND**) *(audit corrected M_P0_QUATERNION_HONEST_DISCLOSURE 2026-05-10)* | M_B24a1 `d73d6b9` (schema) + a2-2 `1719056` (JSON versioned) + b1 `2da2059` (UI combo) + b2 (this commit, T_V5_PARITY_B4_LIVE #30) | M_B24 (a1+a2-2+b1+b2) → backend in M_P0_QUATERNION_BACKEND_LAND |
+| **B4** | 输入 Quat / 输出 Euler 分离 | ❌ 高 | **✅ complete** (Quat + ExpMap; BendRoll / SwingTwist deferred to v5.x post-final) | M_B24a1 `d73d6b9` (schema) + a2-2 `1719056` (JSON versioned) + b1 `2da2059` (UI combo) + b2 `000d127` (T_V5_PARITY_B4_LIVE #30) + M_P0_QUATERNION_BACKEND_LAND (this audit cycle, Quat + ExpMap inverse transform) | M_B24 + M_P0_QUATERNION_BACKEND_LAND |
 
-> **Audit correction (M_P0_QUATERNION_HONEST_DISCLOSURE, 2026-05-10)**:
-> the original `M_B24b2` commit prematurely marked B4 "✅ complete (full)".
-> Empirical re-audit found the backend inverse transform
-> (`Quat → Euler` / `ExpMap → Euler` decode functions) was **never
-> implemented** — only schema (`RBFtools.cpp:291-296`), UI combo
-> (`i18n.py:192-197`), and JSON versioned schema (`core_json.py:261`).
-> The C++ consumption path at `RBFtools.cpp:4063-4071` is a `thread_local`
-> sink placeholder: `if (outEncVal != 0) { s_outEncSink = outEncVal; }`
-> with no inverse transform. Selecting `outputEncoding =
-> Quaternion / ExpMap` in the UI currently has zero effect on
-> `compute()` output; users see Euler regardless. Backend land
-> (`decodeQuaternionToEuler` + `decodeExpMapToEuler` + `setOutputValues`
-> dispatch) is scheduled as **M_P0_QUATERNION_BACKEND_LAND** (~120 LoC
-> C++ + ~170 LoC tests; reuses `outputQuaternionGroupStart[]` for
-> output-side block partitioning).
+> **Audit history (B4)**:
+>
+> 1. `M_B24b2` (2026-04-26) marked B4 "✅ complete (full)" but only
+>    landed schema + UI + JSON; the C++ inverse transform was never
+>    implemented. The consumption path at `RBFtools.cpp:4063-4071`
+>    was a `thread_local` sink placeholder with no math.
+> 2. `M_P0_QUATERNION_HONEST_DISCLOSURE` (2026-05-10) downgraded
+>    the row to ⚠️ partial, disabled the per-source UI combo (which
+>    was a silent no-op because compute() reads node-level
+>    `inputEncoding` only), and rewrote the tooltip to flag
+>    Quat / ExpMap as forward-compat.
+> 3. `M_P0_QUATERNION_BACKEND_LAND` (this cycle, 2026-05-10) lands
+>    the Quat / ExpMap halves of the inverse transform:
+>    `decodeQuaternionToEuler` (via `MEulerRotation::reorderIt`),
+>    `decodeExpMapToEuler` (Taylor branch at θ → 0), and
+>    `nlerpQuaternions` with antipodal short-arc correction. The
+>    dispatch lives in `compute()` immediately after
+>    `getPoseWeights` so per-pose phi values can be re-collected via
+>    `computePerPosePhi` before the per-channel weighted sum is
+>    final. BendRoll (2) / SwingTwist (4) remain deferred to v5.x
+>    post-final — each requires bespoke decomposition + composition
+>    math distinct from the Quat / ExpMap pair, and the once-per-rig
+>    warning at the dispatch site tells users which encodings are
+>    not yet supported. Per-driven-source rotateOrder schema
+>    (`drivenInputRotateOrder`) does not yet exist; the dispatch
+>    uses XYZ as the node-level default and is forward-compat for
+>    a future schema extension.
 >
 | B5 | Driver Clamp | ❌ 致命 | **✅ 完整** (`clampEnabled` + `clampInflation` + `poseMinVec/MaxVec`) | M1.3 | 已完成 |
 | B6 | Output Base Value + Scale | ❌ 致命 | **✅ 完整** (`baseValue[]` + `outputIsScale[]`) | M1.2 | 已完成 |

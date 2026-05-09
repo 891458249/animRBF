@@ -51,21 +51,36 @@ def _read(path):
 
 class TestQuaternionHonestDisclosure(unittest.TestCase):
 
-    def test_PERMANENT_a_addendum_b4_row_no_longer_claims_complete(self):
-        """Row 4114 must not claim 'complete (full)' any more --
-        the backend inverse transform was never implemented."""
+    def test_PERMANENT_a_addendum_b4_row_no_longer_claims_full(self):
+        """Row 4114 must not claim the original 'complete (full)' marker
+        — that text was the M_B24b2 overstatement that
+        M_P0_QUATERNION_HONEST_DISCLOSURE corrected. Backend land
+        (M_P0_QUATERNION_BACKEND_LAND) restored the row to
+        'complete (Quat + ExpMap; BendRoll / SwingTwist deferred)',
+        which is honest about the partial-encoding scope. The earlier
+        'partial' assertion that lived here was superseded by
+        T_M_P0_QUATERNION_BACKEND_LAND test_PERMANENT_o once the
+        Quat / ExpMap halves shipped."""
         src = _read(_ADDENDUM)
-        # Locate the B4 row by its rule label and assert the
-        # status cell no longer carries the misleading marker.
         b4_lines = [ln for ln in src.splitlines()
                     if "B4" in ln and u"输入 Quat" in ln]
         self.assertTrue(b4_lines,
             "B4 row not found in addendum speed table")
         for ln in b4_lines:
             self.assertNotIn("complete (full)", ln,
-                "Audit drift: B4 row still claims 'complete (full)'.")
-            self.assertIn("partial", ln,
-                "B4 row must now declare 'partial' status.")
+                "Audit drift: B4 row must never re-claim "
+                "'complete (full)' -- the BendRoll / SwingTwist "
+                "halves are still deferred.")
+            # Either of the post-disclosure markers is acceptable:
+            #   "partial"   -- disclosure phase, backend not landed
+            #   "complete"  -- backend land phase, Quat + ExpMap shipped
+            # Both flow through the audit-history paragraph; what we
+            # really pin is the absence of the misleading 'full'.
+            self.assertTrue(
+                ("partial" in ln) or ("complete" in ln),
+                "B4 row must declare its honest status "
+                "(partial during disclosure phase, complete after "
+                "backend land).")
 
     def test_PERMANENT_b_audit_correction_paragraph_present(self):
         src = _read(_ADDENDUM)

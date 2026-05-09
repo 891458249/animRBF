@@ -197,15 +197,16 @@ _EN = {
         "Per-source encoding is metadata-only (forward-compat M5+); "
         "compute reads node-level inputEncoding instead.",
     "output_encoding_label":           "Output encoding:",
-    # M_P0_QUATERNION_HONEST_DISCLOSURE (2026-05-10): backend inverse
-    # transform never landed; selecting Quaternion / ExpMap currently
-    # has no effect on compute() output. Honest disclosure prevents
-    # users wasting time on a non-functional path.
+    # M_P0_QUATERNION_BACKEND_LAND (2026-05-10): Quat + ExpMap
+    # inverse transforms now ship; tooltip describes the active
+    # math. BendRoll / SwingTwist remain forward-compat (deferred
+    # to v5.x post-final) and emit a once-per-rig warning at the
+    # dispatch site if the user picks them.
     "output_encoding_combo_tip":
-        "Output encoding mode. NOTE: Quaternion / ExpMap modes are "
-        "forward-compat -- backend inverse transform lands in "
-        "M_P0_QUATERNION_BACKEND_LAND. Selecting non-Euler currently "
-        "has no effect on compute output.",
+        "Output encoding mode. Quaternion / ExpMap rebuild each "
+        "Euler 3-block via per-pose nlerp (smoother than the "
+        "Euler weighted average for large rotations). BendRoll / "
+        "SwingTwist are forward-compat -- backend deferred to v5.x.",
     "output_encoding_euler":           "Euler",
     "output_encoding_quaternion":      "Quaternion",
     "output_encoding_expmap":          "ExpMap",
@@ -722,15 +723,17 @@ _ZH = {
         u"compute \u5b9e\u9645\u8bfb\u53d6\u8282\u70b9\u7ea7 "
         u"inputEncoding\u3002",
     "output_encoding_label":           u"\u8f93\u51fa\u7f16\u7801\uff1a",
-    # M_P0_QUATERNION_HONEST_DISCLOSURE (2026-05-10)
+    # M_P0_QUATERNION_BACKEND_LAND (2026-05-10)
     "output_encoding_combo_tip":
         u"\u8282\u70b9\u7ea7\u8f93\u51fa\u7f16\u7801\u6a21\u5f0f\u3002"
-        u"\u6ce8\u610f\uff1aQuaternion / ExpMap "
+        u"Quaternion / ExpMap "
+        u"\u901a\u8fc7\u9010\u59ff\u52bf nlerp \u91cd\u5efa"
+        u"\u6bcf\u4e2a Euler \u4e09\u5143\u7ec4 "
+        u"(\u5bf9\u5927\u65cb\u8f6c\u6bd4 Euler "
+        u"\u52a0\u6743\u5e73\u5747\u66f4\u5e73\u6ed1)\u3002"
+        u"BendRoll / SwingTwist "
         u"\u4e3a forward-compat \u2014\u2014 "
-        u"\u540e\u7aef\u53cd\u53d8\u6362\u5728 "
-        u"M_P0_QUATERNION_BACKEND_LAND "
-        u"\u843d\u5730\u3002\u5f53\u524d\u9009\u975e Euler \u5bf9 "
-        u"compute \u8f93\u51fa\u65e0\u6548\u679c\u3002",
+        u"\u540e\u7aef\u63a8\u8fdf\u5230 v5.x\u3002",
     "output_encoding_euler":           u"Euler",
     "output_encoding_quaternion":      u"Quaternion",
     "output_encoding_expmap":          u"ExpMap",
