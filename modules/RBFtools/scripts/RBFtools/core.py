@@ -4980,3 +4980,48 @@ def decompose_matrix(matrix):
         "rotate":    (r.x, r.y, r.z),
         "scale":     (s[0], s[1], s[2]),
     }
+
+
+# ============================================================================
+#  M_P0_DUPLICATE_POSE_DETECT (2026-05-01) — Python pre-check before C++ kernel
+# ============================================================================
+
+def _detect_duplicate_pose_inputs(poses, tolerance=1e-7):
+    """Scan poses for input-vector duplicates within tolerance.
+
+    Returns list of ``(idx_a, idx_b)`` pairs where
+    ``pose[a].inputs`` is component-wise within ``tolerance`` of
+    ``pose[b].inputs``.
+
+    Rationale
+    ---------
+    The RBF kernel matrix ``K[i, j] = phi(||x_i - x_j||)`` becomes
+    singular when two pose input vectors coincide (or are within
+    numerical noise). Gaussian / Inverse-MQ kernels mask this via
+    ``lambda`` regularization (``phi(0) = 1`` keeps the diagonal
+    dominant). Multi-Quadratic Biharmonic / Inverse-MQB kernels have
+    ``phi(0) ~ 0``, so adding lambda still leaves rows linearly
+    dependent — the C++ Cholesky + GE two-tier solver
+    (``RBFtools.cpp:1900-1914``) detects the singularity and raises
+    ``MS::kFailure``, surfacing an opaque "RBF decomposition failed"
+    to the user.
+
+    Detecting in Python before any C++ call lets the controller tell
+    the user *exactly* which pose pair to merge or delete, instead of
+    leaving them to bisect 21 poses by hand.
+
+    Tolerance ``1e-7`` is roughly ``float32 eps * 10`` — aligned with
+    the precision the C++ kernel itself works in.
+    """
+    duplicates = []
+    n = len(poses)
+    for i in range(n):
+        for j in range(i + 1, n):
+            inputs_i = list(poses[i].inputs)
+            inputs_j = list(poses[j].inputs)
+            if len(inputs_i) != len(inputs_j):
+                continue
+            if all(abs(a - b) <= tolerance
+                   for a, b in zip(inputs_i, inputs_j)):
+                duplicates.append((i, j))
+    return duplicates

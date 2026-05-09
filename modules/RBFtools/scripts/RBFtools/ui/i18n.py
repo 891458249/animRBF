@@ -198,6 +198,16 @@ _EN = {
     "title_remove_driver_source":      "Remove Driver Source",
     "summary_remove_driver_source":
         "Remove this driver source entry from the current node?",
+    # -- M_P0_DUPLICATE_POSE_DETECT (2026-05-01) --
+    "title_duplicate_poses":           "Duplicate Poses Detected",
+    "duplicate_pose_warning_header":
+        "The following pose pairs have identical input vectors:",
+    "duplicate_pose_warning_action":
+        "Identical inputs cause RBF kernel matrix singularity. "
+        "Multi-Quadratic Biharmonic + Inverse-MQB kernels will fail "
+        "decomposition. Recommend deleting one pose of each pair "
+        "before Apply, or switch kernel to Gaussian (which tolerates "
+        "via regularization). Continue anyway?",
     # -- M_B24c: Mirror multi-source informational notice
     #    (Generic mode supported; Matrix mode DEFERRED to M_B24c2) --
     "title_mirror_multi_source":       "Mirror — Multi-source node",
@@ -700,6 +710,20 @@ _ZH = {
     "title_remove_driver_source":      u"\u79fb\u9664\u9a71\u52a8\u6e90",
     "summary_remove_driver_source":
         u"\u4ece\u5f53\u524d\u8282\u70b9\u79fb\u9664\u8be5\u9a71\u52a8\u6e90\uff1f",
+    # -- M_P0_DUPLICATE_POSE_DETECT (2026-05-01) --
+    "title_duplicate_poses":
+        u"\u68c0\u6d4b\u5230\u91cd\u590d\u59ff\u52bf",
+    "duplicate_pose_warning_header":
+        u"\u4ee5\u4e0b\u59ff\u52bf\u5bf9\u7684\u8f93\u5165\u5411\u91cf"
+        u"\u5b8c\u5168\u76f8\u540c\uff1a",
+    "duplicate_pose_warning_action":
+        u"\u76f8\u540c\u8f93\u5165\u5bfc\u81f4 RBF \u6838\u77e9\u9635"
+        u"\u5947\u5f02\u3002Multi-Quadratic Biharmonic + Inverse-MQB "
+        u"\u6838\u51fd\u6570\u4f1a\u5206\u89e3\u5931\u8d25\u3002\u5efa"
+        u"\u8bae\u5220\u9664\u6bcf\u5bf9\u4e2d\u7684\u4e00\u4e2a\u59ff"
+        u"\u52bf\u540e\u518d Apply\uff0c\u6216\u5207\u6362\u4e3a "
+        u"Gaussian \u6838\uff08\u53ef\u901a\u8fc7\u6b63\u5219\u5316"
+        u"\u5bb9\u5fcd\uff09\u3002\u662f\u5426\u7ee7\u7eed\uff1f",
     # -- M_B24c Mirror \u591a\u6e90\u4fe1\u606f\u63d0\u793a
     #    (Generic mode \u652f\u6301; Matrix mode \u63a8\u8fdf\u5230 M_B24c2) --
     "title_mirror_multi_source":       u"\u955c\u50cf \u2014 \u591a\u6e90\u8282\u70b9",

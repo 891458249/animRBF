@@ -1946,6 +1946,37 @@ class MainController(QtCore.QObject):
             core.set_node_attr(node, "type", 1)
 
         poses = self._pose_model.all_poses()
+
+        # M_P0_DUPLICATE_POSE_DETECT (2026-05-01): dedup pre-check
+        # before C++ kernel sees a singular K matrix. MQB / IMQB
+        # kernel math cannot handle duplicate pose inputs even with
+        # lambda regularization; Gaussian masks via lambda but still
+        # fails on exact duplicates. Surface to the user (which pair)
+        # before the opaque C++ "RBF decomposition failed".
+        duplicates = core._detect_duplicate_pose_inputs(poses)
+        if duplicates:
+            from RBFtools.ui.i18n import tr
+            pair_lines = [
+                "  Pose {} = Pose {} (inputs identical)".format(a, b)
+                for a, b in duplicates]
+            summary = "\n".join(
+                [tr("duplicate_pose_warning_header"), ""]
+                + pair_lines
+                + ["", tr("duplicate_pose_warning_action")])
+            proceed = self.ask_confirm(
+                title=tr("title_duplicate_poses"),
+                summary=summary,
+                preview_text="",
+                action_id="apply_with_duplicate_poses")
+            if not proceed:
+                cmds.warning(
+                    "apply_poses: aborted by user — fix duplicate "
+                    "poses first.")
+                return
+            cmds.warning(
+                "apply_poses: continuing with duplicates — MQB / "
+                "IMQB kernels may fail RBF decomposition.")
+
         core.apply_poses(
             node, driver_node, driven_node,
             driver_attrs, driven_attrs, poses)
