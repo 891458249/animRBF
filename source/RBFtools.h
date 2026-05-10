@@ -520,12 +520,15 @@ private:
     // on every DG evaluation.
     bool  inputEncodingWarningIssued;
     short prevInputEncodingVal;
-
-    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): once-per-rig flag
-    // for the BendRoll(2) / SwingTwist(4) outputEncoding deferral
-    // warning. Quat (1) / ExpMap (3) backends are implemented; the
-    // other two are deferred to v5.x post-final.
-    bool  outputEncodingDeferredWarningIssued;
+    // M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): the ce136dd-era
+    // ``outputEncodingDeferredWarningIssued`` flag was removed —
+    // the BendRoll/SwingTwist-deferred warning was emitted from a
+    // dead else branch (outputEncoding schema only registers
+    // {0=Euler, 1=Quaternion, 2=ExpMap}; the warning was
+    // unreachable and its text contradicted the schema). All three
+    // legal outputEncoding values now route directly to
+    // applyOutputEncodingBlend, which handles the Euler skip case
+    // via its own early return.
 
     // M2.2: three independent once-per-config warning flags for the
     // QWA path. `qwaConfigWarningIssued` is for invalid quat-group

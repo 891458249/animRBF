@@ -143,16 +143,24 @@ class TestQuaternionBackendLand(unittest.TestCase):
             "compute() must call computePerPosePhi to source "
             "per-pose phi values for the quat blend.")
 
-    def test_PERMANENT_m_compute_warns_on_bendroll_swingtwist(self):
+    def test_PERMANENT_m_no_dead_bendroll_swingtwist_warning(self):
+        """M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): the original ce136dd
+        guard expected a ``outputEncodingDeferredWarningIssued`` flag +
+        a ``BendRoll(2)/SwingTwist(4)`` warning literal. Both were
+        unreachable -- outputEncoding's enum schema only registers
+        {0=Euler, 1=Quaternion, 2=ExpMap}; values 2 and 4 never reach
+        the dispatch. The fix removed the dead branch + the flag, so
+        this guard now asserts the inverse: neither artifact may
+        re-appear (defends against a future refactor mistakenly
+        copying the deferred-warning pattern back in)."""
         src = _read(_RBF_CPP)
-        self.assertIn(
+        self.assertNotIn(
             "outputEncodingDeferredWarningIssued", src,
-            "compute() must guard the BendRoll/SwingTwist deferral "
-            "warning behind a once-per-rig flag.")
-        self.assertIn("BendRoll(2)/SwingTwist(4)", src,
-            "Deferral warning must name BendRoll(2) / SwingTwist(4) "
-            "explicitly so users know which encodings are not "
-            "implemented yet.")
+            "Dead deferred-warning flag must stay removed.")
+        self.assertNotIn(
+            "BendRoll(2)/SwingTwist(4)", src,
+            "Dead BendRoll/SwingTwist warning literal must stay "
+            "removed -- outputEncoding has no such enum slot.")
 
     def test_PERMANENT_n_setoutput_placeholder_sink_retained(self):
         """The legacy thread_local sink is retained for DG-edge

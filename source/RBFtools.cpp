@@ -158,7 +158,6 @@ RBFtools::RBFtools()
       prevSolverMethodVal(0),          // M1.4: Auto; matches solverMethod default.
       inputEncodingWarningIssued(false), // M2.1a: fresh warning on first fall-back.
       prevInputEncodingVal(0),         // M2.1a: Raw; matches inputEncoding default.
-      outputEncodingDeferredWarningIssued(false), // M_P0_QUATERNION_BACKEND_LAND: BendRoll/SwingTwist deferral notice.
       qwaConfigWarningIssued(false),   // M2.2: fresh warnings on first config / edge hit.
       qwaClippedWarningIssued(false),
       qwaDegenerateWarningIssued(false),
@@ -1992,40 +1991,40 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                 short outEncRebuildVal = outEncRebuildPlug.asShort();
                 if (genericMode && outEncRebuildVal != 0)
                 {
-                    if (outEncRebuildVal == 1 || outEncRebuildVal == 3)
-                    {
-                        MDoubleArray perPosePhi;
-                        computePerPosePhi(perPosePhi,
-                                          matPoses,
-                                          inputNorms,
-                                          driver,
-                                          poseModes,
-                                          perPoseWidths,
-                                          getRadiusValue(),
-                                          distanceTypeVal,
-                                          (int)effectiveEncoding,
-                                          /*isMatrixMode*/ !genericMode,
-                                          kernelVal);
-                        // rotateOrder = 0 (XYZ default). Per-driven-source
-                        // rotateOrder schema (drivenInputRotateOrder) does
-                        // not yet exist — see addendum
-                        // §M_P0_QUATERNION_BACKEND_LAND for the v5.x
-                        // forward pointer.
-                        applyOutputEncodingBlend(weightsArray,
-                                                 perPosePhi,
-                                                 matValues,
-                                                 outEncRebuildVal,
-                                                 /*rotateOrder*/ 0);
-                    }
-                    else if (!outputEncodingDeferredWarningIssued)
-                    {
-                        MGlobal::displayWarning(thisName + MString(
-                            ": outputEncoding=BendRoll(2)/SwingTwist(4) "
-                            "not yet implemented; falling back to per-"
-                            "channel weighted sum. Backend land "
-                            "deferred to v5.x post-final."));
-                        outputEncodingDeferredWarningIssued = true;
-                    }
+                    // M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): outputEncoding
+                    // schema only registers {0=Euler, 1=Quaternion,
+                    // 2=ExpMap} (cpp:295-298) — there is no BendRoll(2)
+                    // / SwingTwist(4) slot at all on the output side
+                    // (those are inputEncoding-only enum values). The
+                    // ce136dd version had a `else if (!...Issued)` branch
+                    // warning about deferred BendRoll/SwingTwist
+                    // implementation; that branch was unreachable dead
+                    // code and the user-facing message contradicted the
+                    // schema. Removed; applyOutputEncodingBlend's own
+                    // early-return handles the only legal "skip" case
+                    // (outputEncoding == 0 / Euler).
+                    MDoubleArray perPosePhi;
+                    computePerPosePhi(perPosePhi,
+                                      matPoses,
+                                      inputNorms,
+                                      driver,
+                                      poseModes,
+                                      perPoseWidths,
+                                      getRadiusValue(),
+                                      distanceTypeVal,
+                                      (int)effectiveEncoding,
+                                      /*isMatrixMode*/ !genericMode,
+                                      kernelVal);
+                    // rotateOrder = 0 (XYZ default). Per-driven-source
+                    // rotateOrder schema (drivenInputRotateOrder) does
+                    // not yet exist — see addendum
+                    // §M_P0_QUATERNION_BACKEND_LAND for the v5.x
+                    // forward pointer.
+                    applyOutputEncodingBlend(weightsArray,
+                                             perPosePhi,
+                                             matValues,
+                                             outEncRebuildVal,
+                                             /*rotateOrder*/ 0);
                 }
 
                 // -----------------------------------------------
@@ -3449,7 +3448,17 @@ void RBFtools::applyOutputEncodingBlend(MDoubleArray &weightsArray,
                                         short outputEncoding,
                                         short rotateOrder)
 {
-    if (outputEncoding != 1 && outputEncoding != 3) return;
+    // M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): outputEncoding schema is
+    // {0=Euler, 1=Quaternion, 2=ExpMap} (cpp:295-298) — node-level
+    // outputEncoding has only three slots. The original ce136dd
+    // dispatch used {1, 3} which mirrored inputEncoding's enum
+    // ({0=Raw, 1=Quat, 2=BendRoll, 3=ExpMap, 4=SwingTwist}); under
+    // that bug, picking ExpMap (value=2) silently fell through this
+    // early return and degenerated to Raw weighted-sum semantics.
+    // The fix here is purely renumbering: the math below for the
+    // outputEncoding == 2 branch is the original ExpMap path,
+    // unchanged.
+    if (outputEncoding != 1 && outputEncoding != 2) return;
     const unsigned int count = weightsArray.length();
     const unsigned int poseCount = perPosePhi.length();
     if (count == 0 || poseCount == 0) return;
@@ -3488,7 +3497,7 @@ void RBFtools::applyOutputEncodingBlend(MDoubleArray &weightsArray,
             weightsArray.set(ry, s + 1);
             weightsArray.set(rz, s + 2);
         }
-        else // outputEncoding == 3 (ExpMap)
+        else if (outputEncoding == 2)  // ExpMap (M_P0_OUTPUT_EXPMAP_FIX)
         {
             // ExpMap path: linear weighted sum in ℝ³.
             double sumLx = 0.0, sumLy = 0.0, sumLz = 0.0;
