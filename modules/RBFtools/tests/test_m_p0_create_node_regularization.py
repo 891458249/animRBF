@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """T_M_P0_CREATE_NODE_REGULARIZATION — defend the rigging-friendly
-regularization default (1e-4) on freshly-created nodes.
+regularization default (1e-3) on freshly-created nodes.
 
 Bug context (M_P0_CREATE_NODE_REGULARIZATION, 2026-05-10):
   C++ schema default at cpp:532 is 1e-8, following Chad Vernon's
@@ -18,10 +18,13 @@ Bug context (M_P0_CREATE_NODE_REGULARIZATION, 2026-05-10):
   failed solve with regularization=1e-8 (the schema default);
   bumping to 1e-2 produced output[0] = 2.168604, +30deg driver
   motion → output[0] = 1.578010 (driver successfully driving).
-  1e-4 sits at the conservative end of the working range and
-  doesn't visibly bias well-distributed pose sets.
+  1e-3 sits at the conservative end of the production rigging
+  working range. (Earlier attempt: 1e-4 — proved insufficient
+  when inputEncoding switched from Quat to ExpMap; the 9-dim
+  Euclidean distance offers less numerical separation than 12-
+  dim per-block quat chord distance for redundant pose sets.)
 
-Fix: ``core.create_node`` now writes regularization=1e-4 right
+Fix: ``core.create_node`` now writes regularization=1e-3 right
 after the ``.type=1`` write. Also bump the Python UI fallback
 (both ``get_all_settings`` and ``rbf_section.load``) to mirror,
 so corrupt-scene / missing-attr paths don't read 1e-8 either.
@@ -51,7 +54,7 @@ def _read(path):
 class TestCreateNodeRegularization(unittest.TestCase):
 
     def test_PERMANENT_a_create_node_writes_regularization(self):
-        """create_node body must write regularization=1e-4."""
+        """create_node body must write regularization=1e-3."""
         src = _read(_CORE)
         m = re.search(
             r"def\s+create_node\s*\(\s*\)[\s\S]+?(?=\n(?:def |class )\b)",
@@ -63,12 +66,12 @@ class TestCreateNodeRegularization(unittest.TestCase):
         # Use literal substring + value check instead.
         self.assertIn('".regularization"', body,
             "create_node must reference '.regularization' literal.")
-        self.assertIn("1.0e-4", body,
-            "create_node must write the 1.0e-4 default literal.")
+        self.assertIn("1.0e-3", body,
+            "create_node must write the 1.0e-3 default literal.")
         # Cross-check: the regularization line must be inside a setAttr.
         self.assertRegex(body,
-            r'cmds\.setAttr[\s\S]{0,200}?\.regularization[\s\S]{0,40}?1\.0e-4',
-            "regularization=1e-4 must be written via cmds.setAttr "
+            r'cmds\.setAttr[\s\S]{0,200}?\.regularization[\s\S]{0,40}?1\.0e-3',
+            "regularization=1e-3 must be written via cmds.setAttr "
             "(not just appear as a comment / docstring literal).")
 
     def test_PERMANENT_b_get_all_settings_fallback_default(self):
@@ -79,7 +82,7 @@ class TestCreateNodeRegularization(unittest.TestCase):
         self.assertIsNotNone(m,
             "get_all_settings regularization line not found.")
         default_val = float(m.group(1))
-        self.assertEqual(default_val, 1.0e-4,
+        self.assertEqual(default_val, 1.0e-3,
             "get_all_settings fallback default for regularization "
             "must be 1e-4 (rigging-friendly), not 1e-8 (Chad Vernon "
             "reference target).")
@@ -93,7 +96,7 @@ class TestCreateNodeRegularization(unittest.TestCase):
         self.assertIsNotNone(m,
             "rbf_section.load regularization fallback line not found.")
         default_val = float(m.group(1))
-        self.assertEqual(default_val, 1.0e-4,
+        self.assertEqual(default_val, 1.0e-3,
             "rbf_section.load fallback default for regularization "
             "must be 1e-4 to mirror the create-time write.")
 
