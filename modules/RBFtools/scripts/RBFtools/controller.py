@@ -1121,9 +1121,18 @@ class MainController(QtCore.QObject):
         """Export the current node's poses to a JSON file.
 
         Returns True on success, False on failure / no current node.
+
+        M_P0_POSES_IO_DIALOG_CTD_FIX (2026-05-10): no UI dialog from
+        this layer. Feedback via cmds.warning + statusMessage signal
+        only — UI handler defers the call via evalDeferred so the
+        fileDialog2 native window has time to tear down before we
+        run any further cmds work.
         """
         if not self._current_node:
             cmds.warning("export_poses_to_path: no current node selected")
+            return False
+        if not path:
+            cmds.warning("export_poses_to_path: empty path")
             return False
         from RBFtools import core_json
         try:
@@ -1136,7 +1145,10 @@ class MainController(QtCore.QObject):
             cmds.warning("export_poses failed: {}".format(exc))
             return False
         cmds.warning("RBFtools: exported poses to {}".format(abspath))
-        self.statusMessage.emit("Poses exported.")
+        try:
+            self.statusMessage.emit("Poses exported.")
+        except Exception:
+            pass  # signal emission is advisory; never block on it
         return True
 
     def import_poses_from_path(self, path, mode="replace"):
