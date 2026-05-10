@@ -1801,15 +1801,6 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     // kernels where K[i,i] = φ(0) = 0.
                     // -------------------------------------------------
 
-                    if (regularizationVal > 0.0)
-                    {
-                        for (unsigned dd = 0; dd < poseCount; ++dd)
-                            linMat(dd, dd) += regularizationVal;
-                    }
-
-                    if (exposeDataVal > 2 && regularizationVal > 0.0)
-                        linMat.show(thisName, "Activations + λI");
-
                     // -------------------------------------------------
                     // M1.4: reset the solver-tier cache when the user
                     // flipped Auto <-> ForceGE. Kernel SPD-ness is a
@@ -1860,72 +1851,185 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     }
 
                     // -------------------------------------------------
-                    // solve for each dimension (M1.4 tiered dispatch)
+                    // M_P0_AUTO_ADAPTIVE_LAMBDA (2026-05-10): solve for
+                    // each dimension with auto-adaptive Tikhonov
+                    // regularization. The retry loop matches Maya's
+                    // native poseInterpolator robustness — it never
+                    // returns kFailure on near-singular pose sets,
+                    // instead progressively bumping λ until Cholesky
+                    // OR GE succeeds. Worst-case fallback at λ ≥ 1.0
+                    // is still kFailure with a detailed diagnostic.
+                    //
+                    // Strategy:
+                    //   1. Inject the user's λ (or LAMBDA_FLOOR if 0).
+                    //   2. Try Cholesky → if fails, try GE.
+                    //   3. If both fail, bump λ ×10 (cap at LAMBDA_CEIL).
+                    //   4. Repeat up to MAX_RETRIES times.
+                    //   5. On success after retry > 0, emit a once-per-
+                    //      solve warning so the TD knows the auto-bump
+                    //      kicked in and can tune λ upward permanently.
+                    //
+                    // λ injection is INCREMENTAL — each retry adds
+                    // (newLambda - appliedLambda) to the diagonal so
+                    // we never rebuild linMat from scratch.
                     // -------------------------------------------------
 
                     wMat = BRMatrix();
                     wMat.setSize(poseCount, solveCount);
 
-                    bool usedCholesky = false;
+                    const double LAMBDA_FLOOR = 1.0e-6;
+                    const double LAMBDA_CEIL  = 1.0;
+                    const int    MAX_RETRIES  = 7;
+                    const double userLambda   = (regularizationVal > 0.0)
+                                                ? regularizationVal : 0.0;
 
-                    // Tier 1 — Cholesky. Attempted only in Auto mode and
-                    // when the last successful method was Cholesky (or
-                    // this is the first train since solverMethod flipped).
-                    // One decomposition amortizes over all output dims:
-                    // O(N³/3) + m·O(N²), vs GE's m·O(N³).
-                    if (solverMethodVal == 0 && lastSolveMethod == 0)
+                    double currentLambda = userLambda;
+                    double appliedLambda = 0.0;
+
+                    // Initial λ injection (matches the legacy behaviour
+                    // when the data is not pathological — zero retries
+                    // means zero overhead vs the pre-fix code path).
+                    if (currentLambda > 0.0)
                     {
-                        BRMatrix chol = linMat;
-                        if (chol.cholesky())
-                        {
-                            std::vector<double> x;
-                            for (c = 0; c < solveCount; c ++)
-                            {
-                                chol.choleskySolve(yCols[c], x);
-                                for (i = 0; i < poseCount; i ++)
-                                    wMat(i, c) = x[i];
-                            }
-                            usedCholesky = true;
-                            lastSolveMethod = 0;
-                            if (exposeDataVal > 2)
-                                MGlobal::displayInfo(
-                                    thisName + MString(": solver = Cholesky"));
-                        }
+                        for (unsigned dd = 0; dd < poseCount; ++dd)
+                            linMat(dd, dd) += currentLambda;
+                        appliedLambda = currentLambda;
                     }
 
-                    // Tier 2 — GE fallback. Triggered by ForceGE, a failed
-                    // Cholesky probe, or sticky lastSolveMethod == 1 on a
-                    // known non-SPD kernel. Per-dim solve is unavoidable
-                    // here because BRMatrix::solve is destructive.
-                    if (!usedCholesky)
+                    if (exposeDataVal > 2 && currentLambda > 0.0)
+                        linMat.show(thisName, "Activations + λI");
+
+                    bool usedCholesky = false;
+                    bool solved       = false;
+                    int  lastSingular = -1;
+                    int  retryCount   = 0;
+
+                    for (int retry = 0; retry <= MAX_RETRIES && !solved; ++retry)
                     {
+                        // Tier 1 — Cholesky. On retry > 0 we always re-
+                        // attempt regardless of lastSolveMethod cache:
+                        // a kernel that was non-SPD at λ_0 may become
+                        // SPD at λ_0 × 10 (the larger diagonal pushes
+                        // eigenvalues positive).
+                        const bool tryCholesky =
+                            (solverMethodVal == 0) &&
+                            (retry > 0 || lastSolveMethod == 0);
+
+                        if (tryCholesky)
+                        {
+                            BRMatrix chol = linMat;
+                            if (chol.cholesky())
+                            {
+                                std::vector<double> x;
+                                for (c = 0; c < solveCount; c ++)
+                                {
+                                    chol.choleskySolve(yCols[c], x);
+                                    for (i = 0; i < poseCount; i ++)
+                                        wMat(i, c) = x[i];
+                                }
+                                usedCholesky    = true;
+                                lastSolveMethod = 0;
+                                solved          = true;
+                                retryCount      = retry;
+                                if (exposeDataVal > 2)
+                                    MGlobal::displayInfo(
+                                        thisName + MString(": solver = Cholesky"));
+                                break;
+                            }
+                        }
+
+                        // Tier 2 — GE fallback. Per-dim solve is
+                        // unavoidable here because BRMatrix::solve is
+                        // destructive. We accumulate into a trial wMat
+                        // and commit only on full success so a partial
+                        // solve cannot pollute wMat across retries.
+                        bool geOk = true;
+                        BRMatrix wMatTrial;
+                        wMatTrial.setSize(poseCount, solveCount);
                         for (c = 0; c < solveCount; c ++)
                         {
                             BRMatrix solveMat = linMat;
-                            double* w = new double[poseCount];
-                            int singularIndex;
-                            bool solved = solveMat.solve(yCols[c], w, singularIndex);
-                            if (!solved)
+                            std::vector<double> w(poseCount, 0.0);
+                            int singularIndex = -1;
+                            bool ok = solveMat.solve(
+                                yCols[c], w.data(), singularIndex);
+                            if (!ok)
                             {
-                                MGlobal::displayInfo("");
-                                MGlobal::displayInfo(thisName + MString(": RBF Error"));
-                                MGlobal::displayInfo(MString("Value error for pose at index: ") + singularIndex);
-                                MGlobal::displayInfo("The pose has no unique values and matches another pose.");
-                                matDebug.show(thisName, "Pose Input Values (Poses appear in rows)");
-                                MGlobal::displayError("RBF decomposition failed. See script editor for details.");
-                                delete[] w;
-                                return MStatus::kFailure;
+                                geOk = false;
+                                lastSingular = singularIndex;
+                                break;
                             }
-
                             for (i = 0; i < poseCount; i ++)
-                                wMat(i, c) = w[i];
-
-                            delete[] w;
+                                wMatTrial(i, c) = w[i];
                         }
-                        lastSolveMethod = 1;
-                        if (exposeDataVal > 2)
+                        if (geOk)
+                        {
+                            wMat            = wMatTrial;
+                            lastSolveMethod = 1;
+                            solved          = true;
+                            retryCount      = retry;
+                            if (exposeDataVal > 2)
+                                MGlobal::displayInfo(
+                                    thisName + MString(
+                                        ": solver = GE (fallback)"));
+                            break;
+                        }
+
+                        // Both tiers failed — bump λ for next retry.
+                        // Never let currentLambda stagnate at < FLOOR.
+                        double nextLambda;
+                        if (currentLambda <= 0.0)
+                            nextLambda = LAMBDA_FLOOR;
+                        else if (currentLambda < LAMBDA_FLOOR)
+                            nextLambda = LAMBDA_FLOOR;
+                        else
+                            nextLambda = currentLambda * 10.0;
+
+                        if (nextLambda > LAMBDA_CEIL)
+                            break;  // give up, fall through to error
+
+                        // Inject delta into linMat diagonal.
+                        const double delta = nextLambda - appliedLambda;
+                        for (unsigned dd = 0; dd < poseCount; ++dd)
+                            linMat(dd, dd) += delta;
+                        appliedLambda = nextLambda;
+                        currentLambda = nextLambda;
+                    }
+
+                    if (!solved)
+                    {
+                        MGlobal::displayInfo("");
+                        MGlobal::displayInfo(thisName + MString(": RBF Error"));
+                        MGlobal::displayInfo(
+                            MString("Auto-adaptive λ escalated to ") +
+                            currentLambda + " but K matrix remained singular.");
+                        if (lastSingular >= 0)
                             MGlobal::displayInfo(
-                                thisName + MString(": solver = GE (fallback)"));
+                                MString("Last singular pose index: ") +
+                                lastSingular);
+                        MGlobal::displayInfo(
+                            "The pose set is genuinely degenerate "
+                            "(two or more poses are exact duplicates "
+                            "in the encoded driver space).");
+                        matDebug.show(thisName,
+                            "Pose Input Values (Poses appear in rows)");
+                        MGlobal::displayError(
+                            "RBF decomposition failed even at λ=1.0. "
+                            "Remove duplicate poses or reduce pose redundancy.");
+                        return MStatus::kFailure;
+                    }
+
+                    // M_P0_AUTO_ADAPTIVE_LAMBDA: surface the auto-bump
+                    // to the TD so they can tune λ permanently.
+                    if (retryCount > 0)
+                    {
+                        MGlobal::displayWarning(thisName + MString(
+                            ": auto-adaptive regularization escalated λ from ") +
+                            userLambda + " to " + currentLambda +
+                            " (" + retryCount +
+                            " retries) to stabilize a near-singular K matrix. "
+                            "Consider raising 'Regularization (λ)' to this "
+                            "value or reducing pose redundancy.");
                     }
 
                     if (exposeDataVal > 2)
