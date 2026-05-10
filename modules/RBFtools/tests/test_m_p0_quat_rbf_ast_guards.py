@@ -236,10 +236,21 @@ class TestQuatRBFASTGuards(unittest.TestCase):
             r"isQuatMember",
             "applyOutputEncodingBlend signature must include "
             "isQuatMember mask (M_P0_QUAT_RBF_OVERLAP_DISCLOSE).")
-        # Body must contain the overlap-skip warning literal.
-        self.assertIn("overlaps quaternion group", cpp,
+        # Body must contain the overlap-skip warning literal. C++
+        # adjacent-string concatenation may split the message across
+        # lines, so check for unique substrings instead of the full
+        # phrase: 'overlaps quaternion' (start) + 'preserve B1 QWA' (end).
+        self.assertIn("overlaps quaternion", cpp,
             "applyOutputEncodingBlend body must emit the once-per-rig "
             "overlap warning (B1 takes precedence over B2).")
+        self.assertIn("preserve B1 QWA", cpp,
+            "Overlap warning must explain why the block was skipped "
+            "(B1 QWA Power Iter is preferred over B2 nlerp / ExpMap).")
+        # Once-per-rig flag and member.
+        self.assertIn("outputEncodingOverlapWarningIssued", h,
+            "Header must declare the once-per-rig overlap warning flag.")
+        self.assertIn("outputEncodingOverlapWarningIssued", cpp,
+            "compute() must read/write the overlap warning flag.")
 
     # ----- §2.4 + Matrix 互斥安全网 (2 项) -----
 
