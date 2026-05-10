@@ -162,7 +162,16 @@ RBFtools::RBFtools()
       qwaClippedWarningIssued(false),
       qwaDegenerateWarningIssued(false),
       prevQuatGroupConfigHash(0),
-      outputEncodingOverlapWarningIssued(false)  // M_P0_QUAT_RBF_OVERLAP_DISCLOSE
+      outputEncodingOverlapWarningIssued(false),  // M_P0_QUAT_RBF_OVERLAP_DISCLOSE
+      // M_P0_TRAINING_AFFECTING_ATTRS (2026-05-10): -1 / NaN-ish
+      // sentinels so the first compute() after node creation reads
+      // the actual plug values, sets prev = current (no spurious
+      // re-train), and the FIRST USER EDIT triggers retrain.
+      prevKernelVal(-1),
+      prevDistanceTypeVal(-1),
+      prevRadiusTypeVal(-1),
+      prevRadiusVal(-1.0),
+      prevRegularizationVal(-1.0)
 {}
 
 RBFtools::~RBFtools()
@@ -1204,9 +1213,17 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
     // Reset the once-per-rig warning flag whenever the user changes
     // encoding — they should get a fresh warning if the new mode also
     // trips the safety net.
+    //
+    // The retrain trigger for inputEncoding lives in the
+    // M_P0_TRAINING_AFFECTING_ATTRS block below (deliberately AFTER
+    // ``evalInput = evaluatePlug.asBool();`` so the
+    // training-affecting-attr promotion to evalInput=true is not
+    // clobbered by the read).
+    bool inputEncodingChangedThisFrame = false;
     if (inputEncodingVal != prevInputEncodingVal)
     {
         inputEncodingWarningIssued = false;
+        inputEncodingChangedThisFrame = true;
         prevInputEncodingVal = inputEncodingVal;
     }
     angleVal = anglePlug.asDouble();
@@ -1235,6 +1252,73 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
     radiusTypeVal = radiusTypePlug.asShort();
     meanVal = meanPlug.asDouble();
     varianceVal = variancePlug.asDouble();
+
+    // -----------------------------------------------------------------
+    // M_P0_TRAINING_AFFECTING_ATTRS (2026-05-10): force re-train when
+    // any attribute that influences the K matrix or the encoded pose
+    // vectors changes. attributeAffects(<attr>, output) marks output
+    // dirty but evalInput defaults to False; without this guard the
+    // wMat trained under the OLD attribute value gets reused with
+    // the NEW value at inference, producing mathematically inconsistent
+    // results (rest-pose joint drift, distorted interpolation curves).
+    //
+    // Tracked attrs and the math they influence:
+    //   kernel         → φ shape (every K[i,j] activation depends on it)
+    //   distanceType   → d(p_i, p_j) metric (every K[i,j] depends on it)
+    //   inputEncoding  → encoded pose vector dimension and content
+    //   radius         → σ in φ(d, σ) when radiusType=Custom
+    //   radiusType     → which σ source to use (mean / median / custom)
+    //   regularization → λI injection into K diagonal
+    //
+    // Compare to existing prev-trackers in this file:
+    //   prevSolverMethodVal   → only resets lastSolveMethod cache, NOT
+    //                            evalInput (kernel SPD-ness is solver-
+    //                            independent — correct historical
+    //                            behaviour, kept).
+    //   prevQuatGroupConfigHash → DOES set evalInput=true (cpp:1681)
+    //   prevBaseValueArr / prevOutputIsScaleArr → DOES set evalInput
+    //                            (cpp:1628)
+    // -----------------------------------------------------------------
+    bool trainingAttrChanged = false;
+    if (kernelVal != prevKernelVal)
+    {
+        if (prevKernelVal != -1)  // skip first-compute spurious trigger
+            trainingAttrChanged = true;
+        prevKernelVal = kernelVal;
+    }
+    if (distanceTypeVal != prevDistanceTypeVal)
+    {
+        if (prevDistanceTypeVal != -1)
+            trainingAttrChanged = true;
+        prevDistanceTypeVal = distanceTypeVal;
+    }
+    if (radiusTypeVal != prevRadiusTypeVal)
+    {
+        if (prevRadiusTypeVal != -1)
+            trainingAttrChanged = true;
+        prevRadiusTypeVal = radiusTypeVal;
+    }
+    if (radiusVal != prevRadiusVal)
+    {
+        if (prevRadiusVal != -1.0)
+            trainingAttrChanged = true;
+        prevRadiusVal = radiusVal;
+    }
+    if (regularizationVal != prevRegularizationVal)
+    {
+        if (prevRegularizationVal != -1.0)
+            trainingAttrChanged = true;
+        prevRegularizationVal = regularizationVal;
+    }
+    // inputEncoding change — flag was set in the warning-reset block
+    // above (cpp:1207-1220 area), where ``evalInput`` had not yet
+    // been read from the plug. We promote to evalInput=true here so
+    // the read at cpp:1227 does not clobber.
+    if (inputEncodingChangedThisFrame)
+        trainingAttrChanged = true;
+
+    if (trainingAttrChanged)
+        evalInput = true;
 
     curveAttr = MRampAttribute(thisNode, curveRamp, &status);
     CHECK_MSTATUS_AND_RETURN_IT(status);

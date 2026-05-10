@@ -559,6 +559,30 @@ private:
     // change at cpp:1664-1668), so a fresh quat-group config gets a
     // fresh overlap-disclosure chance.
     bool   outputEncodingOverlapWarningIssued;
+
+    // M_P0_TRAINING_AFFECTING_ATTRS (2026-05-10): trackers for
+    // attributes whose change requires wMat re-solve. Without these,
+    // attributeAffects(<attr>, output) marks output dirty but
+    // ``evalInput = evaluatePlug.asBool()`` is False by default, so
+    // the cached wMat (trained under the OLD attribute value) is
+    // reused with the NEW value at inference → mathematically
+    // inconsistent solver state → driven joints drift on rest pose.
+    //
+    // Repro that surfaced this defense: switching kernel from
+    // Gaussian (φ(0)=1) to MQB (φ(0)=w) without an explicit Apply
+    // produced visible joint offset at rest pose. Same problem
+    // applied to distanceType / radius / radiusType / regularization
+    // / inputEncoding switches.
+    //
+    // Detection at compute() entry: any of these prevs differ from
+    // the current plug value → set ``evalInput = true`` + update prev.
+    // Sentinels chosen so the first compute() after node creation
+    // never spuriously triggers a re-train (initial == current).
+    short  prevKernelVal;
+    short  prevDistanceTypeVal;
+    short  prevRadiusTypeVal;
+    double prevRadiusVal;
+    double prevRegularizationVal;
 };
 
 // ---------------------------------------------------------------------
