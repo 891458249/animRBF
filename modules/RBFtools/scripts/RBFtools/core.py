@@ -3854,6 +3854,30 @@ def apply_poses(node, driver_node, driven_node,
     failed_step = None
     try:
         with undo_chunk("RBFtools: apply poses"):
+            # 0 — M_P0_APPLY_FORCE_GENERIC (2026-05-10): defensive
+            # rbfMode=0 lock. The routed Apply flow signature
+            # (driver_node + driver_attrs + driven_node + driven_attrs)
+            # is Generic-mode-only by contract — Matrix mode uses
+            # add_driver_source + driverList[] wiring, a completely
+            # different entry point. User-reported repro: Apply left
+            # rbfMode stranded at 1 (Matrix) by some upstream UI /
+            # signal path the scriptJob attributeChange monitor could
+            # not capture, the C++ kernel then took the Matrix path
+            # on input[] data → solver garbage → driver fails to drive
+            # driven. Hardcoding 0 here is safe: anyone WANTING Matrix
+            # mode would never reach this function (they'd build the
+            # node via add_driver_source). The scriptJob trace showed
+            # 4 setAttrs writing 0 during Apply — adding this
+            # explicit 0 write makes the contract self-enforcing
+            # rather than dependent on the (currently unmapped) write
+            # path that flips it to 1.
+            try:
+                cmds.setAttr(shape + ".rbfMode", 0)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses: could not force rbfMode=0 "
+                    "(M_P0_APPLY_FORCE_GENERIC defense): {}".format(exc))
+
             # 1 — clear stale data (including any prior baseline arrays)
             try:
                 clear_node_data(node)
@@ -3933,6 +3957,18 @@ def apply_poses(node, driver_node, driven_node,
             except Exception:
                 failed_step = "7 (evaluate trigger)"
                 raise
+
+            # 7b — M_P0_APPLY_FORCE_GENERIC belt-and-suspenders:
+            # re-pin rbfMode=0 right before exiting the apply chunk.
+            # If any step 2-6 path emitted a setAttr / connectAttr
+            # against rbfMode (the unmapped flip path), this catches
+            # it. The C++ has already trained against Generic-mode
+            # input[] semantics by the time we get here; a stranded
+            # rbfMode=1 would only confuse the next compute().
+            try:
+                cmds.setAttr(shape + ".rbfMode", 0)
+            except Exception:
+                pass  # Best-effort; step 7 already trained
 
             apply_succeeded = True
     finally:
