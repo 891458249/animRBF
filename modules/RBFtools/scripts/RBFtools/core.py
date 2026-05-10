@@ -3887,7 +3887,20 @@ def apply_poses(node, driver_node, driven_node,
     apply_succeeded = False
     failed_step = None
     try:
-        with undo_chunk("RBFtools: apply poses"):
+        # M_P0_APPLY_FREEZE_DURING_WRITE (2026-05-10): freeze the
+        # node's nodeState to HasNoEffect (1) for the duration of the
+        # multi-attribute write storm. apply_poses fires HUNDREDS of
+        # setAttr / removeMultiInstance calls (clear_node_data + per-
+        # pose poseInput/poseValue writes + baseline writes + local-
+        # transform replay). Without the freeze, EVERY single one of
+        # those triggers DG dirty → compute() runs against partially-
+        # written matPoses / matValues → array bounds violations or
+        # solver assertion failures inside the C++ kernel → Maya CTD.
+        # The pre-existing connect_routed / disconnect_routed paths
+        # already use this pattern (cpp:4574); applying the same
+        # protocol here matches their crash-defense story.
+        with undo_chunk("RBFtools: apply poses"), \
+             _node_state_frozen(get_shape(node)):
             # 0 — M_P0_APPLY_FORCE_GENERIC (2026-05-10): defensive
             # rbfMode=0 lock. The routed Apply flow signature
             # (driver_node + driver_attrs + driven_node + driven_attrs)

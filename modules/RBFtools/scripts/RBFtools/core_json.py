@@ -1203,7 +1203,14 @@ def import_poses_from_path(node, path, mode="replace"):
             write_base = 0
 
     n_imported = 0
-    with core.undo_chunk("RBFtools: import poses ({})".format(mode)):
+    # M_P0_APPLY_FREEZE_DURING_WRITE (2026-05-10): freeze nodeState
+    # to HasNoEffect for the per-pose write storm. Without this the
+    # mid-loop compute() sees half-populated poses[] indices and
+    # crashes the C++ kernel (same root cause as apply_poses' freeze
+    # and connect_routed's freeze). evaluate=0/1 toggle AFTER the
+    # freeze exits — that is the legitimate retrain path.
+    with core.undo_chunk("RBFtools: import poses ({})".format(mode)), \
+         core._node_state_frozen(shape):
         for i, pdict in enumerate(poses_arr):
             seq_idx = write_base + i
             radius = float(pdict.get("radius", core.DEFAULT_POSE_RADIUS))
@@ -1220,11 +1227,13 @@ def import_poses_from_path(node, path, mode="replace"):
                     "import_poses: pose[{}] write failed: {}".format(
                         i, exc))
 
-        # Force re-train so the new poses take effect.
-        try:
-            cmds.setAttr(shape + ".evaluate", 0)
-            cmds.setAttr(shape + ".evaluate", 1)
-        except Exception:
-            pass
+    # Force re-train so the new poses take effect. Outside the
+    # freeze block — evaluate=0/1 must run with nodeState=Normal so
+    # compute() actually rebuilds wMat under the new pose set.
+    try:
+        cmds.setAttr(shape + ".evaluate", 0)
+        cmds.setAttr(shape + ".evaluate", 1)
+    except Exception:
+        pass
 
     return {"n_poses_imported": n_imported, "warnings": warns}
