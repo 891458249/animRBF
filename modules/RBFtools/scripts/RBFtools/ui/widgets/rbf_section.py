@@ -442,6 +442,10 @@ class RBFSection(CollapsibleFrame):
         # encoding=2 sees the populated editor visible immediately
         # (addendum §M2.4b Q2).
         self._update_encoding_visibility(ienc)
+        # M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): honest disclosure for
+        # distanceType=Angle -- gated identically on rig load and on
+        # interactive combo change (see _on_input_encoding).
+        self._update_distance_type_state(ienc)
         self._update_radius_state()
         self._update_mode_visibility(self._cmb_mode.currentIndex())
 
@@ -546,10 +550,49 @@ class RBFSection(CollapsibleFrame):
         :func:`_update_encoding_visibility` is also called from
         load() so a v5 rig opening with encoding != Raw shows the
         rotateOrder editor immediately.
+
+        :func:`_update_distance_type_state` honestly discloses that
+        ``distanceType=Angle`` only takes effect when
+        ``inputEncoding=Raw`` (M_P0_OUTPUT_EXPMAP_FIX).
         """
         self.attributeChanged.emit("inputEncoding", idx)
         self.inputEncodingChanged.emit(int(idx))
         self._update_encoding_visibility(idx)
+        self._update_distance_type_state(idx)
+
+    def _update_distance_type_state(self, encoding_idx):
+        """M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): honestly disclose
+        the distanceType=Angle constraint.
+
+        ``getPoseDelta`` (RBFtools.cpp:3084-3088) reads
+        ``distType`` only when ``encoding == 0`` (Raw) and
+        ``n == 3``. Every non-Raw encoding (Quaternion / BendRoll /
+        ExpMap / SwingTwist) routes through a per-block distance
+        function with a hard-coded Euclidean-style metric, so
+        picking Angle while encoded silently has no effect.
+
+        This slot disables the Angle item (combo index 1) when
+        encoding != Raw and forces the combo back to Euclidean if
+        the user had Angle selected -- consistent with the
+        per-source encoding combo disable pattern from
+        M_P0_QUATERNION_HONEST_DISCLOSURE.
+        """
+        is_raw = (int(encoding_idx) == 0)
+        # The Angle item is index 1 in DISTANCE_TYPE_LABELS
+        # (cpp: distType enum 0=Euclidean, 1=Angle).
+        model = self._cmb_dist.model()
+        angle_item = model.item(1) if model is not None else None
+        if angle_item is not None:
+            angle_item.setEnabled(is_raw)
+        # Tooltip carries the "why" so the user knows what was
+        # disabled and why.
+        self._cmb_dist.setToolTip(
+            "" if is_raw else tr("angle_disabled_for_encoding_tip"))
+        # If the user had Angle selected and switches to a non-Raw
+        # encoding, snap the combo back to Euclidean so the rig is
+        # not left in a silent-no-op state.
+        if (not is_raw) and self._cmb_dist.currentIndex() == 1:
+            self._cmb_dist.setCurrentIndex(0)
 
     def _update_encoding_visibility(self, idx):
         """Single source of truth for the rotateOrder editor visibility.

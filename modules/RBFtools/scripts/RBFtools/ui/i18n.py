@@ -207,6 +207,16 @@ _EN = {
         "Euler 3-block via per-pose nlerp (smoother than the "
         "Euler weighted average for large rotations). BendRoll / "
         "SwingTwist are forward-compat -- backend deferred to v5.x.",
+    # M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): distanceType=Angle is
+    # only consumed by getPoseDelta when inputEncoding=Raw + n==3
+    # (RBFtools.cpp:3084-3088). Per-block encodings hard-code a
+    # Euclidean-style metric. The combo disables the Angle item
+    # for non-Raw encodings so users do not silently set a no-op.
+    "angle_disabled_for_encoding_tip":
+        "Angle distance only available with Raw encoding. "
+        "Per-block encodings (Quaternion / BendRoll / ExpMap / "
+        "SwingTwist) use a hard-coded per-block metric and ignore "
+        "this setting (see addendum §M_P0_OUTPUT_EXPMAP_FIX).",
     "output_encoding_euler":           "Euler",
     "output_encoding_quaternion":      "Quaternion",
     "output_encoding_expmap":          "ExpMap",
@@ -734,6 +744,15 @@ _ZH = {
         u"BendRoll / SwingTwist "
         u"\u4e3a forward-compat \u2014\u2014 "
         u"\u540e\u7aef\u63a8\u8fdf\u5230 v5.x\u3002",
+    # M_P0_OUTPUT_EXPMAP_FIX (2026-05-10)
+    "angle_disabled_for_encoding_tip":
+        u"Angle \u8ddd\u79bb\u4ec5\u5728 Raw \u7f16\u7801"
+        u"\u4e0b\u53ef\u7528\u3002\u9010\u5757\u7f16\u7801 "
+        u"(Quaternion / BendRoll / "
+        u"ExpMap / SwingTwist) \u4f7f\u7528"
+        u"\u786c\u7f16\u7801\u7684\u9010\u5757\u5ea6\u91cf\uff0c"
+        u"\u5ffd\u7565\u6b64\u8bbe\u7f6e (\u8be6\u89c1 addendum "
+        u"\u00a7M_P0_OUTPUT_EXPMAP_FIX)\u3002",
     "output_encoding_euler":           u"Euler",
     "output_encoding_quaternion":      u"Quaternion",
     "output_encoding_expmap":          u"ExpMap",
