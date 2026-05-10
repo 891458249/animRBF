@@ -1449,6 +1449,26 @@ class MainController(QtCore.QObject):
     #  Generic attribute write
     # =================================================================
 
+    # M_P0_TRAINING_ATTRS_FORCE_RETRAIN (2026-05-11): attribute set
+    # affecting K matrix / encoded pose vectors must force evaluate=1
+    # so the C++ solver retrains the wMat under the new value. The
+    # M_P0_TRAINING_AFFECTING_ATTRS C++ prev-tracker already does this
+    # in compute(), but the Python-layer write here is the
+    # belt-and-suspenders defense: if the C++ tracker fails to fire
+    # for any reason (DG dirty propagation race, plug coalescing,
+    # parallel eval), the explicit evaluate=0/1 toggle here triggers
+    # the training block unconditionally.
+    _TRAINING_AFFECTING_ATTRS = frozenset({
+        "kernel",             # K[i,j] = φ(d, σ) shape
+        "distanceType",       # d(p_i, p_j) metric
+        "inputEncoding",      # encoded pose vector dimension/content
+        "radius",             # σ in φ(d, σ) for Custom radiusType
+        "radiusType",         # which σ source (mean / median / custom)
+        "regularization",     # λI diagonal injection
+        "allowNegativeWeights",  # affects matValues sign treatment
+        "rbfMode",            # Generic vs Matrix path divergence
+    })
+
     def set_attribute(self, attr, value):
         """Write a single attribute on the current node.
 
@@ -1458,6 +1478,12 @@ class MainController(QtCore.QObject):
             clear-then-write under a single undo chunk per
             v5 addendum §M2.4a refinement 2).
           * scalar (int / float / bool) → :func:`core.set_node_attr`.
+
+        M_P0_TRAINING_ATTRS_FORCE_RETRAIN (2026-05-11): when the
+        attr is a training-affecting one (kernel / radius / etc.),
+        also toggle evaluate=0/1 AFTER the write so the C++ solver
+        retrains wMat under the new value. Defends against any
+        prev-tracker miss in the C++ auto-retrain path.
         """
         if not self._current_node:
             return
@@ -1465,6 +1491,17 @@ class MainController(QtCore.QObject):
             core.set_node_multi_attr(self._current_node, attr, value)
         else:
             core.set_node_attr(self._current_node, attr, value)
+        # Belt-and-suspenders retrain trigger for training-affecting attrs.
+        if attr in self._TRAINING_AFFECTING_ATTRS:
+            try:
+                shape = core.get_shape(self._current_node)
+                if shape and core._exists(shape):
+                    cmds.setAttr(shape + ".evaluate", 0)
+                    cmds.setAttr(shape + ".evaluate", 1)
+            except Exception as exc:
+                cmds.warning(
+                    "set_attribute: force-retrain toggle failed for "
+                    "{!r}: {!r}".format(attr, exc))
 
     # =================================================================
     #  M_ENC_AUTOPIPE - inputEncoding side-effect: auto-derive
