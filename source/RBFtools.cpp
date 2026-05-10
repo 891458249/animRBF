@@ -3290,12 +3290,43 @@ double RBFtools::getPoseDelta(std::vector<double> vec1, std::vector<double> vec2
     // -----------------------------------------------------------------
 
     // Raw (v4 legacy + BendRoll/SwingTwist placeholder target).
+    //
+    // M_P0_KERNEL_ALGO_AUDIT (2026-05-10): the legacy code path
+    // honoured distType == 1 (Angle) ONLY when n == 3 (single
+    // driver, single 3-vector). For multi-driver Raw setups
+    // (n = 3K, K > 1) the Angle selection was silently dropped
+    // and the path fell through to Euclidean — a multi-driver
+    // bug that produced inconsistent UX (the same dropdown
+    // choice meant different things at N=1 vs N>1).
+    //
+    // Fix: when n is a positive multiple of 3, aggregate per-3-
+    // block angles via L2 (matches the Riemannian product-
+    // manifold semantics used by the per-block quat / swing-twist
+    // distance helpers). N=1 case is unchanged (single block →
+    // single getAngle return).
     if (encoding == 0)
     {
         if (distType == 0)
             return getRadius(vec1, vec2);
         if (n == 3)
             return getAngle(vec1, vec2);
+        if (n > 3 && n % 3 == 0)
+        {
+            // Per-3-block angle aggregation, L2.
+            const size_t blocks = n / 3;
+            double sumSq = 0.0;
+            for (size_t k = 0; k < blocks; ++k)
+            {
+                const size_t base = k * 3;
+                const std::vector<double> a = {
+                    vec1[base + 0], vec1[base + 1], vec1[base + 2]};
+                const std::vector<double> b = {
+                    vec2[base + 0], vec2[base + 1], vec2[base + 2]};
+                const double ang = getAngle(a, b);
+                sumSq += ang * ang;
+            }
+            return sqrt(sumSq);
+        }
         return getRadius(vec1, vec2);
     }
 
@@ -3326,11 +3357,30 @@ double RBFtools::getPoseDelta(std::vector<double> vec1, std::vector<double> vec2
         return getRadius(vec1, vec2);  // defensive
     }
 
-    // Unknown encoding: defensive fall-through.
+    // Unknown encoding: defensive fall-through. Mirrors the Raw
+    // branch's multi-block Angle aggregation (M_P0_KERNEL_ALGO_AUDIT)
+    // so an out-of-range encoding value still produces a consistent
+    // distance shape across N=1 and N>1 driver setups.
     if (distType == 0)
         return getRadius(vec1, vec2);
     if (n == 3)
         return getAngle(vec1, vec2);
+    if (n > 3 && n % 3 == 0)
+    {
+        const size_t blocks = n / 3;
+        double sumSq = 0.0;
+        for (size_t k = 0; k < blocks; ++k)
+        {
+            const size_t base = k * 3;
+            const std::vector<double> a = {
+                vec1[base + 0], vec1[base + 1], vec1[base + 2]};
+            const std::vector<double> b = {
+                vec2[base + 0], vec2[base + 1], vec2[base + 2]};
+            const double ang = getAngle(a, b);
+            sumSq += ang * ang;
+        }
+        return sqrt(sumSq);
+    }
     return getRadius(vec1, vec2);
 }
 
@@ -4376,13 +4426,65 @@ void RBFtools::getActivations(BRMatrix &mat,
 // Return Value:
 //      double          The new interpolated value.
 //
+// M_P0_KERNEL_ALGO_AUDIT (2026-05-10): kernel φ(d, w) catalog.
+// Document the σ (width) semantics and PSD properties of each
+// kernel so a reader does not need to reverse-engineer them
+// from the math alone. Every kernel here is paired with the
+// per-block / Riemannian distance metric chosen by getPoseDelta;
+// the (kernel × distance) combination defines the K matrix shape.
+//
+// All formulas use d = pre-computed pairwise distance from
+// getPoseDelta. The width parameter w is the user's "Radius"
+// or per-pose σ (commit M_PER_POSE_SIGMA).
+//
+//   Type 0 — Linear:   φ(d) = d                       (φ(0) = 0)
+//     PSD: NO. K[i,i] = 0 always; needs λ > 0 to solve.
+//     Width: IGNORED (mathematical definition has no width).
+//     UX note: the radius slider has no effect on Linear.
+//
+//   Type 1 — Gaussian 1:  φ(d) = exp(-d / w²)        (φ(0) = 1)
+//     PSD: YES (positive definite kernel).
+//     Width: w² is the spatial decay rate; LARGER w → smoother.
+//     NOTE: this is NOT the canonical Gaussian (which has d²
+//     in the exponent). It is an exponential-decay-of-distance
+//     kernel preserved for backcompat. Use Gaussian 2 for true
+//     bell-shape decay.
+//
+//   Type 2 — Gaussian 2:  φ(d) = exp(-d² / w²)       (φ(0) = 1)
+//     PSD: YES (canonical Gaussian).
+//     Width: w is the half-width at φ=e^-1 ≈ 0.37; LARGER w →
+//     smoother. The internal 0.707 multiplier folds 1/√2 so the
+//     exponent denominator becomes w² (not 2·w²).
+//
+//   Type 3 — Thin Plate:  φ(r) = r²·log(r), r=d/w    (φ(0) = 0)
+//     PSD: conditionally negative-definite (works with λ > 0).
+//     Width: w normalizes d before the TPS evaluation.
+//     M_P0_KERNEL_ALGO_AUDIT: r ≤ 0 (including float-noise
+//     negatives) returns 0.0 to preserve K's PSD structure.
+//
+//   Type 4 — Multi-Quadric:  φ(d) = √(d² + w²)      (φ(0) = w)
+//     PSD: conditionally positive-definite.
+//     Width: w is the chord shift; LARGER w → smoother.
+//     NAME NOTE: schema labels this "Multi-Quadratic Biharmonic"
+//     for backcompat; the formula is the standard Multi-Quadric
+//     (MQ), not biharmonic MQ ((d²+w²)^1.5). The label is
+//     historical and not changed to preserve existing rig schema.
+//
+//   Type 5 — Inverse Multi-Quadric:  φ(d) = 1/√(d² + w²)
+//     PSD: positive definite.                       (φ(0) = 1/w)
+//     Width: w is the chord shift; LARGER w → smoother.
+//
+// Auto-adaptive λ retry (M_P0_AUTO_ADAPTIVE_LAMBDA) handles all
+// of the above PSD edge cases — kernels whose K is non-SPD at
+// the user's λ get auto-bumped λ until Cholesky / GE succeed,
+// so kernel choice no longer dictates "must set λ > 0 manually".
 double RBFtools::interpolateRbf(double value, double width, short kernelType)
 {
     double result = 0.0;
-    
+
     if (width == 0.0)
         width = 1.0;
-    
+
     // linear
     result = value;
     
@@ -4400,13 +4502,23 @@ double RBFtools::interpolateRbf(double value, double width, short kernelType)
         result = exp(-(value * value) / (2.0 * width * width));
     }
     // thin plate
+    // M_P0_KERNEL_ALGO_AUDIT (2026-05-10): TPS classic definition is
+    // φ(r) = r² · log(r) for r > 0, φ(0) = 0. Old code returned
+    // `value` itself in the else branch, which is fine for r = 0
+    // (zero) but produces a negative result for tiny negative
+    // floating-point noise (normalizeColumns can yield -1e-15-scale
+    // values that pass `value > 0` as false but are not exactly 0).
+    // A negative diagonal entry breaks K's positive-semidefinite
+    // property → Cholesky fails spuriously even on well-conditioned
+    // pose sets. Returning 0.0 is mathematically correct AND
+    // numerically robust.
     else if (kernelType == 3)
     {
         value /= width;
         if (value > 0)
             result = value * value * log(value);
         else
-            result = value;
+            result = 0.0;
     }
     // multi quadratic
     else if (kernelType == 4)
