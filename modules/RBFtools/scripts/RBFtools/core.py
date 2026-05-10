@@ -3347,13 +3347,13 @@ def capture_per_pose_local_transforms(driven_node, driven_attrs, poses):
     list[dict]
         Per-pose ``{"translate":(3), "quat":(4), "scale":(3)}``.
         Always the same length as *poses*. On ``driven_node`` missing
-        or ``is_blend_shape(driven_node)`` or empty ``driven_attrs``
+        or ``is_blendshape(driven_node)`` or empty ``driven_attrs``
         the list is filled with :data:`IDENTITY_LOCAL_TRANSFORM`.
     """
     n_poses = len(poses)
     if not _exists(driven_node):
         return [IDENTITY_LOCAL_TRANSFORM] * n_poses
-    if is_blend_shape(driven_node):
+    if is_blendshape(driven_node):
         # blendShape has no local Transform concept — see addendum
         # §M2.3 decision (C)①.
         return [IDENTITY_LOCAL_TRANSFORM] * n_poses
