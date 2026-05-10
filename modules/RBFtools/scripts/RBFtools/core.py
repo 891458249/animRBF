@@ -4220,6 +4220,29 @@ def _disconnect_or_purge(shape, side, idx, other_plug):
             cmds.warning(
                 "disconnect: removeMultiInstance({}) failed: "
                 "{}".format(target_plug, exc))
+
+        # M_P0_DISCONNECT_SCALE_RESTORE (2026-05-10): the disconnect
+        # loop runs INSIDE _node_state_frozen (cpp:4574) which sets
+        # shape.nodeState=1; with compute() short-circuited, the
+        # solver's MFnNumericData::kDouble output plug returns 0.0
+        # (the kDouble default). DG propagates that 0 to driven.scaleX
+        # and disconnectAttr leaves it cached. Result: every scale
+        # channel disconnected during a routed Disconnect collapses
+        # to 0 — t-pose mesh implodes. Defense: after severance,
+        # force any disconnected scale channel back to 1.0
+        # (multiplicative identity, matches v5 PART G.1 anchor).
+        # Other channels (translate / rotate / visibility) are not
+        # remediated here — they default to 0 in Maya which is the
+        # natural rest pose for those attrs.
+        if side == "output" and other_plug:
+            attr_short = other_plug.rsplit(".", 1)[-1]
+            if attr_short in SCALE_ATTR_NAMES:
+                try:
+                    cmds.setAttr(other_plug, 1.0)
+                except Exception as exc:
+                    cmds.warning(
+                        "disconnect: failed to restore {} -> 1.0 "
+                        "after sever: {}".format(other_plug, exc))
     return severed
 
 
