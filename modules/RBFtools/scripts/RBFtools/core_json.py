@@ -961,42 +961,107 @@ def export_poses_to_path(node, path):
     Returns the absolute path written. Raises if the node is missing
     or has zero poses.
 
+    M_P0_POSES_IO_DIALOG_CTD_FIX2 (2026-05-11): bulletproof
+    defensive coding — every Maya cmds call wrapped, every
+    legacy/deprecated helper replaced with the multi-aware
+    equivalent, explicit step prints so a crash trail is visible
+    in Script Editor up to the point of failure.
+
     Companion: ``import_poses_from_path`` reads this format back into
     an existing node, validating dim consistency.
     """
+    print("[RBFtools] core_json.export_poses_to_path: ENTER node={!r} path={!r}".format(node, path))
+
     shape = core.get_shape(node)
     if not core._exists(shape):
         raise PosesImportValidationError(
             "export_poses_to_path: shape not found for {!r}".format(node))
+    print("[RBFtools] core_json.export_poses: shape resolved = {!r}".format(shape))
 
-    drv_node, drv_attrs = core.read_driver_info(node)
-    drvn_node, drvn_attrs = core.read_driven_info(node)
-    poses = core.read_all_poses(node)
+    # Driver / driven signature reads — use the multi-aware readers
+    # directly (not the deprecated single wrappers which emit a
+    # DeprecationWarning every call and can interact oddly with
+    # logging handlers some users have set up).
+    try:
+        drv_sources = core.read_driver_info_multi(node)
+    except Exception as exc:
+        cmds.warning(
+            "export_poses: read_driver_info_multi failed: {!r} "
+            "(continuing with empty driver list)".format(exc))
+        drv_sources = []
+    try:
+        dvn_sources = core.read_driven_info_multi(node)
+    except Exception as exc:
+        cmds.warning(
+            "export_poses: read_driven_info_multi failed: {!r} "
+            "(continuing with empty driven list)".format(exc))
+        dvn_sources = []
+    drv_node = drv_sources[0].node if drv_sources else ""
+    drv_attrs = list(drv_sources[0].attrs) if drv_sources else []
+    drvn_node = dvn_sources[0].node if dvn_sources else ""
+    drvn_attrs = list(dvn_sources[0].attrs) if dvn_sources else []
+    print("[RBFtools] core_json.export_poses: drv={!r} drvn={!r}".format(
+        (drv_node, drv_attrs), (drvn_node, drvn_attrs)))
+
+    try:
+        poses = core.read_all_poses(node)
+    except Exception as exc:
+        raise PosesImportValidationError(
+            "export_poses: read_all_poses failed: {!r}".format(exc))
+    print("[RBFtools] core_json.export_poses: poses count = {}".format(
+        len(poses)))
 
     if not poses:
         raise PosesImportValidationError(
             "export_poses_to_path: node has no poses to export "
             "(add poses first via the UI 'Add Pose' button).")
 
+    # input[] / output[] count — fall back to driver/driven attr
+    # count when wiring is absent (Apply'd but not Connect'd yet).
+    in_count = 0
     try:
-        in_count = len(cmds.getAttr(shape + ".input",
-                                     multiIndices=True) or [])
-    except Exception:
-        in_count = len(poses[0].inputs) if poses else 0
+        in_indices = cmds.getAttr(shape + ".input",
+                                   multiIndices=True) or []
+        in_count = len(in_indices)
+    except Exception as exc:
+        cmds.warning(
+            "export_poses: cmds.getAttr input multiIndices failed: "
+            "{!r}".format(exc))
+    if in_count == 0:
+        # Apply'd-but-not-Connected node — use pose's stored inputs
+        # length, which is the authoritative dim for the trained wMat.
+        in_count = len(poses[0].inputs) if poses else len(drv_attrs)
+    out_count = 0
     try:
-        out_count = len(cmds.getAttr(shape + ".output",
-                                      multiIndices=True) or [])
-    except Exception:
-        out_count = len(poses[0].values) if poses else 0
+        out_indices = cmds.getAttr(shape + ".output",
+                                    multiIndices=True) or []
+        out_count = len(out_indices)
+    except Exception as exc:
+        cmds.warning(
+            "export_poses: cmds.getAttr output multiIndices failed: "
+            "{!r}".format(exc))
+    if out_count == 0:
+        out_count = len(poses[0].values) if poses else len(drvn_attrs)
+    print("[RBFtools] core_json.export_poses: in_count={} out_count={}".format(
+        in_count, out_count))
 
+    # Build the pose dicts — every float conversion guarded.
     pose_dicts = []
-    for p in poses:
-        pose_dicts.append({
-            "index":  int(p.index),
-            "inputs": [float(x) for x in p.inputs],
-            "values": [float(x) for x in p.values],
-            "radius": float(getattr(p, "radius", core.DEFAULT_POSE_RADIUS)),
-        })
+    for i, p in enumerate(poses):
+        try:
+            pose_dicts.append({
+                "index":  int(p.index),
+                "inputs": [float(x) for x in p.inputs],
+                "values": [float(x) for x in p.values],
+                "radius": float(getattr(p, "radius",
+                                         core.DEFAULT_POSE_RADIUS)),
+            })
+        except Exception as exc:
+            cmds.warning(
+                "export_poses: pose[{}] serialization failed: {!r} "
+                "(skipping)".format(i, exc))
+    print("[RBFtools] core_json.export_poses: serialized {} poses".format(
+        len(pose_dicts)))
 
     data = {
         "schema_version": POSES_SCHEMA_VERSION,
@@ -1017,8 +1082,12 @@ def export_poses_to_path(node, path):
         "poses": pose_dicts,
     }
 
+    print("[RBFtools] core_json.export_poses: calling atomic_write_json...")
     atomic_write_json(path, data)
-    return os.path.abspath(path)
+    abspath = os.path.abspath(path)
+    print("[RBFtools] core_json.export_poses: SUCCESS abspath={!r}".format(
+        abspath))
+    return abspath
 
 
 def _validate_poses_payload(data, target_node):

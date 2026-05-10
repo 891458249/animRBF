@@ -1122,33 +1122,62 @@ class MainController(QtCore.QObject):
 
         Returns True on success, False on failure / no current node.
 
-        M_P0_POSES_IO_DIALOG_CTD_FIX (2026-05-10): no UI dialog from
-        this layer. Feedback via cmds.warning + statusMessage signal
-        only — UI handler defers the call via evalDeferred so the
-        fileDialog2 native window has time to tear down before we
-        run any further cmds work.
+        M_P0_POSES_IO_DIALOG_CTD_FIX2 (2026-05-11): bulletproof
+        defensive coding — every step is print-traced + try/except
+        wrapped so a crash inside any one step is captured (logged)
+        and the function returns False instead of letting the
+        exception escape and CTD Maya.
         """
+        print("[RBFtools] ctrl.export_poses_to_path: ENTER path={!r}".format(path))
         if not self._current_node:
             cmds.warning("export_poses_to_path: no current node selected")
             return False
         if not path:
             cmds.warning("export_poses_to_path: empty path")
             return False
-        from RBFtools import core_json
+        # Path sanity — force string, expand user, normalize.
         try:
+            import os
+            path = os.path.expanduser(str(path))
+        except Exception as exc:
+            cmds.warning("export_poses: path normalize failed: {}".format(exc))
+            return False
+        print("[RBFtools] ctrl.export_poses_to_path: normalized path={!r}".format(path))
+        # Lazy import to avoid bringing core_json into the controller's
+        # cold import path.
+        try:
+            from RBFtools import core_json
+        except Exception as exc:
+            cmds.warning(
+                "export_poses: failed to import core_json: {}".format(exc))
+            return False
+        # Core export call — wrap every possible exception type.
+        try:
+            print("[RBFtools] ctrl.export_poses_to_path: calling core_json.export_poses_to_path...")
             abspath = core_json.export_poses_to_path(
                 self._current_node, path)
+            print("[RBFtools] ctrl.export_poses_to_path: core returned abspath={!r}".format(abspath))
         except core_json.PosesImportValidationError as exc:
-            cmds.warning("export_poses: {}".format(exc))
+            cmds.warning("export_poses (validation): {}".format(exc))
+            return False
+        except IOError as exc:
+            cmds.warning("export_poses (IO): {}".format(exc))
+            return False
+        except OSError as exc:
+            cmds.warning("export_poses (OS): {}".format(exc))
+            return False
+        except UnicodeError as exc:
+            cmds.warning("export_poses (unicode): {}".format(exc))
             return False
         except Exception as exc:
-            cmds.warning("export_poses failed: {}".format(exc))
+            cmds.warning("export_poses (other): {!r}".format(exc))
             return False
         cmds.warning("RBFtools: exported poses to {}".format(abspath))
         try:
             self.statusMessage.emit("Poses exported.")
         except Exception:
             pass  # signal emission is advisory; never block on it
+        print("[RBFtools] ctrl.export_poses_to_path: SUCCESS")
         return True
 
     def import_poses_from_path(self, path, mode="replace"):

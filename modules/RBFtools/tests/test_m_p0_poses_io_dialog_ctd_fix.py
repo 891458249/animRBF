@@ -88,19 +88,22 @@ class TestPosesIODialogCTDFix(unittest.TestCase):
             "cmds.warning + statusMessage signal only.")
 
     def test_PERMANENT_b_export_uses_evaldeferred(self):
-        """_on_export_poses must defer the controller call via "
-        "cmds.evalDeferred so fileDialog2 native window can fully "
-        "tear down."""
+        """_on_export_poses must defer the controller call via either
+        cmds.evalDeferred OR maya.utils.executeDeferred so the
+        fileDialog2 native window can fully tear down."""
         src = _read(_MAIN_WINDOW)
         m = re.search(
             r"def\s+_on_export_poses\b[\s\S]+?(?=\n\s{0,4}def\s)", src)
         body = m.group(0)
-        self.assertIn("evalDeferred", body,
+        # M_P0_POSES_IO_DIALOG_CTD_FIX2 switched to executeDeferred
+        # (the documented Python-callable deferral API). Either name
+        # is acceptable, but ONE must be present.
+        self.assertTrue(
+            "executeDeferred" in body or "evalDeferred" in body,
             "_on_export_poses must wrap the controller export call "
-            "in cmds.evalDeferred so the controller work runs after "
-            "fileDialog2's native window has torn down. Without the "
-            "deferral, a back-to-back cmds operation can re-enter "
-            "Maya's dialog machinery in an inconsistent state.")
+            "in maya.utils.executeDeferred (preferred) or "
+            "cmds.evalDeferred so the controller work runs after "
+            "fileDialog2's native window has torn down.")
 
     def test_PERMANENT_c_import_no_post_confirmdialog(self):
         """_on_import_poses must NOT CALL confirmDialog AFTER the
@@ -130,16 +133,18 @@ class TestPosesIODialogCTDFix(unittest.TestCase):
 
     def test_PERMANENT_d_import_uses_evaldeferred(self):
         """_on_import_poses must wrap the REPLACE/APPEND picker +
-        controller call in evalDeferred to avoid back-to-back-modal CTD."""
+        controller call in executeDeferred (or evalDeferred) to
+        avoid back-to-back-modal CTD."""
         src = _read(_MAIN_WINDOW)
         m = re.search(
             r"def\s+_on_import_poses\b[\s\S]+?(?=\n\s{0,4}def\s)", src)
         body = m.group(0)
-        self.assertIn("evalDeferred", body,
+        self.assertTrue(
+            "executeDeferred" in body or "evalDeferred" in body,
             "_on_import_poses must defer the REPLACE/APPEND modal "
-            "+ controller call via cmds.evalDeferred so the prior "
-            "fileDialog2 native window has fully torn down before "
-            "the next modal opens.")
+            "+ controller call via maya.utils.executeDeferred "
+            "(preferred) or cmds.evalDeferred so the prior "
+            "fileDialog2 native window has fully torn down.")
 
     def test_PERMANENT_e_controller_export_defensive(self):
         """controller.export_poses_to_path must validate the path "

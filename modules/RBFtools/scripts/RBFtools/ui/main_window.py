@@ -1072,71 +1072,83 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
     def _on_export_poses(self):
         """File -> Export Poses Only... (M_P0_POSES_IO)
 
-        M_P0_POSES_IO_DIALOG_CTD_FIX (2026-05-10): post-fileDialog2
-        confirmDialog crashed Maya on Windows ("点击 save 闪退").
-        Root cause: stacking two modal dialogs back-to-back without
-        letting the Qt event loop drain leaves the cmds dialog
-        machinery in an inconsistent state — clicking Save returns
-        from fileDialog2, then we IMMEDIATELY enter a confirmDialog,
-        and Maya CTDs while the file dialog is still being torn down.
-        Fix: remove the post-export confirmDialog entirely. Status
-        bar message + cmds.warning to Script Editor is sufficient
-        feedback (matches the existing _on_export_selected pattern,
-        which the user reports works fine).
+        M_P0_POSES_IO_DIALOG_CTD_FIX2 (2026-05-11): the previous
+        fix used cmds.evalDeferred(callable, lowestPriority=True)
+        but `lowestPriority` is NOT a valid kwarg (it's
+        `lowPriority`), AND cmds.evalDeferred with a Python
+        callable on Maya 2025 can drop the callable silently or
+        execute it in a wrong context. The user reports the export
+        still crashes Maya on "Save" click.
+
+        Hardened fix:
+          1. Use ``maya.utils.executeDeferred`` (the documented
+             Python-callable deferral API) instead of evalDeferred.
+          2. Add ``dialogStyle=2`` to fileDialog2 → OS-native
+             dialog on Windows, more stable than the in-app one.
+          3. Print explicit step markers so the user can see in
+             Script Editor exactly where Maya dies if it still
+             crashes.
         """
         from maya import cmds as _cmds
+        from maya import utils as _mutils
         if not self._ctrl.current_node:
             _cmds.warning(tr("msg_export_poses_no_node"))
             return
+        print("[RBFtools] export_poses: opening fileDialog2...")
         try:
             paths = _cmds.fileDialog2(
-                fileMode=0, fileFilter="JSON (*.json)",
+                fileMode=0,
+                fileFilter="JSON (*.json)",
+                dialogStyle=2,
                 caption=tr("menu_export_poses"))
-        except Exception:
+        except Exception as exc:
+            _cmds.warning("export_poses: fileDialog2 failed: {}".format(exc))
             paths = None
         if not paths:
+            print("[RBFtools] export_poses: cancelled (no path).")
             return
-        # Defer the controller call too: Maya needs a tick to fully
-        # tear down the fileDialog2 native window before we trigger
-        # any other UI op. cmds.evalDeferred runs the lambda when
-        # Maya's idle queue next drains.
         out_path = paths[0]
-        _cmds.evalDeferred(
-            lambda p=out_path: self._ctrl.export_poses_to_path(p),
-            lowestPriority=True)
+        print("[RBFtools] export_poses: chose path = {!r}".format(out_path))
+        # Defer the controller call via maya.utils.executeDeferred so
+        # the fileDialog2 native window has fully torn down before we
+        # touch any Maya cmds. This is the documented stable Python-
+        # callable deferral API; cmds.evalDeferred with a callable
+        # was the previous attempt and proved unreliable on 2025.
+        _mutils.executeDeferred(
+            lambda p=out_path, ctrl=self._ctrl: ctrl.export_poses_to_path(p))
+        print("[RBFtools] export_poses: deferred controller call queued.")
 
     def _on_import_poses(self):
         """File -> Import Poses Only... (M_P0_POSES_IO)
 
-        M_P0_POSES_IO_DIALOG_CTD_FIX (2026-05-10): same dialog-stack
-        CTD as _on_export_poses. The replace/append confirm runs
-        BEFORE the actual file write so it cannot be deferred (we
-        need the user's choice to drive the import call). But we
-        defer the import work itself + drop the post-import
-        confirmDialog (status bar + Script Editor warnings carry
-        the result).
+        M_P0_POSES_IO_DIALOG_CTD_FIX2 (2026-05-11): same upgrade as
+        _on_export_poses — switch to ``maya.utils.executeDeferred``
+        + ``dialogStyle=2`` for the fileDialog2.
         """
         from maya import cmds as _cmds
+        from maya import utils as _mutils
         if not self._ctrl.current_node:
             _cmds.warning(tr("msg_import_poses_no_node"))
             return
+        print("[RBFtools] import_poses: opening fileDialog2...")
         try:
             paths = _cmds.fileDialog2(
-                fileMode=1, fileFilter="JSON (*.json)",
+                fileMode=1,
+                fileFilter="JSON (*.json)",
+                dialogStyle=2,
                 caption=tr("menu_import_poses"))
-        except Exception:
+        except Exception as exc:
+            _cmds.warning("import_poses: fileDialog2 failed: {}".format(exc))
             paths = None
         if not paths:
+            print("[RBFtools] import_poses: cancelled (no path).")
             return
         path = paths[0]
+        print("[RBFtools] import_poses: chose path = {!r}".format(path))
 
-        # Replace / append picker. Wrap in evalDeferred so the
-        # fileDialog2 tear-down completes before this modal opens —
-        # avoids the back-to-back-modal CTD reported by the user
-        # for the export path (the import path follows the same
-        # dialog-stack pattern, so apply the same defense
-        # preemptively).
-        def _do_import_with_choice():
+        # Defer the REPLACE/APPEND picker + controller call so the
+        # fileDialog2 native window has time to fully tear down.
+        def _do_import_with_choice(ctrl=self._ctrl):
             try:
                 choice = _cmds.confirmDialog(
                     title=tr("title_import_poses_mode"),
@@ -1146,17 +1158,19 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
                     defaultButton=tr("btn_replace"),
                     cancelButton=tr("btn_cancel"),
                     dismissString=tr("btn_cancel"))
-            except Exception:
+            except Exception as exc:
+                _cmds.warning(
+                    "import_poses: confirmDialog failed: {}".format(exc))
                 choice = tr("btn_replace")
             if choice == tr("btn_cancel"):
+                print("[RBFtools] import_poses: user cancelled mode picker.")
                 return
             mode = "append" if choice == tr("btn_append") else "replace"
-            self._ctrl.import_poses_from_path(path, mode=mode)
-            # Result feedback is via cmds.warning + statusMessage
-            # signal in the controller. No post-import confirmDialog
-            # to avoid the dialog-stack CTD.
+            print("[RBFtools] import_poses: mode = {!r}".format(mode))
+            ctrl.import_poses_from_path(path, mode=mode)
+            print("[RBFtools] import_poses: controller call returned.")
 
-        _cmds.evalDeferred(_do_import_with_choice, lowestPriority=True)
+        _mutils.executeDeferred(_do_import_with_choice)
 
     def _on_export_all(self):
         """File -> Export All RBF..."""
