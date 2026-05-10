@@ -443,7 +443,7 @@ def get_all_settings(node):
         # reference). This fallback only fires when the node attr
         # cannot be read (corrupt scene / missing schema); the
         # authoritative value is always the node attribute.
-        "regularization":       g(shape + ".regularization",       1.0e-3),
+        "regularization":       g(shape + ".regularization",       1.0e-8),
         "solverMethod":         g(shape + ".solverMethod",         0),
         "driverInputRotateOrder":
             read_driver_rotate_orders(node) or [],
@@ -2420,7 +2420,7 @@ def create_node():
         # tighter regularization (e.g. 1e-8 / 0) can override via
         # the UI spinbox or `set_attribute("regularization", x)`.
         try:
-            cmds.setAttr(get_shape(transform) + ".regularization", 1.0e-3)
+            cmds.setAttr(get_shape(transform) + ".regularization", 1.0e-8)
         except Exception as exc:
             cmds.warning(
                 "create_node: setting regularization=1e-3 default "

@@ -54,22 +54,31 @@ def _read(path):
 class TestAutoAdaptiveLambda(unittest.TestCase):
 
     def test_PERMANENT_a_lambda_constants_present(self):
-        """LAMBDA_FLOOR, LAMBDA_CEIL, MAX_RETRIES literals."""
+        """LAMBDA_FLOOR, LAMBDA_CEIL, MAX_RETRIES literals.
+
+        M_P0_LAMBDA_CEIL_TIGHTEN (2026-05-11): tightened from the
+        original (FLOOR=1e-6, CEIL=1.0, RETRIES=7) to (FLOOR=1e-8,
+        CEIL=1e-3, RETRIES=6). The original CEIL=1.0 produced
+        50%+ training-pose bias on kernels like MQB where
+        K[i,i]=w (small radius), causing visible joint distortion
+        on kernel switch. 1e-3 ceiling keeps bias < 0.1% under any
+        kernel while still providing a safety net for near-singular K.
+        """
         cpp = _read(_RBF_CPP)
         self.assertRegex(cpp,
-            r"const\s+double\s+LAMBDA_FLOOR\s*=\s*1\.0e-6",
-            "LAMBDA_FLOOR must be 1.0e-6 (the lowest non-trivial λ "
-            "the auto-adapt loop will escalate to from a zero / sub-"
-            "FLOOR user value).")
+            r"const\s+double\s+LAMBDA_FLOOR\s*=\s*1\.0e-8",
+            "LAMBDA_FLOOR must be 1.0e-8 (matches backup's default "
+            "regularization value — no escalation when solve already "
+            "succeeds at user's λ).")
         self.assertRegex(cpp,
-            r"const\s+double\s+LAMBDA_CEIL\s*=\s*1\.0",
-            "LAMBDA_CEIL must be 1.0 (the upper guard above which "
-            "the solver gives up — a λ that high indicates a truly "
-            "degenerate pose set, not a numerical conditioning miss).")
+            r"const\s+double\s+LAMBDA_CEIL\s*=\s*1\.0e-3",
+            "LAMBDA_CEIL must be 1.0e-3 (tightened from 1.0). "
+            "Higher ceiling produces visible bias at training pose "
+            "centers on kernels with small K[i,i] (MQB, IMQ).")
         self.assertRegex(cpp,
-            r"const\s+int\s+MAX_RETRIES\s*=\s*7",
-            "MAX_RETRIES must be 7 (covers 1e-6 → 1e-1 ×10 ladder, "
-            "matches the LAMBDA_CEIL boundary).")
+            r"const\s+int\s+MAX_RETRIES\s*=\s*6",
+            "MAX_RETRIES must be 6 (1e-8 → 1e-3 ×10 ladder is 5 "
+            "jumps, +1 for the initial attempt at user's λ).")
 
     def test_PERMANENT_b_retry_loop_structure(self):
         """The retry loop iterates up to MAX_RETRIES with break-on-solve."""

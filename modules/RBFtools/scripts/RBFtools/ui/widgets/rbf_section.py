@@ -425,7 +425,7 @@ class RBFSection(CollapsibleFrame):
         # rigging-friendly default (was 1e-8 per cpp:532 / Chad Vernon
         # reference). Authoritative value is the node attr; this is
         # the "data dict missing key" fallback only.
-        self._spn_reg.setValue(data.get("regularization", 1.0e-3))
+        self._spn_reg.setValue(data.get("regularization", 1.0e-8))
         self._cmb_slvm.setCurrentIndex(data.get("solverMethod", 0))
         clamp_on = data.get("clampEnabled", False)
         self._cb_clamp.setChecked(clamp_on)

@@ -1961,9 +1961,24 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     wMat = BRMatrix();
                     wMat.setSize(poseCount, solveCount);
 
-                    const double LAMBDA_FLOOR = 1.0e-6;
-                    const double LAMBDA_CEIL  = 1.0;
-                    const int    MAX_RETRIES  = 7;
+                    // M_P0_LAMBDA_CEIL_TIGHTEN (2026-05-11): cap
+                    // auto-adaptive λ retry at 1e-3 (was 1.0). Backup
+                    // version (last week's working .mll) used no
+                    // auto-adaptive retry at all and ran at user's
+                    // exact λ (default 1e-8). When my auto-adaptive
+                    // retry escalated to LAMBDA_CEIL=1.0 on kernels
+                    // like MQB where K[i,i]=w (small radius), the
+                    // ratio λ/(K[i,i] + λ) → 1, producing 50%+ bias
+                    // at training pose centers ("joints fly away" /
+                    // 骨骼乱飞 user repro).
+                    //
+                    // 1e-3 ceiling keeps bias < 0.1% even on MQB
+                    // with default radius. Solver can still escalate
+                    // to handle near-singular K, but not so far as
+                    // to break the training-pose invariant.
+                    const double LAMBDA_FLOOR = 1.0e-8;
+                    const double LAMBDA_CEIL  = 1.0e-3;
+                    const int    MAX_RETRIES  = 6;
                     const double userLambda   = (regularizationVal > 0.0)
                                                 ? regularizationVal : 0.0;
 

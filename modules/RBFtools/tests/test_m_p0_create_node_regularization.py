@@ -66,11 +66,11 @@ class TestCreateNodeRegularization(unittest.TestCase):
         # Use literal substring + value check instead.
         self.assertIn('".regularization"', body,
             "create_node must reference '.regularization' literal.")
-        self.assertIn("1.0e-3", body,
-            "create_node must write the 1.0e-3 default literal.")
+        self.assertIn("1.0e-8", body,
+            "create_node must write the 1.0e-8 default literal.")
         # Cross-check: the regularization line must be inside a setAttr.
         self.assertRegex(body,
-            r'cmds\.setAttr[\s\S]{0,200}?\.regularization[\s\S]{0,40}?1\.0e-3',
+            r'cmds\.setAttr[\s\S]{0,200}?\.regularization[\s\S]{0,40}?1\.0e-8',
             "regularization=1e-3 must be written via cmds.setAttr "
             "(not just appear as a comment / docstring literal).")
 
@@ -82,7 +82,7 @@ class TestCreateNodeRegularization(unittest.TestCase):
         self.assertIsNotNone(m,
             "get_all_settings regularization line not found.")
         default_val = float(m.group(1))
-        self.assertEqual(default_val, 1.0e-3,
+        self.assertEqual(default_val, 1.0e-8,
             "get_all_settings fallback default for regularization "
             "must be 1e-4 (rigging-friendly), not 1e-8 (Chad Vernon "
             "reference target).")
@@ -96,7 +96,7 @@ class TestCreateNodeRegularization(unittest.TestCase):
         self.assertIsNotNone(m,
             "rbf_section.load regularization fallback line not found.")
         default_val = float(m.group(1))
-        self.assertEqual(default_val, 1.0e-3,
+        self.assertEqual(default_val, 1.0e-8,
             "rbf_section.load fallback default for regularization "
             "must be 1e-4 to mirror the create-time write.")
 
