@@ -277,11 +277,20 @@ public:
     // (count not divisible by 3, or trailing tail) keep their
     // legacy weighted-sum value. outEncoding 2 / 4 fall through;
     // the caller emits the once-per-rig "deferred to v5.x" warning.
+    //
+    // M_P0_QUAT_RBF_OVERLAP_DISCLOSE (2026-05-10): isQuatMember mask
+    // identifies columns owned by B1 (QWA quatGroupStarts). Any
+    // 3-block intersecting a B1 column is skipped here so B1's
+    // QWA output is not silently overwritten. overlapWarning is
+    // raised when at least one block was skipped — caller wires it
+    // to a once-per-rig MGlobal::displayWarning for user disclosure.
     static void applyOutputEncodingBlend(MDoubleArray &weightsArray,
                                          const MDoubleArray &perPosePhi,
                                          const BRMatrix &poseVals,
                                          short outputEncoding,
-                                         short rotateOrder);
+                                         short rotateOrder,
+                                         const std::vector<bool> &isQuatMember,
+                                         bool &overlapWarning);
     // Commit 0b (M_PER_POSE_SIGMA): width parameter is now per-pose.
     // widths[i] is consumed inside the i-th pose loop iteration as
     // the σ for interpolateRbf(dist, σ_i, kernel). Empty vector or
@@ -542,6 +551,14 @@ private:
     bool   qwaClippedWarningIssued;
     bool   qwaDegenerateWarningIssued;
     size_t prevQuatGroupConfigHash;
+
+    // M_P0_QUAT_RBF_OVERLAP_DISCLOSE (2026-05-10): once-per-rig flag
+    // for B2 (outputEncoding 3-block) skipping a block that overlaps
+    // a B1 (quatGroupStarts) 4-tuple. Reset along with the other QWA
+    // warning flags when the user edits quatGroupStarts (config-hash
+    // change at cpp:1664-1668), so a fresh quat-group config gets a
+    // fresh overlap-disclosure chance.
+    bool   outputEncodingOverlapWarningIssued;
 };
 
 // ---------------------------------------------------------------------

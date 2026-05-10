@@ -161,7 +161,8 @@ RBFtools::RBFtools()
       qwaConfigWarningIssued(false),   // M2.2: fresh warnings on first config / edge hit.
       qwaClippedWarningIssued(false),
       qwaDegenerateWarningIssued(false),
-      prevQuatGroupConfigHash(0)
+      prevQuatGroupConfigHash(0),
+      outputEncodingOverlapWarningIssued(false)  // M_P0_QUAT_RBF_OVERLAP_DISCLOSE
 {}
 
 RBFtools::~RBFtools()
@@ -1666,6 +1667,9 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     qwaConfigWarningIssued = false;
                     qwaClippedWarningIssued = false;
                     qwaDegenerateWarningIssued = false;
+                    // M_P0_QUAT_RBF_OVERLAP_DISCLOSE: a fresh quat-
+                    // group config can re-trigger the overlap check.
+                    outputEncodingOverlapWarningIssued = false;
                     prevQuatGroupConfigHash = newHash;
                     // Re-solve wMat: columns that just became quat
                     // members must be zeroed in the solver output,
@@ -2020,11 +2024,31 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     // not yet exist — see addendum
                     // §M_P0_QUATERNION_BACKEND_LAND for the v5.x
                     // forward pointer.
+                    bool overlapWarning = false;
                     applyOutputEncodingBlend(weightsArray,
                                              perPosePhi,
                                              matValues,
                                              outEncRebuildVal,
-                                             /*rotateOrder*/ 0);
+                                             /*rotateOrder*/ 0,
+                                             isQuatMember,
+                                             overlapWarning);
+                    // M_P0_QUAT_RBF_OVERLAP_DISCLOSE: once-per-rig
+                    // disclosure when at least one B2 3-block was
+                    // skipped because it intersects a B1 (QWA) 4-
+                    // tuple. B1 takes precedence (Markley max-eigenvec
+                    // is more robust than nlerp / ExpMap weighted sum
+                    // for unit-quat output); this warning surfaces
+                    // the silent skip to user disclosure level.
+                    if (overlapWarning && !outputEncodingOverlapWarningIssued)
+                    {
+                        MGlobal::displayWarning(thisName + MString(
+                            ": outputEncoding 3-block overlaps quaternion "
+                            "group; skipped to preserve B1 QWA output. "
+                            "Resolve by adjusting outputQuaternionGroupStart "
+                            "or splitting the Euler 3-block off the quat "
+                            "group's column range."));
+                        outputEncodingOverlapWarningIssued = true;
+                    }
                 }
 
                 // -----------------------------------------------
@@ -3446,7 +3470,9 @@ void RBFtools::applyOutputEncodingBlend(MDoubleArray &weightsArray,
                                         const MDoubleArray &perPosePhi,
                                         const BRMatrix &poseVals,
                                         short outputEncoding,
-                                        short rotateOrder)
+                                        short rotateOrder,
+                                        const std::vector<bool> &isQuatMember,
+                                        bool &overlapWarning)
 {
     // M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): outputEncoding schema is
     // {0=Euler, 1=Quaternion, 2=ExpMap} (cpp:295-298) — node-level
@@ -3458,6 +3484,7 @@ void RBFtools::applyOutputEncodingBlend(MDoubleArray &weightsArray,
     // The fix here is purely renumbering: the math below for the
     // outputEncoding == 2 branch is the original ExpMap path,
     // unchanged.
+    overlapWarning = false;
     if (outputEncoding != 1 && outputEncoding != 2) return;
     const unsigned int count = weightsArray.length();
     const unsigned int poseCount = perPosePhi.length();
@@ -3469,9 +3496,43 @@ void RBFtools::applyOutputEncodingBlend(MDoubleArray &weightsArray,
     for (unsigned int p = 0; p < poseCount; ++p)
         wts[p] = perPosePhi[p];
 
+    // M_P0_QUAT_RBF_OVERLAP_DISCLOSE (2026-05-10): mask available
+    // when the caller (compute()) passed isQuatMember sized to match
+    // weightsArray. A B2 3-block whose [s..s+2] intersects any B1
+    // member must be skipped — B1 (QWA Power Iteration on cpp:4310-
+    // 4355) has already written its 4-tuple to those slots and a
+    // subsequent nlerp / ExpMap weighted sum here would silently
+    // overwrite that result. The skip is per-block (not per-element)
+    // so partial-overlap blocks still preserve B1 fully; the entire
+    // 3-block falls back to the legacy weighted-sum value that
+    // getPoseWeights wrote (cpp:4300-4304), which for the Euler
+    // remainder (column outside any quat group) is correct. See
+    // §5.4.1 in docs/设计文档/RBFtools_v5_multi_quat_implementation.md.
+    const bool haveMask = (isQuatMember.size() == count);
+
     for (unsigned int b = 0; b < blocks; ++b)
     {
         const unsigned int s = b * 3;
+
+        // Skip B2 block whose [s..s+2] intersects a B1 quat member.
+        if (haveMask)
+        {
+            bool overlaps = false;
+            for (unsigned int k = 0; k < 3; ++k)
+            {
+                if (isQuatMember[s + k])
+                {
+                    overlaps = true;
+                    break;
+                }
+            }
+            if (overlaps)
+            {
+                overlapWarning = true;
+                continue;
+            }
+        }
+
         if (outputEncoding == 1)
         {
             // Quaternion path: encode → nlerp → decode.
