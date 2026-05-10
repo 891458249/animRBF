@@ -449,6 +449,27 @@ class RBFSection(CollapsibleFrame):
         self._update_radius_state()
         self._update_mode_visibility(self._cmb_mode.currentIndex())
 
+    def force_mode_visibility(self, idx):
+        """M_P0_RBF_MODE_UI_RESYNC (2026-05-10): authoritative resync
+        from a node-attr value into the combo + Generic / Matrix frame
+        visibility. Used by ``main_window._on_settings_loaded`` after
+        ``load(data)`` so UI state cannot drift away from the actual
+        ``shape.rbfMode`` value when ``blockSignals`` suppresses the
+        combo's ``currentIndexChanged`` cascade.
+
+        Signal-suppressed combo write avoids a round-trip
+        ``attributeChanged.emit -> controller.set_attribute -> setAttr``
+        — the value is already on the node, this method only
+        synchronises the **view**.
+        """
+        idx = int(idx)
+        blocked = self._cmb_mode.blockSignals(True)
+        try:
+            self._cmb_mode.setCurrentIndex(idx)
+        finally:
+            self._cmb_mode.blockSignals(blocked)
+        self._update_mode_visibility(idx)
+
     def set_driver_sources_for_rotate_order(self, names):
         """M_ROTORDER_UI_REFACTOR (2026-04-29): public entry-point
         called from main_window's ``_reload_driver_sources`` slot

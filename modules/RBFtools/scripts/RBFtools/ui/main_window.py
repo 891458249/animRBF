@@ -1390,6 +1390,19 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         for w in (self._general, self._va_section, self._rbf_section):
             w.blockSignals(False)
         self._update_type_visibility(self._general.current_type())
+        # M_P0_RBF_MODE_UI_RESYNC (2026-05-10): authoritative resync
+        # of the rbfMode Generic / Matrix frame visibility from the
+        # node-attr value carried in *data*. Defends against UI drift
+        # when blockSignals suppresses the combo currentIndexChanged
+        # cascade that would normally drive _update_mode_visibility
+        # — observed repro: after Apply, _rbf_section visually showed
+        # "矩阵 RBF" while shape.rbfMode was 0, and driver→driven
+        # debugging was misdirected to a non-existent rbfMode flip.
+        # The combo + frame now track shape.rbfMode as single source
+        # of truth.
+        if data is not None:
+            self._rbf_section.force_mode_visibility(
+                int(data.get("rbfMode", 0)))
 
     # =================================================================
     #  Type toggle (VA vs RBF visibility)
