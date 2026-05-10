@@ -3227,10 +3227,27 @@ def capture_output_baselines(driven_node, driven_attrs, poses=None):
     list[tuple[float, bool]]
         ``[(base_value, is_scale), ...]`` indexed by ``driven_attrs``.
     """
+    # M_P0_REST_POSE_TOL_LOOSEN (2026-05-11): rest-pose detection
+    # uses 1e-3 tolerance (≈ 0.057° in radians, visually
+    # indistinguishable from rest), NOT the global FLOAT_ABS_TOL=1e-6.
+    # User-reported repro: pose 0 captured with driver at rest had
+    # input values in the 2.95e-06 / -5.37e-05 range (Maya channel-
+    # box / unitConversion float noise). With 1e-6 tolerance, the
+    # "all driver inputs ≈ 0" test failed, baseline fell back to
+    # current scene state, and driven joints showed non-zero values
+    # at rest pose despite the user explicitly setting pose 0 values
+    # to 0,0,0,1,1,1.
+    #
+    # 1e-3 is the right threshold: it accommodates Maya's getAttr/
+    # setAttr roundtrip noise (1e-5 to 1e-6 range typical) AND
+    # joint-orient bake artifacts (1e-4 range), while still flagging
+    # intentional small rotations (e.g. 1° = 0.0175 rad ≫ 1e-3).
+    REST_POSE_INPUT_TOL = 1.0e-3
     rest_from_pose0 = None
     if poses and len(poses) > 0:
         p0 = poses[0]
-        if p0.inputs and all(float_eq(v, 0.0) for v in p0.inputs):
+        if p0.inputs and all(
+                abs(v) < REST_POSE_INPUT_TOL for v in p0.inputs):
             rest_from_pose0 = list(p0.values)
 
     if rest_from_pose0 is None and _exists(driven_node):
