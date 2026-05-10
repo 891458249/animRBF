@@ -805,6 +805,14 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self.add_file_action(
             "menu_export_selected", self._on_export_selected)
         self.add_file_action("menu_export_all", self._on_export_all)
+        # ---- M_P0_POSES_IO (2026-05-10): focused poses-only I/O ----
+        # Separate from the full-node export/import so the test-
+        # iteration workflow ("save just my pose set, reload later
+        # into the same rig") doesn't churn through the full schema.
+        self.add_file_action("menu_export_poses",
+                              self._on_export_poses)
+        self.add_file_action("menu_import_poses",
+                              self._on_import_poses)
 
         # ---- M3.6: Add Neutral Sample entry ----
         self.add_tools_action(
@@ -1060,6 +1068,94 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         if not paths:
             return
         self._ctrl.export_current_to_path(paths[0])
+
+    def _on_export_poses(self):
+        """File -> Export Poses Only... (M_P0_POSES_IO)
+
+        Saves *just* the pose data + driver/driven signature on the
+        current node, for testing-iteration round-trips. Distinct from
+        Export Selected (which writes the full node schema).
+        """
+        from maya import cmds as _cmds
+        if not self._ctrl.current_node:
+            _cmds.warning(tr("msg_export_poses_no_node"))
+            return
+        try:
+            paths = _cmds.fileDialog2(
+                fileMode=0, fileFilter="JSON (*.json)",
+                caption=tr("menu_export_poses"))
+        except Exception:
+            paths = None
+        if not paths:
+            return
+        ok = self._ctrl.export_poses_to_path(paths[0])
+        if ok:
+            try:
+                _cmds.confirmDialog(
+                    title=tr("title_poses_exported"),
+                    message=tr("msg_poses_exported").format(path=paths[0]),
+                    button=["OK"], defaultButton="OK")
+            except Exception:
+                pass
+
+    def _on_import_poses(self):
+        """File -> Import Poses Only... (M_P0_POSES_IO)
+
+        Loads pose data into the current node, validating that the
+        file's input/output dim signature matches the current node.
+        Hard-fails on dim mismatch with an actionable dialog;
+        soft-warns on driver/driven node renames.
+        """
+        from maya import cmds as _cmds
+        if not self._ctrl.current_node:
+            _cmds.warning(tr("msg_import_poses_no_node"))
+            return
+        try:
+            paths = _cmds.fileDialog2(
+                fileMode=1, fileFilter="JSON (*.json)",
+                caption=tr("menu_import_poses"))
+        except Exception:
+            paths = None
+        if not paths:
+            return
+        path = paths[0]
+        # Ask user: replace existing poses or append?
+        try:
+            choice = _cmds.confirmDialog(
+                title=tr("title_import_poses_mode"),
+                message=tr("msg_import_poses_mode"),
+                button=[tr("btn_replace"), tr("btn_append"),
+                         tr("btn_cancel")],
+                defaultButton=tr("btn_replace"),
+                cancelButton=tr("btn_cancel"),
+                dismissString=tr("btn_cancel"))
+        except Exception:
+            choice = tr("btn_replace")
+        if choice == tr("btn_cancel"):
+            return
+        mode = "append" if choice == tr("btn_append") else "replace"
+        result = self._ctrl.import_poses_from_path(path, mode=mode)
+        if result is None:
+            try:
+                _cmds.confirmDialog(
+                    title=tr("title_import_poses_failed"),
+                    message=tr("msg_import_poses_failed"),
+                    button=["OK"], defaultButton="OK")
+            except Exception:
+                pass
+            return
+        n = result.get("n_poses_imported", 0)
+        warns = result.get("warnings", [])
+        try:
+            msg = tr("msg_import_poses_done").format(n=n, mode=mode)
+            if warns:
+                msg += "\n\n" + tr("label_warnings") + ":\n  - " \
+                       + "\n  - ".join(warns)
+            _cmds.confirmDialog(
+                title=tr("title_import_poses_done"),
+                message=msg, button=["OK"], defaultButton="OK")
+        except Exception:
+            pass
 
     def _on_export_all(self):
         """File -> Export All RBF..."""

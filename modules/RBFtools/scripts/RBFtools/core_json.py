@@ -908,3 +908,323 @@ def dict_to_node(ndata, mode="add", will_overwrite=False):
                 "(continuing — aliases are advisory)".format(exc))
 
     return target
+
+
+# =====================================================================
+#  Poses-only I/O — M_P0_POSES_IO (2026-05-10)
+# =====================================================================
+#
+# Focused export/import for *just* the pose data on an existing node.
+# Distinct from the full-node JSON path (export_nodes_to_path /
+# import_path) because the user workflow is "iterate on a single rig,
+# need to dump + reload pose data without recreating the whole node".
+#
+# JSON shape — POSES_SCHEMA_VERSION = "rbftools.poses.v1":
+#
+#   {
+#     "schema_version": "rbftools.poses.v1",
+#     "exported_from": {
+#       "node":  <node name at export time, advisory>,
+#       "driver": {"node": <name>, "attrs": [<attr names>]},
+#       "driven": {"node": <name>, "attrs": [<attr names>]},
+#       "input_count": <int>,
+#       "output_count": <int>
+#     },
+#     "poses": [
+#       {"index": <int>, "inputs": [...], "values": [...], "radius": <float>},
+#       ...
+#     ]
+#   }
+#
+# Validation rules on import:
+#   1. schema_version must equal POSES_SCHEMA_VERSION (strict).
+#   2. input_count must equal current shape.input[] count (HARD FAIL).
+#   3. output_count must equal current shape.output[] count (HARD FAIL).
+#   4. Each pose's len(inputs) == input_count, len(values) == output_count
+#      (HARD FAIL).
+#   5. driver/driven node + attr name signature mismatch is a SOFT WARN
+#      (the user may have renamed joints; data still applies if counts
+#      match).
+# =====================================================================
+
+POSES_SCHEMA_VERSION = "rbftools.poses.v1"
+
+
+class PosesImportValidationError(Exception):
+    """Raised by import_poses_from_path on hard validation failure
+    (schema mismatch, dim mismatch, malformed file)."""
+
+
+def export_poses_to_path(node, path):
+    """Export *node*'s pose data + driver/driven signature to *path*.
+
+    Returns the absolute path written. Raises if the node is missing
+    or has zero poses.
+
+    Companion: ``import_poses_from_path`` reads this format back into
+    an existing node, validating dim consistency.
+    """
+    shape = core.get_shape(node)
+    if not core._exists(shape):
+        raise PosesImportValidationError(
+            "export_poses_to_path: shape not found for {!r}".format(node))
+
+    drv_node, drv_attrs = core.read_driver_info(node)
+    drvn_node, drvn_attrs = core.read_driven_info(node)
+    poses = core.read_all_poses(node)
+
+    if not poses:
+        raise PosesImportValidationError(
+            "export_poses_to_path: node has no poses to export "
+            "(add poses first via the UI 'Add Pose' button).")
+
+    try:
+        in_count = len(cmds.getAttr(shape + ".input",
+                                     multiIndices=True) or [])
+    except Exception:
+        in_count = len(poses[0].inputs) if poses else 0
+    try:
+        out_count = len(cmds.getAttr(shape + ".output",
+                                      multiIndices=True) or [])
+    except Exception:
+        out_count = len(poses[0].values) if poses else 0
+
+    pose_dicts = []
+    for p in poses:
+        pose_dicts.append({
+            "index":  int(p.index),
+            "inputs": [float(x) for x in p.inputs],
+            "values": [float(x) for x in p.values],
+            "radius": float(getattr(p, "radius", core.DEFAULT_POSE_RADIUS)),
+        })
+
+    data = {
+        "schema_version": POSES_SCHEMA_VERSION,
+        "exported_from": {
+            "node":  str(node),
+            "driver": {
+                "node":  str(drv_node or ""),
+                "attrs": list(drv_attrs or []),
+            },
+            "driven": {
+                "node":  str(drvn_node or ""),
+                "attrs": list(drvn_attrs or []),
+            },
+            "input_count":  int(in_count),
+            "output_count": int(out_count),
+            "n_poses":      len(pose_dicts),
+        },
+        "poses": pose_dicts,
+    }
+
+    atomic_write_json(path, data)
+    return os.path.abspath(path)
+
+
+def _validate_poses_payload(data, target_node):
+    """Inner validation. Returns (input_count, output_count, warnings)
+    on success; raises PosesImportValidationError on hard fail.
+
+    HARD FAILS (raise):
+      - schema_version mismatch
+      - missing top-level 'poses' / 'exported_from' keys
+      - input_count or output_count differ from target node
+      - any pose's len(inputs) != input_count
+      - any pose's len(values) != output_count
+
+    SOFT WARNINGS (returned in list):
+      - driver / driven node name renames
+      - driver / driven attr name renames
+    """
+    if not isinstance(data, dict):
+        raise PosesImportValidationError(
+            "import_poses: expected JSON object, got {}".format(
+                type(data).__name__))
+
+    sv = data.get("schema_version")
+    if sv != POSES_SCHEMA_VERSION:
+        raise PosesImportValidationError(
+            "import_poses: schema_version mismatch — file has {!r}, "
+            "this loader expects {!r}.".format(sv, POSES_SCHEMA_VERSION))
+
+    src_meta = data.get("exported_from")
+    poses_arr = data.get("poses")
+    if not isinstance(src_meta, dict) or not isinstance(poses_arr, list):
+        raise PosesImportValidationError(
+            "import_poses: malformed file — missing 'exported_from' "
+            "object or 'poses' array.")
+
+    file_in_count = int(src_meta.get("input_count", -1))
+    file_out_count = int(src_meta.get("output_count", -1))
+
+    target_shape = core.get_shape(target_node)
+    if not core._exists(target_shape):
+        raise PosesImportValidationError(
+            "import_poses: target node shape not found for {!r}".format(
+                target_node))
+
+    try:
+        target_in_count = len(cmds.getAttr(target_shape + ".input",
+                                            multiIndices=True) or [])
+    except Exception:
+        target_in_count = -1
+    try:
+        target_out_count = len(cmds.getAttr(target_shape + ".output",
+                                             multiIndices=True) or [])
+    except Exception:
+        target_out_count = -1
+
+    if file_in_count != target_in_count:
+        raise PosesImportValidationError(
+            "import_poses: driver INPUT count mismatch — file has {} "
+            "input slots, current node has {}. Connect drivers / driven "
+            "to match the file's signature first, then re-import. "
+            "(File expects driver {!r} with attrs {!r}.)".format(
+                file_in_count, target_in_count,
+                src_meta.get("driver", {}).get("node"),
+                src_meta.get("driver", {}).get("attrs")))
+
+    if file_out_count != target_out_count:
+        raise PosesImportValidationError(
+            "import_poses: driven OUTPUT count mismatch — file has {} "
+            "output slots, current node has {}. Connect driven attrs "
+            "to match before importing. (File expects driven {!r} with "
+            "attrs {!r}.)".format(
+                file_out_count, target_out_count,
+                src_meta.get("driven", {}).get("node"),
+                src_meta.get("driven", {}).get("attrs")))
+
+    # Per-pose dim check (HARD FAIL).
+    for i, pdict in enumerate(poses_arr):
+        if not isinstance(pdict, dict):
+            raise PosesImportValidationError(
+                "import_poses: pose at index {} is not an object".format(i))
+        ins = pdict.get("inputs", [])
+        outs = pdict.get("values", [])
+        if len(ins) != file_in_count:
+            raise PosesImportValidationError(
+                "import_poses: pose[{}] has {} inputs, expected {}.".format(
+                    i, len(ins), file_in_count))
+        if len(outs) != file_out_count:
+            raise PosesImportValidationError(
+                "import_poses: pose[{}] has {} values, expected {}.".format(
+                    i, len(outs), file_out_count))
+
+    # Soft warnings: driver/driven attr name renames.
+    warnings_list = []
+    drv_node_target, drv_attrs_target = core.read_driver_info(target_node)
+    drvn_node_target, drvn_attrs_target = core.read_driven_info(target_node)
+
+    file_drv = src_meta.get("driver", {}) or {}
+    file_drvn = src_meta.get("driven", {}) or {}
+
+    if (file_drv.get("node") or "") != (drv_node_target or ""):
+        warnings_list.append(
+            "driver node renamed: file={!r} vs current={!r} (counts "
+            "match — proceeding with import).".format(
+                file_drv.get("node"), drv_node_target))
+    if list(file_drv.get("attrs") or []) != list(drv_attrs_target or []):
+        warnings_list.append(
+            "driver attr names differ: file={!r} vs current={!r} "
+            "(positional — counts match, proceeding).".format(
+                file_drv.get("attrs"), drv_attrs_target))
+    if (file_drvn.get("node") or "") != (drvn_node_target or ""):
+        warnings_list.append(
+            "driven node renamed: file={!r} vs current={!r}.".format(
+                file_drvn.get("node"), drvn_node_target))
+    if list(file_drvn.get("attrs") or []) != list(drvn_attrs_target or []):
+        warnings_list.append(
+            "driven attr names differ: file={!r} vs current={!r}.".format(
+                file_drvn.get("attrs"), drvn_attrs_target))
+
+    return (file_in_count, file_out_count, warnings_list)
+
+
+def import_poses_from_path(node, path, mode="replace"):
+    """Import poses from *path* into *node*. Validates dim consistency.
+
+    Parameters
+    ----------
+    node : str
+        Target RBFtools node (transform or shape).
+    path : str
+        File written by ``export_poses_to_path``.
+    mode : {"replace", "append"}
+        - "replace" (default): clear existing poses[] then write file's.
+        - "append": write file's poses to next-available indices,
+                    preserving existing poses.
+
+    Returns
+    -------
+    dict
+        {"n_poses_imported": int, "warnings": list[str]}
+
+    Raises
+    ------
+    PosesImportValidationError
+        On schema mismatch, dim mismatch, or malformed input.
+    """
+    if mode not in ("replace", "append"):
+        raise PosesImportValidationError(
+            "import_poses: invalid mode {!r}; expected 'replace' or "
+            "'append'.".format(mode))
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    file_in_count, file_out_count, warns = _validate_poses_payload(
+        data, node)
+
+    shape = core.get_shape(node)
+    poses_arr = data["poses"]
+
+    # Compute the index base for write.
+    if mode == "replace":
+        # Clear existing poses[] only (keep input/output wiring intact).
+        try:
+            existing = cmds.getAttr(shape + ".poses",
+                                     multiIndices=True) or []
+            for idx in existing:
+                try:
+                    cmds.removeMultiInstance(
+                        "{}.poses[{}]".format(shape, idx), b=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        write_base = 0
+    else:
+        # append — find the next free slot
+        try:
+            existing = cmds.getAttr(shape + ".poses",
+                                     multiIndices=True) or []
+            write_base = (max(existing) + 1) if existing else 0
+        except Exception:
+            write_base = 0
+
+    n_imported = 0
+    with core.undo_chunk("RBFtools: import poses ({})".format(mode)):
+        for i, pdict in enumerate(poses_arr):
+            seq_idx = write_base + i
+            radius = float(pdict.get("radius", core.DEFAULT_POSE_RADIUS))
+            inputs = [float(x) for x in pdict["inputs"]]
+            values = [float(x) for x in pdict["values"]]
+            try:
+                pose = core.PoseData(
+                    index=seq_idx, inputs=inputs, values=values,
+                    radius=radius)
+                core._write_pose_to_node(shape, seq_idx, pose)
+                n_imported += 1
+            except Exception as exc:
+                warns.append(
+                    "import_poses: pose[{}] write failed: {}".format(
+                        i, exc))
+
+        # Force re-train so the new poses take effect.
+        try:
+            cmds.setAttr(shape + ".evaluate", 0)
+            cmds.setAttr(shape + ".evaluate", 1)
+        except Exception:
+            pass
+
+    return {"n_poses_imported": n_imported, "warnings": warns}

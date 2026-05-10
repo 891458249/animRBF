@@ -1109,6 +1109,68 @@ class MainController(QtCore.QObject):
             prog.end(tr("status_export_done"))
         return True
 
+    # ----- M_P0_POSES_IO (2026-05-10) -------------------------------
+    # Focused poses-only import/export for the test-iteration workflow:
+    # save just the pose data on the current node, reload later into
+    # the same (or matching) node without recreating the whole node.
+    # Validation on import gates dim mismatch as a hard fail; renames
+    # are surfaced as warnings.
+    # ----------------------------------------------------------------
+
+    def export_poses_to_path(self, path):
+        """Export the current node's poses to a JSON file.
+
+        Returns True on success, False on failure / no current node.
+        """
+        if not self._current_node:
+            cmds.warning("export_poses_to_path: no current node selected")
+            return False
+        from RBFtools import core_json
+        try:
+            abspath = core_json.export_poses_to_path(
+                self._current_node, path)
+        except core_json.PosesImportValidationError as exc:
+            cmds.warning("export_poses: {}".format(exc))
+            return False
+        except Exception as exc:
+            cmds.warning("export_poses failed: {}".format(exc))
+            return False
+        cmds.warning("RBFtools: exported poses to {}".format(abspath))
+        self.statusMessage.emit("Poses exported.")
+        return True
+
+    def import_poses_from_path(self, path, mode="replace"):
+        """Import poses from a file into the current node. Validates
+        dim consistency; raises a UI-level dialog on hard failure
+        (caller wraps).
+
+        Returns dict {"n_poses_imported": int, "warnings": [str]} on
+        success, or None on validation failure / no current node.
+        """
+        if not self._current_node:
+            cmds.warning("import_poses_from_path: no current node selected")
+            return None
+        from RBFtools import core_json
+        try:
+            result = core_json.import_poses_from_path(
+                self._current_node, path, mode=mode)
+        except core_json.PosesImportValidationError as exc:
+            cmds.warning("import_poses validation failed: {}".format(exc))
+            return None
+        except Exception as exc:
+            cmds.warning("import_poses failed: {}".format(exc))
+            return None
+        # Warnings are advisory (rename detection); surface them.
+        for w in result.get("warnings", []):
+            cmds.warning("import_poses: {}".format(w))
+        self.statusMessage.emit(
+            "Imported {} poses ({} mode).".format(
+                result["n_poses_imported"], mode))
+        # Reload pose grid + settings so the UI reflects new state.
+        self._load_settings()
+        self._load_editor()
+        return result
+
     def export_all_to_path(self, path, meta=None):
         """Export every RBFtools node in the scene to a multi-node JSON."""
         from RBFtools import core, core_json
