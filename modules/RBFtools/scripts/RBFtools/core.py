@@ -437,7 +437,13 @@ def get_all_settings(node):
         "inputEncoding":        g(shape + ".inputEncoding",        0),
         "clampEnabled":         g(shape + ".clampEnabled",         False),
         "clampInflation":       g(shape + ".clampInflation",       0.0),
-        "regularization":       g(shape + ".regularization",       1.0e-8),
+        # M_P0_CREATE_NODE_REGULARIZATION (2026-05-10): UI fallback
+        # default mirrors the new create-time write — 1e-4 is more
+        # rigging-friendly than the historical 1e-8 (Chad Vernon
+        # reference). This fallback only fires when the node attr
+        # cannot be read (corrupt scene / missing schema); the
+        # authoritative value is always the node attribute.
+        "regularization":       g(shape + ".regularization",       1.0e-4),
         "solverMethod":         g(shape + ".solverMethod",         0),
         "driverInputRotateOrder":
             read_driver_rotate_orders(node) or [],
@@ -2393,6 +2399,34 @@ def create_node():
             cmds.warning(
                 "create_node: defaulting .type to RBF failed: {} "
                 "(node still created)".format(exc))
+        # M_P0_CREATE_NODE_REGULARIZATION (2026-05-10): override C++
+        # schema default 1e-8 with a more rigging-friendly 1e-4.
+        #
+        # Background: C++ default 1e-8 (cpp:532) follows Chad Vernon's
+        # reference solver, which targets sparse, well-distributed
+        # pose sets. Production rigging workflows (face / muscle /
+        # corrective) routinely have HIGHLY redundant pose sets where
+        # multiple poses share identical (or near-identical) driver
+        # blocks for several drivers. Under 1e-8, the K matrix becomes
+        # numerically singular → both Cholesky probe and GE fallback
+        # fail → "RBF decomposition failed" → driver does not drive
+        # driven, with no obvious fix path for the TD.
+        #
+        # 1e-4 is the threshold empirically validated against the
+        # quaternion-encoded N=3 driver shoulder rig that triggered
+        # this fix: it tolerates the per-block quat distance
+        # collapsing toward zero without visibly biasing the solved
+        # weights for well-distributed pose sets. Users who need
+        # tighter regularization (e.g. 1e-8 / 0) can override via
+        # the UI spinbox or `set_attribute("regularization", x)`.
+        try:
+            cmds.setAttr(get_shape(transform) + ".regularization", 1.0e-4)
+        except Exception as exc:
+            cmds.warning(
+                "create_node: setting regularization=1e-4 default "
+                "failed: {} (using C++ schema default 1e-8 — be "
+                "aware the K matrix may be ill-conditioned for "
+                "redundant pose sets)".format(exc))
         # M_BLOCKING_DEFAULT (2026-04-29): force shape.nodeState=2
         # (Blocking) on creation so the freshly-wired driven node
         # is NOT immediately driven by an untrained RBF compute()

@@ -421,7 +421,11 @@ class RBFSection(CollapsibleFrame):
         self._spn_dridx.setValue(data.get("driverIndex", 0))
         # M2.4a: load M1.3 / M1.4 / M2.1a values with safe defaults
         # so v4 / v5-pre-M2.4 rigs show the C++ default exactly.
-        self._spn_reg.setValue(data.get("regularization", 1.0e-8))
+        # M_P0_CREATE_NODE_REGULARIZATION (2026-05-10): mirror the
+        # rigging-friendly default (was 1e-8 per cpp:532 / Chad Vernon
+        # reference). Authoritative value is the node attr; this is
+        # the "data dict missing key" fallback only.
+        self._spn_reg.setValue(data.get("regularization", 1.0e-4))
         self._cmb_slvm.setCurrentIndex(data.get("solverMethod", 0))
         clamp_on = data.get("clampEnabled", False)
         self._cb_clamp.setChecked(clamp_on)
