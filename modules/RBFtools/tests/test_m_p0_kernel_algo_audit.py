@@ -56,20 +56,34 @@ class TestKernelAlgoAudit(unittest.TestCase):
 
     # ----- TPS PSD edge case fix (Bug A) -----
 
-    def test_PERMANENT_a_tps_else_returns_zero(self):
-        """TPS r ≤ 0 branch must return 0.0 (was returning `value`)."""
+    def test_PERMANENT_a_tps_else_returns_value_or_zero(self):
+        """TPS r <= 0 branch — accepts oracle `value` OR audit `0.0`.
+
+        M_P0_KERNEL_SWITCH_ROLLBACK_1 (2026-05-11) reverted the
+        M_P0_KERNEL_ALGO_AUDIT (2600d3e) `result = 0.0` defence
+        back to oracle behaviour `result = value` (X:\\RBFtools
+        cpp:3806-3807, anchored to e249ec0). Per Planner 3-way diff
+        (weightDriver omits TPS; Oracle returns value), the 0.0
+        defence was either unnecessary in oracle's normalize path
+        or absorbed by GE elimination.
+
+        This guard now accepts EITHER literal so the parity test
+        remains a forward-compat shape check (catches stray third
+        forms like `result = -1.0;`) without re-pinning the
+        audit-overturned 0.0 behaviour.
+        """
         cpp = _read(_RBF_CPP)
         m = re.search(
-            r"//\s*thin\s+plate[\s\S]{0,800}?else\s*\n?\s*result\s*=\s*([^;]+);",
+            r"//\s*thin\s+plate[\s\S]{0,1500}?else\s*\n?\s*result\s*=\s*([^;]+);",
             cpp)
         self.assertIsNotNone(m,
             "Could not locate the TPS else-branch in interpolateRbf.")
         else_value = m.group(1).strip()
-        self.assertEqual(else_value, "0.0",
-            "TPS r ≤ 0 branch must assign result = 0.0 (PSD-preserving). "
-            "The legacy `result = value;` produced a tiny negative "
-            "diagonal entry on float-noise inputs, breaking K's "
-            "positive-semidefinite property.")
+        self.assertIn(else_value, ("value", "0.0"),
+            "TPS r <= 0 branch must assign either `value` "
+            "(M_P0_KERNEL_SWITCH_ROLLBACK_1, oracle behaviour) or "
+            "`0.0` (M_P0_KERNEL_ALGO_AUDIT historical PSD defence). "
+            "Found: {!r}".format(else_value))
 
     def test_PERMANENT_b_tps_branch_still_pos_compute(self):
         """TPS r > 0 branch unchanged — still computes r²·log(r)."""

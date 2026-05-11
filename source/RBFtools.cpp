@@ -4517,23 +4517,24 @@ double RBFtools::interpolateRbf(double value, double width, short kernelType)
         result = exp(-(value * value) / (2.0 * width * width));
     }
     // thin plate
-    // M_P0_KERNEL_ALGO_AUDIT (2026-05-10): TPS classic definition is
-    // φ(r) = r² · log(r) for r > 0, φ(0) = 0. Old code returned
-    // `value` itself in the else branch, which is fine for r = 0
-    // (zero) but produces a negative result for tiny negative
-    // floating-point noise (normalizeColumns can yield -1e-15-scale
-    // values that pass `value > 0` as false but are not exactly 0).
-    // A negative diagonal entry breaks K's positive-semidefinite
-    // property → Cholesky fails spuriously even on well-conditioned
-    // pose sets. Returning 0.0 is mathematically correct AND
-    // numerically robust.
+    // M_P0_KERNEL_SWITCH_ROLLBACK_1 (2026-05-11): TPS r<=0 reverted to
+    // oracle (X:\RBFtools cpp:3806-3807) behavior `result = value`. The
+    // M_P0_KERNEL_ALGO_AUDIT (2600d3e) change `result = 0.0` was intended
+    // to defend K's PSD against normalizeColumns floating-point noise,
+    // but user observation (kernel switch + manual Apply still drifts
+    // across ALL kernels, not just TPS) combined with 3-way diff
+    // (weightDriver omits TPS; Oracle returns value) shows the 0.0
+    // defense was either unnecessary in oracle's normalize path, or
+    // absorbed by GE elimination. See docs/排查/M_P0_KERNEL_SWITCH_ROLLBACK_index.md
+    // §3.c for full analysis. Oracle commit anchor: e249ec0
+    // (= 156af4c~1, see §0.5).
     else if (kernelType == 3)
     {
         value /= width;
         if (value > 0)
             result = value * value * log(value);
         else
-            result = 0.0;
+            result = value;
     }
     // multi quadratic
     else if (kernelType == 4)
