@@ -279,11 +279,23 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         # currently-active tab; when checked they sweep every tab.
         # The actual scope decision lives in main_window's
         # _gather_routed_targets — this is just the pickup point.
+        #
+        # M_P0_BATCH_DEFAULT_TRUE (2026-05-11): default flipped from
+        # False → True. The False default was a holdover from the
+        # single-tab weightDriver-era UX. Current RBFtools supports
+        # multi-driver / multi-driven via the B24 schema; under the
+        # old default, a multi-tab rig (e.g. 3 driver tabs × 10 driven
+        # tabs) would silently route only the active tab on Connect,
+        # leaving the other 9 driven * 2 driver = 27 (driver,driven)
+        # combinations disconnected. Symptom: "all drivers ineffective
+        # except the front-facing one" after a Connect cycle.
+        # Single-tab users keep their original behaviour (1 active tab
+        # × batch = 1 tab swept, identical to 1 active tab × no-batch).
         row_batch = QtWidgets.QHBoxLayout()
         self._chk_batch = QtWidgets.QCheckBox(
             tr(self._batch_checkbox_key))
         self._chk_batch.setToolTip(tr("source_tab_batch_tip"))
-        self._chk_batch.setChecked(False)
+        self._chk_batch.setChecked(True)
         row_batch.addWidget(self._chk_batch, 1)
         row_batch.addWidget(HelpButton(self._batch_help_key))
         lay.addLayout(row_batch)
