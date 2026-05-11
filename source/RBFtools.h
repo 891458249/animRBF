@@ -277,6 +277,18 @@ public:
     // the first (polyDim - 1) entries of ``vec``.
     static void polyBasis(const std::vector<double> &vec, int polyDim,
                           std::vector<double> &out);
+    // M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12): variance-floor scan
+    // of normalised pose columns. Flags driver-dim columns whose
+    // variance falls below ``varFloor`` as degenerate so the
+    // augmented-system solver can drop them from the polynomial
+    // basis P. ``isActiveLinear`` is sized to poseData.getColSize()
+    // (= driverDim = polyDim - 1 for CPD kernels); P column 1 + j
+    // is kept iff entry j is true. ``anyDegenerate`` is true iff
+    // at least one column was flagged.
+    static void detectDegeneratePolyCols(const BRMatrix &poseData,
+                                         double varFloor,
+                                         std::vector<bool> &isActiveLinear,
+                                         bool &anyDegenerate);
     // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): replay the per-pose
     // distance + interpolateRbf loop without doing the per-channel
     // weighted sum. Used by applyOutputEncodingBlend so the quat
@@ -569,6 +581,13 @@ private:
     // on every DG evaluation.
     bool  inputEncodingWarningIssued;
     short prevInputEncodingVal;
+    // M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12): once-per-rig flag
+    // for the "degenerate polynomial column" warning. Reset to
+    // false on construction; flipped to true the first time the
+    // augmented solver detects a near-constant driver column and
+    // drops it from P. Prevents Script Editor flood on interactive
+    // scrubbing.
+    bool  degenerateColumnWarningIssued;
     // M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): the ce136dd-era
     // ``outputEncodingDeferredWarningIssued`` flag was removed —
     // the BendRoll/SwingTwist-deferred warning was emitted from a

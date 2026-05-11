@@ -158,6 +158,7 @@ RBFtools::RBFtools()
       prevSolverMethodVal(0),          // M1.4: Auto; matches solverMethod default.
       inputEncodingWarningIssued(false), // M2.1a: fresh warning on first fall-back.
       prevInputEncodingVal(0),         // M2.1a: Raw; matches inputEncoding default.
+      degenerateColumnWarningIssued(false), // M_P0_RBF_COLUMN_RANK_DEFENSE: fresh per rig.
       qwaConfigWarningIssued(false),   // M2.2: fresh warnings on first config / edge hit.
       qwaClippedWarningIssued(false),
       qwaDegenerateWarningIssued(false),
@@ -2135,17 +2136,77 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     {
                         // -------------------------------------------------
                         // CPD path (Linear / TPS / MQB / IMQB).
-                        // Build (N + polyDim) × (N + polyDim) augmented
-                        // saddle-point matrix
-                        //   A = [ K + λI   P  ]
-                        //       [ P^T      0  ]
-                        // GE-only solve per output column (saddle-point
-                        // matrices are indefinite by construction; the
-                        // bottom-right 0 block guarantees Cholesky
-                        // would fail).
+                        //
+                        // M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12):
+                        // before building the augmented matrix, scan
+                        // matPoses (post-normalize) for "degenerate"
+                        // driver columns whose variance falls below
+                        // VAR_FLOOR. These columns translate to
+                        // near-constant linear terms in P; leaving
+                        // them in the saddle-point system makes P
+                        // rank-deficient and the augmented matrix
+                        // singular even at non-trivial λ.
+                        //
+                        // Strategy:
+                        //   1. Detect degenerate driver columns →
+                        //      isActiveLinear[j] for j ∈ [0, driverDim).
+                        //   2. Build a REDUCED P (poseCount × activeCount)
+                        //      where activeCount = 1 (constant)
+                        //              + popcount(isActiveLinear).
+                        //   3. Solve the reduced (N + activeCount) ×
+                        //      (N + activeCount) saddle-point system.
+                        //   4. EXPAND polyMat back to full polyDim ×
+                        //      solveCount, with dropped rows zeroed
+                        //      out. Inference (getPoseWeights) still
+                        //      evaluates polyBasis at full polyDim;
+                        //      dropped coefficients multiply to 0 so
+                        //      they contribute nothing to the output
+                        //      sum without any inference-side branch.
+                        //
+                        // This preserves the augmented system's full-
+                        // column-rank precondition while keeping the
+                        // inference path branch-free and the rig data
+                        // unmodified.
                         // -------------------------------------------------
+
+                        // VAR_FLOOR rationale: after normalizeColumns
+                        // each column has unit L2 norm, so variance
+                        // ≤ 1/N. A column whose values are bit-identical
+                        // across nearly all poses collapses to variance
+                        // ≪ 1/N. 1e-8 separates real-signal columns
+                        // (var typically O(1/N) − 1/N^2) from
+                        // degenerate-rig columns (var typically below
+                        // float64 representable variance among
+                        // bit-identical entries).
+                        const double VAR_FLOOR = 1.0e-8;
+
+                        std::vector<bool> isActiveLinear;
+                        bool anyDegenerate = false;
+                        detectDegeneratePolyCols(
+                            matPoses, VAR_FLOOR,
+                            isActiveLinear, anyDegenerate);
+
+                        // Active poly-column count: constant always +
+                        // active linear terms.
+                        int activeLinearCount = 0;
+                        for (size_t j = 0; j < isActiveLinear.size(); ++j)
+                            if (isActiveLinear[j]) ++activeLinearCount;
+                        const int activePolyDim = 1 + activeLinearCount;
+
+                        // Map P-column index → driver column index
+                        // (-1 sentinel for the constant P column 0).
+                        // Used both at training time to skip dropped
+                        // dims when filling P, and at solution-expand
+                        // time to map the reduced solution back into
+                        // the full polyMat layout.
+                        std::vector<int> activePolyToDriver;
+                        activePolyToDriver.push_back(-1);  // constant
+                        for (size_t j = 0; j < isActiveLinear.size(); ++j)
+                            if (isActiveLinear[j])
+                                activePolyToDriver.push_back((int)j);
+
                         const unsigned augN =
-                            poseCount + (unsigned)polyDim;
+                            poseCount + (unsigned)activePolyDim;
                         BRMatrix A;
                         A.setSize(augN, augN);
                         // Top-left N × N block: K + λI (copy from
@@ -2153,27 +2214,73 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         for (unsigned ai = 0; ai < poseCount; ++ai)
                             for (unsigned aj = 0; aj < poseCount; ++aj)
                                 A(ai, aj) = linMat(ai, aj);
-                        // P block: A(i, N+k) = polyBasis(matPoses row i)[k]
-                        // and its transpose A(N+k, i) = same.
-                        std::vector<double> p_row;
+
+                        // Reduced P block: only active polynomial
+                        // columns. polyBasis(matPoses row i) gives
+                        // [1, x_0, x_1, ..., x_{d-1}]; we pick the
+                        // active subset using activePolyToDriver.
+                        std::vector<double> p_row_full;
                         for (unsigned ai = 0; ai < poseCount; ++ai)
                         {
                             polyBasis(matPoses.getRowVector(ai),
-                                      polyDim, p_row);
-                            for (int pk = 0; pk < polyDim; ++pk)
+                                      polyDim, p_row_full);
+                            for (int pkR = 0; pkR < activePolyDim; ++pkR)
                             {
-                                A(ai, poseCount + (unsigned)pk) =
-                                    p_row[(size_t)pk];
-                                A(poseCount + (unsigned)pk, ai) =
-                                    p_row[(size_t)pk];
+                                // pkR = 0 → constant, picks p_row_full[0]
+                                // pkR > 0 → linear term, picks
+                                //          p_row_full[1 + driverIdx]
+                                const int drv = activePolyToDriver[(size_t)pkR];
+                                const double v =
+                                    (drv < 0)
+                                    ? p_row_full[0]
+                                    : p_row_full[1 + (size_t)drv];
+                                A(ai, poseCount + (unsigned)pkR) = v;
+                                A(poseCount + (unsigned)pkR, ai) = v;
                             }
                         }
-                        // Bottom-right polyDim × polyDim 0 block is
-                        // already zero from BRMatrix::setSize.
+                        // Bottom-right activePolyDim × activePolyDim 0
+                        // block is already zero from BRMatrix::setSize.
 
                         if (exposeDataVal > 2)
                             A.show(thisName,
-                                   "Augmented (K+lambdaI, P; P^T, 0)");
+                                   "Augmented (K+lambdaI, P_active; "
+                                   "P_active^T, 0)");
+
+                        // Emit once-per-rig disclosure warning if any
+                        // driver column was dropped. Gate behind the
+                        // flag to avoid Script Editor flood during
+                        // interactive timeline scrubs.
+                        if (anyDegenerate
+                            && !degenerateColumnWarningIssued)
+                        {
+                            MString dropMsg = thisName + MString(
+                                ": M_P0_RBF_COLUMN_RANK_DEFENSE — "
+                                "dropping ") + (polyDim - activePolyDim) +
+                                " degenerate driver column(s) "
+                                "[variance < ";
+                            dropMsg += VAR_FLOOR;
+                            dropMsg += MString("] from polynomial "
+                                "augmentation P matrix. Driver index "
+                                "(0-based, post-encoding) dropped: ");
+                            bool first = true;
+                            for (size_t j = 0;
+                                 j < isActiveLinear.size(); ++j)
+                            {
+                                if (!isActiveLinear[j])
+                                {
+                                    if (!first) dropMsg += MString(", ");
+                                    dropMsg += (int)j;
+                                    first = false;
+                                }
+                            }
+                            dropMsg += MString(". These columns carry "
+                                "near-zero signal — RBF still trains "
+                                "fine on the remaining columns; "
+                                "polynomial coefficients for dropped "
+                                "columns will be 0 at inference.");
+                            MGlobal::displayWarning(dropMsg);
+                            degenerateColumnWarningIssued = true;
+                        }
 
                         // Per-column GE solve with trial-wMat /
                         // trial-polyMat staging (mirrors the strictly-PD
@@ -2181,8 +2288,15 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         bool geOk = true;
                         BRMatrix wMatTrial;
                         wMatTrial.setSize(poseCount, solveCount);
+                        // polyMatTrial sized to FULL polyDim — dropped
+                        // rows are zeroed via setSize and never
+                        // overwritten below, so they stay 0 in the
+                        // committed polyMat. Inference reads polyMat
+                        // at full polyDim and multiplies dropped rows
+                        // by polyBasis values, contributing 0.
                         BRMatrix polyMatTrial;
-                        polyMatTrial.setSize((unsigned)polyDim, solveCount);
+                        polyMatTrial.setSize(
+                            (unsigned)polyDim, solveCount);
                         std::vector<double> y_aug(augN, 0.0);
                         std::vector<double> w_aug(augN, 0.0);
                         for (c = 0; c < solveCount; c ++)
@@ -2194,7 +2308,7 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                     (ai < yCols[c].size())
                                     ? yCols[c][ai] : 0.0;
                             for (unsigned k = 0;
-                                 k < (unsigned)polyDim; ++k)
+                                 k < (unsigned)activePolyDim; ++k)
                                 y_aug[poseCount + k] = 0.0;
                             std::fill(w_aug.begin(),
                                       w_aug.end(), 0.0);
@@ -2209,9 +2323,26 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                             }
                             for (i = 0; i < poseCount; i ++)
                                 wMatTrial(i, c) = w_aug[i];
-                            for (int pk = 0; pk < polyDim; ++pk)
-                                polyMatTrial((unsigned)pk, c) =
-                                    w_aug[poseCount + (unsigned)pk];
+                            // Expand reduced solution back to full
+                            // polyDim layout via activePolyToDriver.
+                            // Position 0 (constant) goes to row 0;
+                            // active linear term pkR (≥ 1) goes to
+                            // row 1 + driverIdx in the full layout.
+                            for (int pkR = 0;
+                                 pkR < activePolyDim; ++pkR)
+                            {
+                                const int drv =
+                                    activePolyToDriver[(size_t)pkR];
+                                const unsigned fullRow =
+                                    (drv < 0)
+                                    ? 0u
+                                    : (unsigned)(1 + drv);
+                                polyMatTrial(fullRow, c) =
+                                    w_aug[poseCount + (unsigned)pkR];
+                            }
+                            // Dropped rows in polyMatTrial stay 0 —
+                            // never written, BRMatrix::setSize gives
+                            // zero-initialised storage.
                         }
                         if (geOk)
                         {
@@ -2224,7 +2355,8 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                     thisName + MString(
                                         ": solver = augmented GE "
                                         "(polyDim ") +
-                                    polyDim + ")");
+                                    polyDim + ", activePolyDim " +
+                                    activePolyDim + ")");
                         }
                     }
 
@@ -4725,13 +4857,33 @@ std::vector<double> RBFtools::normalizeVector(std::vector<double> vec, std::vect
 // order. Gaussian variants are strictly PD and need no augmentation.
 //
 // Kernel id (per cpp:212-218 schema):
-//   0 = Linear                            CPD m = 1 → polyDim = 1
+//   0 = Linear                            CPD m = 1 → polyDim = 1 + d
 //   1 = Gaussian 1   (strictly PD)        polyDim = 0
 //   2 = Gaussian 2   (strictly PD)        polyDim = 0
 //   3 = Thin Plate                        CPD m = 2 → polyDim = 1 + d
-//   4 = Multi-Quadric Biharmonic (MQB)    CPD m = 1 → polyDim = 1
+//   4 = Multi-Quadric Biharmonic (MQB)    CPD m = 1 → polyDim = 1 + d
 //   5 = Inverse Multi-Quadric Biharmonic
-//                                  (IMQB) CPD m = 1 → polyDim = 1
+//                                  (IMQB) CPD m = 1 → polyDim = 1 + d
+//
+// M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12): MQB / IMQB / Linear
+// upgraded from polyDim = 1 (constant only) to polyDim = 1 + d
+// (constant + linear in each driver dim). The strict-CPD-minimum
+// polyDim = 1 leaves no driver-derived linear columns in P, which:
+//   1. Cannot represent affine variation (global rotate / scale) in
+//      the inference field — the polynomial term can only carry a
+//      bulk DC offset, not a directional ramp.
+//   2. Leaves no surface for the column-rank defence to drop
+//      degenerate columns — the column-rank defence is a no-op when
+//      polyDim = 1.
+// Upgrading to 1 + d matches the industry-standard treatment in
+// SciPy RBFInterpolator, PyGeM (its "multi-quadratic biharmonic"
+// preset uses n + 1 + d for 3D), and Wendland 2004 §10.4. The
+// extra (d) degrees of freedom add NO risk under degree-1 linear
+// polynomial — Runge oscillation only manifests at degree ≥ 2 on
+// equispaced 1-D samples. CPD uniqueness theorem (Wendland Thm
+// 10.3) guarantees the augmented system still has a unique solution
+// as long as P has full column rank, which M_P0_RBF_COLUMN_RANK_DEFENSE
+// ensures by dropping degenerate columns at solve time.
 //
 // User λ-sweep + visual repro confirmed kernels 0/3/4/5 all need
 // augmentation under dense / redundant pose sets — the uniform 1e-5
@@ -4743,8 +4895,7 @@ std::vector<double> RBFtools::normalizeVector(std::vector<double> vec, std::vect
 int RBFtools::getPolynomialDim(short kernelType, int driverDim)
 {
     if (kernelType == 1 || kernelType == 2) return 0;   // Gaussian
-    if (kernelType == 3) return 1 + driverDim;          // TPS
-    return 1;                                           // Linear / MQB / IMQB
+    return 1 + driverDim;                               // Linear / TPS / MQB / IMQB
 }
 
 
@@ -4770,6 +4921,67 @@ void RBFtools::polyBasis(const std::vector<double> &vec, int polyDim,
     const int linearTerms = polyDim - 1;
     for (int i = 0; i < linearTerms && (size_t)i < vec.size(); ++i)
         out[1 + i] = vec[i];
+}
+
+
+//
+// M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12): scan the per-column
+// variance of the normalised pose matrix and flag columns whose
+// variance falls below ``varFloor`` as "degenerate". Degenerate
+// columns become rank-deficient linear terms in the polynomial
+// basis P (1, x_0, ..., x_{d-1}); leaving them in P makes the
+// saddle-point augmented system singular even with non-trivial λ.
+//
+// ``isActiveLinear`` is sized to driverDim (= polyDim - 1); entry
+// j is true iff matPoses column j carries enough signal to be
+// kept as a linear polynomial term. The caller maps this back to
+// P's column layout: P column 0 (constant) is always kept; P
+// column 1 + j is kept iff isActiveLinear[j] is true.
+//
+// Variance threshold ``varFloor`` defaults to 1.0e-8. After
+// poseData.normalizeColumns (cpp:2942) each column has unit L2
+// norm, so variance ≈ 1/N − mean² ∈ [0, 1/N]. A column whose
+// values are bit-identical across nearly all poses (e.g. rig data
+// where one driver dim is "rest" in most poses) collapses to
+// variance ≪ 1/N. 1e-8 is roughly 1e-6 of 1/N for N = 22 poses,
+// distinguishing genuinely degenerate columns from real-data
+// columns even at small N.
+//
+// Sets ``anyDegenerate`` to true iff at least one column was
+// flagged, so the caller can emit the once-per-rig warning.
+//
+void RBFtools::detectDegeneratePolyCols(const BRMatrix &poseData,
+                                        double varFloor,
+                                        std::vector<bool> &isActiveLinear,
+                                        bool &anyDegenerate)
+{
+    const unsigned rowCount = poseData.getRowSize();
+    const unsigned colCount = poseData.getColSize();
+    isActiveLinear.assign((size_t)colCount, true);
+    anyDegenerate = false;
+    if (rowCount == 0 || colCount == 0) return;
+
+    for (unsigned j = 0; j < colCount; ++j)
+    {
+        // Mean.
+        double sum = 0.0;
+        for (unsigned i = 0; i < rowCount; ++i)
+            sum += poseData(i, j);
+        const double mean = sum / (double)rowCount;
+        // Variance (population, divide by N).
+        double sqSum = 0.0;
+        for (unsigned i = 0; i < rowCount; ++i)
+        {
+            const double d = poseData(i, j) - mean;
+            sqSum += d * d;
+        }
+        const double var = sqSum / (double)rowCount;
+        if (var < varFloor)
+        {
+            isActiveLinear[j] = false;
+            anyDegenerate = true;
+        }
+    }
 }
 //
 // Description:

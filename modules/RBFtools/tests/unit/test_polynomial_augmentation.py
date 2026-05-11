@@ -87,19 +87,15 @@ class TestPolynomialAugmentation(unittest.TestCase):
     def test_PERMANENT_d_cpp_getPolynomialDim_dispatch(self):
         """getPolynomialDim must dispatch:
           - Gaussian 1 / 2 (kernelType ∈ {1,2}) → 0
-          - TPS (kernelType == 3) → 1 + driverDim
-          - default (Linear / MQB / IMQB) → 1
+          - All CPD kernels (Linear / TPS / MQB / IMQB) → 1 + driverDim
+
+        M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12) upgraded MQB / IMQB /
+        Linear from polyDim = 1 (strict-CPD minimum) to polyDim = 1 +
+        driverDim (industry-standard PyGeM / SciPy convention) so that
+        the column-rank defence has actual driver-derived linear
+        columns to inspect + drop.
         """
         cpp = _read(_RBF_CPP)
-        # Function body present.
-        m = re.search(
-            r"int\s+RBFtools::getPolynomialDim\s*\([^)]*\)\s*\{"
-            r"[\s\S]{0,500}?return\s+1\s*\+\s*driverDim\s*;"
-            r"[\s\S]{0,200}?return\s+1\s*;",
-            cpp)
-        self.assertIsNotNone(m,
-            "getPolynomialDim must contain TPS-branch "
-            "`return 1 + driverDim` and default `return 1`.")
         # Gaussian branch (return 0).
         self.assertIsNotNone(
             re.search(
@@ -108,6 +104,25 @@ class TestPolynomialAugmentation(unittest.TestCase):
                 cpp),
             "getPolynomialDim must return 0 for Gaussian kernels "
             "(kernelType ∈ {1, 2}).")
+        # CPD branch: all non-Gaussian kernels return 1 + driverDim.
+        self.assertIsNotNone(
+            re.search(
+                r"return\s+1\s*\+\s*driverDim\s*;",
+                cpp),
+            "getPolynomialDim must return `1 + driverDim` for CPD "
+            "kernels (Linear / TPS / MQB / IMQB).")
+        # The post-upgrade implementation has NO bare `return 1;`
+        # fallthrough — that was the strict-CPD-minimum MQB/IMQB
+        # default that M_P0_RBF_COLUMN_RANK_DEFENSE replaced.
+        body_match = re.search(
+            r"int\s+RBFtools::getPolynomialDim\s*\([^)]*\)\s*\{"
+            r"([\s\S]{0,800}?)\}", cpp)
+        self.assertIsNotNone(body_match,
+            "getPolynomialDim body not found in cpp.")
+        body = body_match.group(1)
+        self.assertNotIn("return 1;", body.replace("return 1 + driverDim;", ""),
+            "Pre-rank-defence `return 1;` fallthrough must be gone "
+            "(MQB / IMQB / Linear now upgraded to 1 + driverDim).")
 
     def test_PERMANENT_e_cpp_polyBasis_constant_linear(self):
         """polyBasis must:
@@ -129,35 +144,46 @@ class TestPolynomialAugmentation(unittest.TestCase):
 
     def test_PERMANENT_f_augmented_matrix_construction(self):
         """Solver block must contain the saddle-point matrix transpose
-        fill `A(poseCount + (unsigned)pk, ai) = ...` — this is the
-        fingerprint of the (K + λI, P; P^T, 0) construction; the same
-        fill in the (i, N+k) direction is required but the transpose
-        block is the unambiguous augmentation marker."""
+        fill `A(poseCount + (unsigned)pkR, ai) = ...` — this is the
+        fingerprint of the (K + λI, P; P^T, 0) construction.
+
+        M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12) renamed the P-fill
+        loop index from `pk` (full polyDim) to `pkR` (reduced index
+        into activePolyToDriver). The semantic shape is unchanged —
+        still a transpose-symmetric fill of an augmented saddle-point
+        matrix — only the variable name moved.
+        """
         cpp = _read(_RBF_CPP)
-        # Two-sided P fill (training side).
+        # Two-sided P fill (training side) — accept pk OR pkR.
+        idx_alt = r"(?:pk|pkR)"
         self.assertIsNotNone(
             re.search(
-                r"A\s*\(\s*ai\s*,\s*poseCount\s*\+\s*\(unsigned\)pk\s*\)\s*=",
+                r"A\s*\(\s*ai\s*,\s*poseCount\s*\+\s*\(unsigned\)"
+                + idx_alt + r"\s*\)\s*=",
                 cpp),
             "Augmented matrix must fill the P block at "
-            "A(ai, poseCount + pk).")
+            "A(ai, poseCount + pk[R]).")
         self.assertIsNotNone(
             re.search(
-                r"A\s*\(\s*poseCount\s*\+\s*\(unsigned\)pk\s*,\s*ai\s*\)\s*=",
+                r"A\s*\(\s*poseCount\s*\+\s*\(unsigned\)"
+                + idx_alt + r"\s*,\s*ai\s*\)\s*=",
                 cpp),
             "Augmented matrix must fill the P^T block at "
-            "A(poseCount + pk, ai).")
+            "A(poseCount + pk[R], ai).")
         # polyDim branch in solver.
         self.assertIn(
             "if (polyDim == 0)", cpp,
             "Solver must branch on `polyDim == 0` for the strictly-PD "
             "(Gaussian) path.")
-        # Augmented size.
+        # Augmented size — accept polyDim OR activePolyDim (the
+        # rank-defence patch reduces from polyDim to activePolyDim).
         self.assertIsNotNone(
             re.search(
-                r"augN\s*=\s*poseCount\s*\+\s*\(unsigned\)polyDim",
+                r"augN\s*=\s*poseCount\s*\+\s*"
+                r"\(unsigned\)(?:polyDim|activePolyDim)",
                 cpp),
-            "Augmented system size must be N + polyDim.")
+            "Augmented system size must be N + polyDim or "
+            "N + activePolyDim (rank-defence reduced).")
 
     # ----- inference: polynomial term -----
 
