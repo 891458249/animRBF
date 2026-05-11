@@ -437,6 +437,14 @@ compute()  cpp:1132+
 | 算法权威文档（本文档）| ✅ Land | M_P0_QUAT_RBF_LANDING_GUARDS |
 | E2E + Unit + AST 守护 | ✅ Land | M_P0_QUAT_RBF_LANDING_GUARDS |
 | B1↔B2 overlap disclose | ✅ Land | M_P0_QUAT_RBF_OVERLAP_DISCLOSE |
+| Kernel-switch 算法路径回退 | ✅ Land | M_P0_KERNEL_SWITCH_ROLLBACK (c924b1c / 91adfc9 / 7e6c25f / + ROLLBACK_6) |
+
+**M_P0_KERNEL_SWITCH_ROLLBACK 覆盖关系** (2026-05-11, 方案 E):
+- 覆盖 (回退): `M_P0_KERNEL_ALGO_AUDIT` 的 TPS r≤0 → 0.0 部分 + `M_P0_AUTO_ADAPTIVE_LAMBDA` 全部 + `M_P0_LAMBDA_CEIL_TIGHTEN` 的 retry ceil 部分
+- 保留 (UX 增强不动): `M_P0_TRAINING_AFFECTING_ATTRS` 5 prev-tracker (kernel/distanceType/radiusType/radius/regularization) + `M_P0_TRAINING_ATTRS_FORCE_RETRAIN` Python `_TRAINING_AFFECTING_ATTRS` frozenset + `M_P0_LAMBDA_CEIL_TIGHTEN` 的 controller λ default 1e-8 部分
+- Oracle 锚点: `e249ec0` (= 156af4c~1, λ retry loop 引入前)
+- Oracle 行为锚点 4/4: TPS r≤0 = `value` / 无 retry loop / 无 4c379ad 5 prev-tracker / Python 无 `_TRAINING_AFFECTING_ATTRS`
+- 详: [docs/排查/M_P0_KERNEL_SWITCH_ROLLBACK_index.md](../排查/M_P0_KERNEL_SWITCH_ROLLBACK_index.md)
 
 **未 land / 后续候选：**
 - ill-conditioning warning（$\|\mathbf{w}\|_\infty > T$ 时 disclose）—— P2 conditioning 提示词
@@ -492,3 +500,4 @@ compute()  cpp:1132+
 - `M_P0_QUATERNION_HONEST_DISCLOSURE` —— UI 端 honest disclosure
 - `M_P0_QUAT_RBF_LANDING_GUARDS` —— 本次：算法文档 + 三件套测试
 - `M_P0_QUAT_RBF_OVERLAP_DISCLOSE` —— 本次：B1↔B2 overlap 安全网
+- `M_P0_KERNEL_SWITCH_ROLLBACK` —— 切 kernel drift 算法路径回退 (TPS r≤0 → value + 移除 λ retry loop), 与 weightDriver / Oracle "诚实失败" 哲学对齐. 详 [§7](#7-落地状态landing-snapshot) 行 + [docs/排查/M_P0_KERNEL_SWITCH_ROLLBACK_index.md](../排查/M_P0_KERNEL_SWITCH_ROLLBACK_index.md)
