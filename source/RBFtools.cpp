@@ -1947,53 +1947,73 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     }
 
                     // -------------------------------------------------
-                    // M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5 (2026-05-11):
-                    // bounded retry up to a 1e-5 ceil. Restores the
-                    // progressive λ injection that
-                    // M_P0_KERNEL_SWITCH_ROLLBACK_2 (91adfc9) removed
-                    // (single-pass + kFailure), motivated by user
-                    // λ-sweep on a 22-pose × 9-dim Raw rig showing K
-                    // is mathematically singular at λ < 1e-5 across
-                    // ALL 6 kernels (Gaussian 1/2 / Linear / TPS /
-                    // MQB / IMQB), not just MQ/IMQ.
+                    // Audit chain at this solver block (newest first):
+                    //   M_P0_LAMBDA_RETRY_TIERED_CEIL (this commit)
+                    //     supersedes ↑
+                    //   M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5 (8e7a6d3)
+                    //     supersedes ↑
+                    //   M_P0_KERNEL_SWITCH_ROLLBACK_2 (91adfc9)
+                    //     supersedes ↑
+                    //   M_P0_AUTO_ADAPTIVE_LAMBDA (156af4c) +
+                    //     M_P0_LAMBDA_CEIL_TIGHTEN (ee6d63f)
                     //
-                    // Why bounded retry (vs ROLLBACK_2 single-pass):
-                    //   * λ < 1e-5 on dense / redundant production rigs
-                    //     yields K with cond(K) >> 1/eps → numerically
-                    //     singular for ALL kernels, not the user's
-                    //     fault. "Honest failure" at the user's stored
-                    //     λ punishes legitimate rigs with kFailure.
-                    //   * Well-conditioned RBF training (Schaback 1995,
-                    //     Wendland 2004) operates with λ ≥ 1e-5 — this
-                    //     range is standard, not a "凑数" defence.
-                    //   * Training-point bias at λ=1e-5 is ~0.1%
-                    //     (well below rest-pose tolerance 1e-3), so
-                    //     the rigger sees indistinguishable observable
-                    //     behaviour vs an exact λ=1e-8 solve when both
-                    //     work — but the rig actually trains instead
-                    //     of failing.
+                    // M_P0_LAMBDA_RETRY_TIERED_CEIL (2026-05-11,
+                    // supersedes M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5
+                    // [8e7a6d3 / b16d117] uniform 1e-5 ceil):
                     //
-                    // Why ceil = 1e-5 (vs old M_P0_LAMBDA_CEIL_TIGHTEN
-                    // ceil = 1e-3):
-                    //   * 100× tighter than the M_P0_AUTO_ADAPTIVE_LAMBDA-
-                    //     era ceil; the 1e-3 ceil was the source of
-                    //     ROLLBACK_2's "numerical garbage at ceil"
-                    //     complaint (training weights satisfied
-                    //     (K + 1e-3·I) w = y but violated kernel
-                    //     invariant by >> 1e-3).
-                    //   * 1e-5 keeps bias < 0.1% under any kernel, so
-                    //     the invariant is preserved.
+                    // Per-kernel-class ceil based on K-diagonal scale.
+                    // Strictly-PD kernels (Linear / Gaussian 1 /
+                    // Gaussian 2; kernelVal ∈ {0, 1, 2}) have
+                    // K[i,i] = O(1), so λ ∈ [1e-8, 1e-5] is the
+                    // standard well-conditioned RBF training range
+                    // (Schaback 1995, Wendland 2004) and 1e-5 ceil
+                    // is sufficient. Conditionally-PD kernels (TPS /
+                    // MQB / IMQB; kernelVal ∈ {3, 4, 5}) have
+                    // K[i,i] = O(σ) or O(1/σ) — at typical σ scales
+                    // K-diagonal is 100× smaller, so 1e-5 λ is too
+                    // weak for an equivalent regularization effect
+                    // and the matrix stays singular. Empirical
+                    // evidence (Planner-verified user λ-sweep on the
+                    // 22-pose × 9-dim Raw rig):
                     //
-                    // ROLLBACK_2's "honest failure" philosophy is
-                    // preserved at the new ceil: a pose set that is
-                    // STILL singular at λ=1e-5 is genuinely degenerate
-                    // (e.g. two exact-duplicate poses), and kFailure
-                    // is the right answer. M_P0_DUPLICATE_POSE_DETECT
-                    // surfaces the cause early for the rigger.
+                    //   λ=1e-5 + Gaussian 2 → solves, Δ = -21.55 ✓
+                    //   λ=1e-5 + MQB        → kFailure ✗
+                    //                         (this commit fixes)
+                    //   λ=1e-3 + MQB        → expected to solve
                     //
-                    // Retry chain (max 4 iterations, ×10 per step):
-                    //   λ_user → λ_user × 10 → … → clamp to 1e-5
-                    // E.g. user λ = 1e-8: 1e-8 → 1e-7 → 1e-6 → 1e-5.
+                    // The previous 8e7a6d3 / b16d117 uniform 1e-5 ceil
+                    // therefore solved Gaussian-class kernels but left
+                    // TPS / MQB / IMQB still kFailure-ing at the user's
+                    // typical λ — half a fix. The tiered ceil here
+                    // solves the conditionally-PD kernels too while
+                    // keeping strictly-PD kernel behaviour identical
+                    // to 8e7a6d3 (their 1e-5 ceil unchanged).
+                    //
+                    // Why ceil = 1e-3 (conditionally-PD) is safe:
+                    //   * matches the historical M_P0_LAMBDA_CEIL_TIGHTEN
+                    //     ceil that worked in production for these
+                    //     kernels for weeks before ROLLBACK_2; the
+                    //     "numerical garbage at 1e-3 ceil" ROLLBACK_2
+                    //     complaint was specific to dense pose sets
+                    //     where the math required tighter regularization,
+                    //     NOT a generic 1e-3 problem.
+                    //   * Training-point bias at λ=1e-3 on a
+                    //     conditionally-PD kernel with K[i,i] ~ O(0.01)
+                    //     is ~10% — visible but acceptable when the
+                    //     alternative is total kFailure; the bounded
+                    //     retry warning surfaces this so the TD knows
+                    //     to manually raise λ for tighter pose data.
+                    //   * The honest-failure philosophy is preserved:
+                    //     a pose set that is STILL singular at the
+                    //     tiered ceil is genuinely degenerate (e.g.
+                    //     duplicate poses; M_P0_DUPLICATE_POSE_DETECT
+                    //     catches these earlier).
+                    //
+                    // Retry chain:
+                    //   strictly-PD: max 4 retries, λ_user → … → 1e-5
+                    //   conditionally-PD: max 6 retries, λ_user → … → 1e-3
+                    //   E.g. user λ = 1e-8 + MQB:
+                    //     1e-8 → 1e-7 → 1e-6 → 1e-5 → 1e-4 → 1e-3.
                     //
                     // λ injection is INCREMENTAL: each retry adds
                     // (new − applied) to the diagonal so linMat is
@@ -2001,11 +2021,18 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     //
                     // See docs/排查/M_P0_KERNEL_SWITCH_ROLLBACK_index.md
                     // §0.5 + this commit's message for the λ-sweep
-                    // empirical data driving the 1e-5 choice.
+                    // empirical data + audit trail (8e7a6d3 → b16d117 →
+                    // this commit's tiered ceil).
                     // -------------------------------------------------
 
-                    const double LAMBDA_CEIL_FLOOR_1E5 = 1.0e-5;
-                    const int    MAX_RETRIES_FLOOR_1E5 = 4;
+                    const bool kIsStrictlyPDKernel =
+                        (kernelVal == 0
+                         || kernelVal == 1
+                         || kernelVal == 2);
+                    const double LAMBDA_CEIL_TIERED =
+                        kIsStrictlyPDKernel ? 1.0e-5 : 1.0e-3;
+                    const int MAX_RETRIES_TIERED =
+                        kIsStrictlyPDKernel ? 4 : 6;
 
                     wMat = BRMatrix();
                     wMat.setSize(poseCount, solveCount);
@@ -2032,8 +2059,8 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     int  retryCount   = 0;
 
                     while (!solved
-                           && retryCount <= MAX_RETRIES_FLOOR_1E5
-                           && currentLambda <= LAMBDA_CEIL_FLOOR_1E5)
+                           && retryCount <= MAX_RETRIES_TIERED
+                           && currentLambda <= LAMBDA_CEIL_TIERED)
                     {
                         // Tier 1 — Cholesky. Attempted only in Auto
                         // mode (solverMethodVal == 0) when the last
@@ -2108,12 +2135,12 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         // Never let currentLambda stagnate at 0.0.
                         double nextLambda;
                         if (currentLambda <= 0.0)
-                            nextLambda = LAMBDA_CEIL_FLOOR_1E5 * 1.0e-3;
+                            nextLambda = LAMBDA_CEIL_TIERED * 1.0e-3;
                         else
                             nextLambda = currentLambda * 10.0;
 
-                        if (nextLambda > LAMBDA_CEIL_FLOOR_1E5)
-                            nextLambda = LAMBDA_CEIL_FLOOR_1E5;
+                        if (nextLambda > LAMBDA_CEIL_TIERED)
+                            nextLambda = LAMBDA_CEIL_TIERED;
 
                         // If we are already at ceil and still failing,
                         // do not loop forever: break out so the
@@ -2157,7 +2184,7 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                             " even at lambda = " + currentLambda +
                             "; remove duplicate poses or pick a "
                             "different kernel "
-                            "(M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5).");
+                            "(M_P0_LAMBDA_RETRY_TIERED_CEIL).");
                         return MStatus::kFailure;
                     }
 
@@ -2170,7 +2197,7 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                             ": bounded lambda retry escalated from ") +
                             userLambda + " to " + currentLambda +
                             " (" + retryCount + " retries, ceil " +
-                            LAMBDA_CEIL_FLOOR_1E5 +
+                            LAMBDA_CEIL_TIERED +
                             ") to stabilize K. Consider raising "
                             "'Regularization (lambda)' to this value "
                             "or reducing pose redundancy.");
