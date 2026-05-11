@@ -40,6 +40,8 @@ import os
 import re
 import unittest
 
+import pytest
+
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(_HERE)))
@@ -51,6 +53,21 @@ def _read(path):
         return fh.read()
 
 
+# M_P0_KERNEL_SWITCH_ROLLBACK_2 (2026-05-11): the auto-adaptive λ
+# retry loop introduced by M_P0_AUTO_ADAPTIVE_LAMBDA (156af4c) +
+# tightened by M_P0_LAMBDA_CEIL_TIGHTEN (ee6d63f) was reverted to
+# Oracle's single-pass solver (Cholesky tier 1 / GE tier 2 →
+# kFailure on failure). The retry / ceil / counter constructs
+# guarded by every test in this class no longer exist in
+# RBFtools.cpp. Skipping the whole class instead of inverting
+# each assertion preserves the historical test surface (so future
+# readers see the original guard intent) while keeping pytest
+# green. See docs/排查/M_P0_KERNEL_SWITCH_ROLLBACK_index.md §4
+# (analysis) + §0.5 (oracle archaeology) and the ROLLBACK_2
+# commit message for the 3-way diff anchors.
+@pytest.mark.skip(
+    reason="M_P0_KERNEL_SWITCH_ROLLBACK_2: retry loop removed; "
+           "Oracle single-pass solver restored.")
 class TestAutoAdaptiveLambda(unittest.TestCase):
 
     def test_PERMANENT_a_lambda_constants_present(self):

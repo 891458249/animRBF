@@ -1935,113 +1935,106 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     }
 
                     // -------------------------------------------------
-                    // M_P0_AUTO_ADAPTIVE_LAMBDA (2026-05-10): solve for
-                    // each dimension with auto-adaptive Tikhonov
-                    // regularization. The retry loop matches Maya's
-                    // native poseInterpolator robustness — it never
-                    // returns kFailure on near-singular pose sets,
-                    // instead progressively bumping λ until Cholesky
-                    // OR GE succeeds. Worst-case fallback at λ ≥ 1.0
-                    // is still kFailure with a detailed diagnostic.
+                    // M_P0_KERNEL_SWITCH_ROLLBACK_2 (2026-05-11): single-
+                    // pass solver with honest-failure semantics. Reverts
+                    // M_P0_AUTO_ADAPTIVE_LAMBDA (156af4c) λ retry loop +
+                    // M_P0_LAMBDA_CEIL_TIGHTEN (ee6d63f) ceil tightening.
                     //
-                    // Strategy:
-                    //   1. Inject the user's λ (or LAMBDA_FLOOR if 0).
-                    //   2. Try Cholesky → if fails, try GE.
-                    //   3. If both fail, bump λ ×10 (cap at LAMBDA_CEIL).
-                    //   4. Repeat up to MAX_RETRIES times.
-                    //   5. On success after retry > 0, emit a once-per-
-                    //      solve warning so the TD knows the auto-bump
-                    //      kicked in and can tune λ upward permanently.
+                    // Pre-rollback behaviour: when (K + λ_user·I) was
+                    // near-singular, λ multiplied by 10 each iteration
+                    // until ceil 1e-3, then accepted the resulting w
+                    // unconditionally. User observation (kernel switch +
+                    // manual Apply still drifts across ALL kernels,
+                    // including well-conditioned Gaussian) shows the
+                    // loop was producing numerically meaningless w when
+                    // ceil was hit: trained weights satisfied
+                    //   (K + 1e-3·I) w = y
+                    // but VIOLATED the kernel invariant
+                    //   ∀i: Σ_j w_j φ(d(p_i, p_j); σ) = y_i
+                    // by >> rest-pose tolerance 1e-3, hence visible joint
+                    // drift.
                     //
-                    // λ injection is INCREMENTAL — each retry adds
-                    // (newLambda - appliedLambda) to the diagonal so
-                    // we never rebuild linMat from scratch.
+                    // 3-way diff anchors (Planner-verified):
+                    //   - weightDriver cpp:1106-1111 — single GE,
+                    //     singular → kFailure + displayError
+                    //   - Oracle RBFtools cpp:1865-1925 — Cholesky tier 1
+                    //     / GE tier 2 once → kFailure (no retry)
+                    //   - Pre-rollback Current — λ retry loop (removed
+                    //     here)
+                    //
+                    // After this commit:
+                    //   * λ user value (default 1e-8 from cpp schema, see
+                    //     ee6d63f's restoration of cpp:531 default) is
+                    //     injected ONCE into K's diagonal.
+                    //   * Cholesky tier 1 / GE tier 2 dispatch preserved
+                    //     (Oracle's enhancement over weightDriver,
+                    //     orthogonal to retry).
+                    //   * Both tiers fail → kFailure + informative error
+                    //     pointing the user at λ adjustment or pose
+                    //     deduplication.
+                    //
+                    // Matches both weightDriver's and Oracle's "honest
+                    // failure" philosophy: a near-singular K means the
+                    // pose set is genuinely degenerate at this kernel /
+                    // λ choice, and the rigger needs to know rather
+                    // than receive numerical garbage.
+                    //
+                    // See docs/排查/M_P0_KERNEL_SWITCH_ROLLBACK_index.md
+                    // §4 (analysis) + §0.5 (oracle archaeology).
                     // -------------------------------------------------
 
                     wMat = BRMatrix();
                     wMat.setSize(poseCount, solveCount);
 
-                    // M_P0_LAMBDA_CEIL_TIGHTEN (2026-05-11): cap
-                    // auto-adaptive λ retry at 1e-3 (was 1.0). Backup
-                    // version (last week's working .mll) used no
-                    // auto-adaptive retry at all and ran at user's
-                    // exact λ (default 1e-8). When my auto-adaptive
-                    // retry escalated to LAMBDA_CEIL=1.0 on kernels
-                    // like MQB where K[i,i]=w (small radius), the
-                    // ratio λ/(K[i,i] + λ) → 1, producing 50%+ bias
-                    // at training pose centers ("joints fly away" /
-                    // 骨骼乱飞 user repro).
-                    //
-                    // 1e-3 ceiling keeps bias < 0.1% even on MQB
-                    // with default radius. Solver can still escalate
-                    // to handle near-singular K, but not so far as
-                    // to break the training-pose invariant.
-                    const double LAMBDA_FLOOR = 1.0e-8;
-                    const double LAMBDA_CEIL  = 1.0e-3;
-                    const int    MAX_RETRIES  = 6;
-                    const double userLambda   = (regularizationVal > 0.0)
-                                                ? regularizationVal : 0.0;
-
-                    double currentLambda = userLambda;
-                    double appliedLambda = 0.0;
-
-                    // Initial λ injection (matches the legacy behaviour
-                    // when the data is not pathological — zero retries
-                    // means zero overhead vs the pre-fix code path).
-                    if (currentLambda > 0.0)
+                    // λ injection (single pass, matches Oracle).
+                    const double userLambda = (regularizationVal > 0.0)
+                                              ? regularizationVal : 0.0;
+                    if (userLambda > 0.0)
                     {
                         for (unsigned dd = 0; dd < poseCount; ++dd)
-                            linMat(dd, dd) += currentLambda;
-                        appliedLambda = currentLambda;
+                            linMat(dd, dd) += userLambda;
                     }
 
-                    if (exposeDataVal > 2 && currentLambda > 0.0)
+                    if (exposeDataVal > 2 && userLambda > 0.0)
                         linMat.show(thisName, "Activations + λI");
 
                     bool usedCholesky = false;
                     bool solved       = false;
                     int  lastSingular = -1;
-                    int  retryCount   = 0;
 
-                    for (int retry = 0; retry <= MAX_RETRIES && !solved; ++retry)
+                    // Tier 1 — Cholesky. Attempted only in Auto mode
+                    // (solverMethodVal == 0) when the last successful
+                    // method was Cholesky (sticky cache via
+                    // prevSolverMethodVal / lastSolveMethod). Mirrors
+                    // Oracle cpp:1865-1888 behaviour exactly.
+                    if (solverMethodVal == 0 && lastSolveMethod == 0)
                     {
-                        // Tier 1 — Cholesky. On retry > 0 we always re-
-                        // attempt regardless of lastSolveMethod cache:
-                        // a kernel that was non-SPD at λ_0 may become
-                        // SPD at λ_0 × 10 (the larger diagonal pushes
-                        // eigenvalues positive).
-                        const bool tryCholesky =
-                            (solverMethodVal == 0) &&
-                            (retry > 0 || lastSolveMethod == 0);
-
-                        if (tryCholesky)
+                        BRMatrix chol = linMat;
+                        if (chol.cholesky())
                         {
-                            BRMatrix chol = linMat;
-                            if (chol.cholesky())
+                            std::vector<double> x;
+                            for (c = 0; c < solveCount; c ++)
                             {
-                                std::vector<double> x;
-                                for (c = 0; c < solveCount; c ++)
-                                {
-                                    chol.choleskySolve(yCols[c], x);
-                                    for (i = 0; i < poseCount; i ++)
-                                        wMat(i, c) = x[i];
-                                }
-                                usedCholesky    = true;
-                                lastSolveMethod = 0;
-                                solved          = true;
-                                retryCount      = retry;
-                                if (exposeDataVal > 2)
-                                    MGlobal::displayInfo(
-                                        thisName + MString(": solver = Cholesky"));
-                                break;
+                                chol.choleskySolve(yCols[c], x);
+                                for (i = 0; i < poseCount; i ++)
+                                    wMat(i, c) = x[i];
                             }
+                            usedCholesky    = true;
+                            lastSolveMethod = 0;
+                            solved          = true;
+                            if (exposeDataVal > 2)
+                                MGlobal::displayInfo(
+                                    thisName + MString(
+                                        ": solver = Cholesky"));
                         }
+                    }
 
-                        // Tier 2 — GE fallback. Per-dim solve is
-                        // unavoidable here because BRMatrix::solve is
-                        // destructive. We accumulate into a trial wMat
-                        // and commit only on full success so a partial
-                        // solve cannot pollute wMat across retries.
+                    // Tier 2 — GE fallback. Per-dim solve uses a trial
+                    // wMat so a partial solve cannot pollute wMat on
+                    // mid-stream singularity. Mirrors Oracle
+                    // cpp:1893-1919 behaviour.
+                    if (!solved)
+                    {
                         bool geOk = true;
                         BRMatrix wMatTrial;
                         wMatTrial.setSize(poseCount, solveCount);
@@ -2066,69 +2059,41 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                             wMat            = wMatTrial;
                             lastSolveMethod = 1;
                             solved          = true;
-                            retryCount      = retry;
                             if (exposeDataVal > 2)
                                 MGlobal::displayInfo(
                                     thisName + MString(
                                         ": solver = GE (fallback)"));
-                            break;
                         }
-
-                        // Both tiers failed — bump λ for next retry.
-                        // Never let currentLambda stagnate at < FLOOR.
-                        double nextLambda;
-                        if (currentLambda <= 0.0)
-                            nextLambda = LAMBDA_FLOOR;
-                        else if (currentLambda < LAMBDA_FLOOR)
-                            nextLambda = LAMBDA_FLOOR;
-                        else
-                            nextLambda = currentLambda * 10.0;
-
-                        if (nextLambda > LAMBDA_CEIL)
-                            break;  // give up, fall through to error
-
-                        // Inject delta into linMat diagonal.
-                        const double delta = nextLambda - appliedLambda;
-                        for (unsigned dd = 0; dd < poseCount; ++dd)
-                            linMat(dd, dd) += delta;
-                        appliedLambda = nextLambda;
-                        currentLambda = nextLambda;
                     }
 
                     if (!solved)
                     {
                         MGlobal::displayInfo("");
-                        MGlobal::displayInfo(thisName + MString(": RBF Error"));
                         MGlobal::displayInfo(
-                            MString("Auto-adaptive λ escalated to ") +
-                            currentLambda + " but K matrix remained singular.");
+                            thisName + MString(": RBF Error"));
+                        MGlobal::displayInfo(
+                            MString("K matrix singular at user lambda = ") +
+                            userLambda + ", kernel index = " +
+                            kernelVal + ".");
                         if (lastSingular >= 0)
                             MGlobal::displayInfo(
                                 MString("Last singular pose index: ") +
                                 lastSingular);
                         MGlobal::displayInfo(
-                            "The pose set is genuinely degenerate "
-                            "(two or more poses are exact duplicates "
-                            "in the encoded driver space).");
+                            "The pose set may contain duplicate or "
+                            "near-duplicate poses in the encoded driver "
+                            "space, OR the chosen kernel produces a "
+                            "near-singular K at this lambda.");
                         matDebug.show(thisName,
                             "Pose Input Values (Poses appear in rows)");
                         MGlobal::displayError(
-                            "RBF decomposition failed even at λ=1.0. "
-                            "Remove duplicate poses or reduce pose redundancy.");
+                            MString("RBF decomposition failed at "
+                                    "kernel index ") + kernelVal +
+                            " with lambda " + userLambda +
+                            "; consider increasing regularization or "
+                            "removing redundant poses "
+                            "(M_P0_KERNEL_SWITCH_ROLLBACK_2).");
                         return MStatus::kFailure;
-                    }
-
-                    // M_P0_AUTO_ADAPTIVE_LAMBDA: surface the auto-bump
-                    // to the TD so they can tune λ permanently.
-                    if (retryCount > 0)
-                    {
-                        MGlobal::displayWarning(thisName + MString(
-                            ": auto-adaptive regularization escalated λ from ") +
-                            userLambda + " to " + currentLambda +
-                            " (" + retryCount +
-                            " retries) to stabilize a near-singular K matrix. "
-                            "Consider raising 'Regularization (λ)' to this "
-                            "value or reducing pose redundancy.");
                     }
 
                     if (exposeDataVal > 2)
