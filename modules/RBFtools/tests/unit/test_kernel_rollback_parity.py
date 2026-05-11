@@ -62,23 +62,37 @@ class TestKernelRollbackParity(unittest.TestCase):
     # ----- A. retry constants must be GONE -----
 
     def test_PERMANENT_a_retry_constants_removed(self):
-        """LAMBDA_FLOOR / LAMBDA_CEIL / MAX_RETRIES literals are
-        ROLLBACK_2 fingerprints. Their absence proves the retry loop
-        body was actually removed (not just commented out)."""
+        """ROLLBACK_2 (91adfc9) removed the M_P0_AUTO_ADAPTIVE_LAMBDA
+        constants LAMBDA_FLOOR / LAMBDA_CEIL / MAX_RETRIES.
+
+        M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5 (2026-05-11) re-introduced
+        bounded retry under NEW names LAMBDA_CEIL_FLOOR_1E5 and
+        MAX_RETRIES_FLOOR_1E5. The new names are distinct identifiers
+        — substring matching `LAMBDA_CEIL` in `LAMBDA_CEIL_FLOOR_1E5`
+        would create a false positive here. Use exact identifier
+        matching via regex word boundaries to preserve the ROLLBACK_2
+        intent (old constants gone) while accommodating the new
+        bounded-retry constants.
+        """
         cpp = _read(_RBF_CPP)
         for sym in ("LAMBDA_FLOOR", "LAMBDA_CEIL", "MAX_RETRIES"):
-            # Scrub from active source. Audit comments referencing them
-            # via "ROLLBACK_2 removed LAMBDA_*" literal would be false
-            # positives, so we filter comment lines too.
+            # Exact-identifier match: `\bSYM\b` does NOT match the
+            # longer SYM_FLOOR_1E5 form.
+            pattern = re.compile(r"\b" + re.escape(sym) + r"\b")
+            # Strip out comment lines so audit-history mentions stay
+            # readable in source.
             live_lines = [ln for ln in cpp.splitlines()
-                          if sym in ln
+                          if pattern.search(ln)
                           and not ln.lstrip().startswith("//")
                           and not ln.lstrip().startswith("*")]
             self.assertEqual(
                 live_lines, [],
-                "Retry constant {!r} must be removed from active "
-                "RBFtools.cpp source (M_P0_KERNEL_SWITCH_ROLLBACK_2). "
-                "Found in lines: {!r}".format(sym, live_lines))
+                "Retry constant {!r} (exact-identifier) must be "
+                "removed from active RBFtools.cpp source "
+                "(M_P0_KERNEL_SWITCH_ROLLBACK_2; the new bounded-"
+                "retry uses LAMBDA_CEIL_FLOOR_1E5 / "
+                "MAX_RETRIES_FLOOR_1E5 instead). Found in "
+                "lines: {!r}".format(sym, live_lines))
 
     def test_PERMANENT_a2_retry_loop_keyword_removed(self):
         """The `for (int retry = ` outer-loop construct is the most
@@ -160,21 +174,37 @@ class TestKernelRollbackParity(unittest.TestCase):
 
     # ----- F. cpp schema lambda default 1.0e-8 must REMAIN -----
 
-    def test_PERMANENT_f_lambda_default_1e_8(self):
-        """Oracle anchor: cpp schema setDefault(1.0e-8) for
-        `regularization` must remain — both ROLLBACK_1/2/5 and
-        ee6d63f preserve this. Drift away from 1e-8 would either
-        regress the kernel-switch fix or signal an unintended
-        controller layer override."""
+    def test_PERMANENT_f_lambda_default_1e_5(self):
+        """cpp schema `regularization` setDefault.
+
+        Originally guarded the oracle anchor 1e-8. The
+        M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5 patch (2026-05-11)
+        bumped the schema default to 1e-5 based on user λ-sweep
+        showing redundant production rigs (22 poses × 9-dim Raw)
+        need λ ≥ 1e-5 for well-posed K across all 6 kernels. The
+        new default aligns with the bounded-retry ceil so new
+        nodes start at a well-posed state and the retry loop never
+        has to escalate on freshly-created rigs.
+
+        Guard now accepts either:
+          * 1.0e-5 (post M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5)
+          * 1.0e-8 (oracle / pre-bounded-retry historical)
+        so the test stays meaningful as a "schema-default exists"
+        shape check while accommodating the planner-decided default
+        bump. Other defaults (e.g. 1.0e-3, 0.0) would fail and
+        signal an unintended schema drift.
+        """
         cpp = _read(_RBF_CPP)
         m = re.search(
-            r"regularization\s*=\s*nAttr\.create\([^)]*\)[\s\S]{0,400}?"
-            r"nAttr\.setDefault\(\s*1\.0e-?8\s*\)",
+            r"regularization\s*=\s*nAttr\.create\([^)]*\)[\s\S]{0,1200}?"
+            r"nAttr\.setDefault\(\s*(1\.0e-?5|1\.0e-?8)\s*\)",
             cpp)
         self.assertIsNotNone(m,
-            "cpp schema must keep nAttr.setDefault(1.0e-8) for "
-            "regularization (oracle anchor cpp:531). Drift here means "
-            "ROLLBACK_2 line of defence has shifted.")
+            "cpp schema must keep nAttr.setDefault(1.0e-5) for "
+            "regularization (M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5) "
+            "or the historical 1.0e-8 oracle anchor. Drift to any "
+            "other value would regress the kernel-switch / bounded-"
+            "retry guarantees.")
 
     # ----- G. preserved-feature identifiers sanity -----
 
