@@ -1948,7 +1948,9 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
 
                     // -------------------------------------------------
                     // Audit chain at this solver block (newest first):
-                    //   M_P0_LAMBDA_RETRY_TIERED_CEIL (this commit)
+                    //   M_P0_RBF_POLYNOMIAL_AUGMENTATION (this commit)
+                    //     supersedes ↑
+                    //   M_P0_LAMBDA_RETRY_TIERED_CEIL (4a3cae4)
                     //     supersedes ↑
                     //   M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5 (8e7a6d3)
                     //     supersedes ↑
@@ -1957,123 +1959,126 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     //   M_P0_AUTO_ADAPTIVE_LAMBDA (156af4c) +
                     //     M_P0_LAMBDA_CEIL_TIGHTEN (ee6d63f)
                     //
-                    // M_P0_LAMBDA_RETRY_TIERED_CEIL (2026-05-11,
-                    // supersedes M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5
-                    // [8e7a6d3 / b16d117] uniform 1e-5 ceil):
+                    // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11):
+                    // mathematically-correct CPD-kernel treatment via
+                    // polynomial augmentation. Supersedes the bounded /
+                    // tiered λ retry approach (8e7a6d3 + b16d117 +
+                    // 4a3cae4 + fd5607b) that was a band-aid over a
+                    // fundamental math defect.
                     //
-                    // Per-kernel-class ceil based on K-diagonal scale.
-                    // Strictly-PD kernels (Linear / Gaussian 1 /
-                    // Gaussian 2; kernelVal ∈ {0, 1, 2}) have
-                    // K[i,i] = O(1), so λ ∈ [1e-8, 1e-5] is the
-                    // standard well-conditioned RBF training range
-                    // (Schaback 1995, Wendland 2004) and 1e-5 ceil
-                    // is sufficient. Conditionally-PD kernels (TPS /
-                    // MQB / IMQB; kernelVal ∈ {3, 4, 5}) have
-                    // K[i,i] = O(σ) or O(1/σ) — at typical σ scales
-                    // K-diagonal is 100× smaller, so 1e-5 λ is too
-                    // weak for an equivalent regularization effect
-                    // and the matrix stays singular. Empirical
-                    // evidence (Planner-verified user λ-sweep on the
-                    // 22-pose × 9-dim Raw rig):
+                    // Why the previous retry-loop approach was wrong:
+                    //   - Conditionally-positive-definite (CPD) kernels
+                    //     — Linear / Thin Plate / Multi-Quadric /
+                    //     Inverse Multi-Quadric — have a null-space in
+                    //     the RBF interpolation operator K. No amount
+                    //     of Tikhonov regularization (K + λI) eliminates
+                    //     this null-space; raising λ only damps the
+                    //     null-space contribution while distorting the
+                    //     well-defined part. Result: visible joint
+                    //     drift at the training-point invariant even
+                    //     when the solver "succeeds" at the ceil λ.
+                    //   - User λ = 1e-3 + MQB still drifted on the
+                    //     reproducer rig: empirical confirmation that
+                    //     λ ceil is the wrong dial.
                     //
-                    //   λ=1e-5 + Gaussian 2 → solves, Δ = -21.55 ✓
-                    //   λ=1e-5 + MQB        → kFailure ✗
-                    //                         (this commit fixes)
-                    //   λ=1e-3 + MQB        → expected to solve
+                    // Correct math (Wendland 2004 §10, Schaback 1995,
+                    // Wahba 1990): augment the system with a polynomial
+                    // basis P of degree (m - 1) where m is the kernel's
+                    // CPD order. The augmented system
                     //
-                    // The previous 8e7a6d3 / b16d117 uniform 1e-5 ceil
-                    // therefore solved Gaussian-class kernels but left
-                    // TPS / MQB / IMQB still kFailure-ing at the user's
-                    // typical λ — half a fix. The tiered ceil here
-                    // solves the conditionally-PD kernels too while
-                    // keeping strictly-PD kernel behaviour identical
-                    // to 8e7a6d3 (their 1e-5 ceil unchanged).
+                    //   [ K + λI   P  ] [ w ]   [ y ]
+                    //   [ P^T      0  ] [ a ] = [ 0 ]
                     //
-                    // Why ceil = 1e-3 (conditionally-PD) is safe:
-                    //   * matches the historical M_P0_LAMBDA_CEIL_TIGHTEN
-                    //     ceil that worked in production for these
-                    //     kernels for weeks before ROLLBACK_2; the
-                    //     "numerical garbage at 1e-3 ceil" ROLLBACK_2
-                    //     complaint was specific to dense pose sets
-                    //     where the math required tighter regularization,
-                    //     NOT a generic 1e-3 problem.
-                    //   * Training-point bias at λ=1e-3 on a
-                    //     conditionally-PD kernel with K[i,i] ~ O(0.01)
-                    //     is ~10% — visible but acceptable when the
-                    //     alternative is total kFailure; the bounded
-                    //     retry warning surfaces this so the TD knows
-                    //     to manually raise λ for tighter pose data.
-                    //   * The honest-failure philosophy is preserved:
-                    //     a pose set that is STILL singular at the
-                    //     tiered ceil is genuinely degenerate (e.g.
-                    //     duplicate poses; M_P0_DUPLICATE_POSE_DETECT
-                    //     catches these earlier).
+                    // is invertible (when P has full column rank, i.e.
+                    // poses span general position) and provides the
+                    // unique reproducing-kernel-Hilbert-space solution.
                     //
-                    // Retry chain:
-                    //   strictly-PD: max 4 retries, λ_user → … → 1e-5
-                    //   conditionally-PD: max 6 retries, λ_user → … → 1e-3
-                    //   E.g. user λ = 1e-8 + MQB:
-                    //     1e-8 → 1e-7 → 1e-6 → 1e-5 → 1e-4 → 1e-3.
+                    // Inference:
+                    //   ŷ(x) = Σ_j w_j · φ(d(x, p_j); σ) + Σ_k a_k · p_k(x)
                     //
-                    // λ injection is INCREMENTAL: each retry adds
-                    // (new − applied) to the diagonal so linMat is
-                    // never rebuilt mid-loop.
+                    // Polynomial dim per kernel (getPolynomialDim):
+                    //   Gaussian 1 / Gaussian 2  (strictly PD)     → 0
+                    //   Linear  / MQB / IMQB     (CPD order m = 1) → 1
+                    //   Thin Plate               (CPD order m = 2) → 1 + driverDim
+                    //
+                    // Solver branches on polyDim:
+                    //   polyDim == 0 (Gaussian): K + λI is SPD;
+                    //     try Cholesky tier 1 then GE tier 2 single-pass
+                    //     (matches Oracle's two-tier dispatch).
+                    //   polyDim > 0  (CPD): augmented (N + polyDim) ×
+                    //     (N + polyDim) saddle-point matrix is indefinite
+                    //     by construction (bottom-right 0 block), so
+                    //     Cholesky is mathematically inapplicable; GE
+                    //     only, single-pass per output column. The
+                    //     trial-wMat pattern is preserved so a per-
+                    //     column singularity cannot pollute partial
+                    //     state.
+                    //
+                    // Failure → kFailure + displayError. Honest failure
+                    // is preserved at the augmented system level: if
+                    // (K + λI, P) jointly fail to be invertible, the
+                    // pose set is genuinely degenerate (duplicate poses
+                    // or all poses on a hyperplane → P rank-deficient)
+                    // and the rigger needs to know rather than receive
+                    // numerical garbage.
+                    //
+                    // The retry-loop approach is FULLY REMOVED:
+                    //   - LAMBDA_CEIL_TIERED / MAX_RETRIES_TIERED constants
+                    //     are gone.
+                    //   - kIsStrictlyPDKernel ternary gate gone.
+                    //   - while-loop retry block gone.
+                    //   - Single λ injection at user value; correct
+                    //     CPD math at any λ ≥ 0.
                     //
                     // See docs/排查/M_P0_KERNEL_SWITCH_ROLLBACK_index.md
-                    // §0.5 + this commit's message for the λ-sweep
-                    // empirical data + audit trail (8e7a6d3 → b16d117 →
-                    // this commit's tiered ceil).
+                    // §0.5 + this commit's message for the full audit
+                    // trail (ROLLBACK_2 → 8e7a6d3 → b16d117 → 4a3cae4 →
+                    // fd5607b → this commit).
                     // -------------------------------------------------
 
-                    const bool kIsStrictlyPDKernel =
-                        (kernelVal == 0
-                         || kernelVal == 1
-                         || kernelVal == 2);
-                    const double LAMBDA_CEIL_TIERED =
-                        kIsStrictlyPDKernel ? 1.0e-5 : 1.0e-3;
-                    const int MAX_RETRIES_TIERED =
-                        kIsStrictlyPDKernel ? 4 : 6;
+                    // Driver dim is matPoses' column count post-encoding
+                    // (= effectiveInDim for Generic mode; for Matrix
+                    // mode it is 4 * driverCount per cpp:2279).
+                    const int driverDim =
+                        (int)matPoses.getColSize();
+                    const int polyDim =
+                        getPolynomialDim(kernelVal, driverDim);
 
                     wMat = BRMatrix();
                     wMat.setSize(poseCount, solveCount);
+                    polyMat = BRMatrix();
+                    // setSize must be > 0 on both axes; allocate a 1 ×
+                    // solveCount sentinel when polyDim == 0 (Gaussian)
+                    // so the matrix is constructible but never read
+                    // by the inference path (polyDim == 0 branch in
+                    // getPoseWeights skips the polynomial term).
+                    polyMat.setSize(
+                        (unsigned)(polyDim > 0 ? polyDim : 1),
+                        solveCount);
 
                     const double userLambda = (regularizationVal > 0.0)
                                               ? regularizationVal : 0.0;
-                    double currentLambda = userLambda;
-                    double appliedLambda = 0.0;
-
-                    // Initial injection of the user's λ.
-                    if (currentLambda > 0.0)
+                    if (userLambda > 0.0)
                     {
                         for (unsigned dd = 0; dd < poseCount; ++dd)
-                            linMat(dd, dd) += currentLambda;
-                        appliedLambda = currentLambda;
+                            linMat(dd, dd) += userLambda;
                     }
 
-                    if (exposeDataVal > 2 && currentLambda > 0.0)
+                    if (exposeDataVal > 2 && userLambda > 0.0)
                         linMat.show(thisName, "Activations + λI");
 
-                    bool usedCholesky = false;
                     bool solved       = false;
                     int  lastSingular = -1;
-                    int  retryCount   = 0;
 
-                    while (!solved
-                           && retryCount <= MAX_RETRIES_TIERED
-                           && currentLambda <= LAMBDA_CEIL_TIERED)
+                    if (polyDim == 0)
                     {
-                        // Tier 1 — Cholesky. Attempted only in Auto
-                        // mode (solverMethodVal == 0) when the last
-                        // successful method was Cholesky. On retry > 0
-                        // we always re-attempt Cholesky regardless of
-                        // sticky cache: a kernel that was non-SPD at
-                        // λ_0 may become SPD at λ_0 × 10 (the larger
-                        // diagonal pushes eigenvalues positive).
-                        const bool tryCholesky =
-                            (solverMethodVal == 0) &&
-                            (retryCount > 0 || lastSolveMethod == 0);
-
-                        if (tryCholesky)
+                        // -------------------------------------------------
+                        // Strictly-PD path (Gaussian). Single-pass
+                        // Cholesky tier 1 / GE tier 2 dispatch — Oracle
+                        // RBFtools cpp:1865-1925 behaviour, no retry.
+                        // -------------------------------------------------
+                        if (solverMethodVal == 0
+                            && lastSolveMethod == 0)
                         {
                             BRMatrix chol = linMat;
                             if (chol.cholesky())
@@ -2085,30 +2090,117 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                     for (i = 0; i < poseCount; i ++)
                                         wMat(i, c) = x[i];
                                 }
-                                usedCholesky    = true;
                                 lastSolveMethod = 0;
                                 solved          = true;
                                 if (exposeDataVal > 2)
                                     MGlobal::displayInfo(
                                         thisName + MString(
                                             ": solver = Cholesky"));
-                                break;
                             }
                         }
+                        if (!solved)
+                        {
+                            bool geOk = true;
+                            BRMatrix wMatTrial;
+                            wMatTrial.setSize(poseCount, solveCount);
+                            for (c = 0; c < solveCount; c ++)
+                            {
+                                BRMatrix solveMat = linMat;
+                                std::vector<double> w(poseCount, 0.0);
+                                int singularIndex = -1;
+                                bool ok = solveMat.solve(
+                                    yCols[c], w.data(), singularIndex);
+                                if (!ok)
+                                {
+                                    geOk = false;
+                                    lastSingular = singularIndex;
+                                    break;
+                                }
+                                for (i = 0; i < poseCount; i ++)
+                                    wMatTrial(i, c) = w[i];
+                            }
+                            if (geOk)
+                            {
+                                wMat            = wMatTrial;
+                                lastSolveMethod = 1;
+                                solved          = true;
+                                if (exposeDataVal > 2)
+                                    MGlobal::displayInfo(
+                                        thisName + MString(
+                                            ": solver = GE (fallback)"));
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // -------------------------------------------------
+                        // CPD path (Linear / TPS / MQB / IMQB).
+                        // Build (N + polyDim) × (N + polyDim) augmented
+                        // saddle-point matrix
+                        //   A = [ K + λI   P  ]
+                        //       [ P^T      0  ]
+                        // GE-only solve per output column (saddle-point
+                        // matrices are indefinite by construction; the
+                        // bottom-right 0 block guarantees Cholesky
+                        // would fail).
+                        // -------------------------------------------------
+                        const unsigned augN =
+                            poseCount + (unsigned)polyDim;
+                        BRMatrix A;
+                        A.setSize(augN, augN);
+                        // Top-left N × N block: K + λI (copy from
+                        // linMat which already has the λI injected).
+                        for (unsigned ai = 0; ai < poseCount; ++ai)
+                            for (unsigned aj = 0; aj < poseCount; ++aj)
+                                A(ai, aj) = linMat(ai, aj);
+                        // P block: A(i, N+k) = polyBasis(matPoses row i)[k]
+                        // and its transpose A(N+k, i) = same.
+                        std::vector<double> p_row;
+                        for (unsigned ai = 0; ai < poseCount; ++ai)
+                        {
+                            polyBasis(matPoses.getRowVector(ai),
+                                      polyDim, p_row);
+                            for (int pk = 0; pk < polyDim; ++pk)
+                            {
+                                A(ai, poseCount + (unsigned)pk) =
+                                    p_row[(size_t)pk];
+                                A(poseCount + (unsigned)pk, ai) =
+                                    p_row[(size_t)pk];
+                            }
+                        }
+                        // Bottom-right polyDim × polyDim 0 block is
+                        // already zero from BRMatrix::setSize.
 
-                        // Tier 2 — GE fallback. Per-dim solve uses a
-                        // trial wMat so a partial solve cannot pollute
-                        // wMat on mid-stream singularity.
+                        if (exposeDataVal > 2)
+                            A.show(thisName,
+                                   "Augmented (K+lambdaI, P; P^T, 0)");
+
+                        // Per-column GE solve with trial-wMat /
+                        // trial-polyMat staging (mirrors the strictly-PD
+                        // path's pollution-safety).
                         bool geOk = true;
                         BRMatrix wMatTrial;
                         wMatTrial.setSize(poseCount, solveCount);
+                        BRMatrix polyMatTrial;
+                        polyMatTrial.setSize((unsigned)polyDim, solveCount);
+                        std::vector<double> y_aug(augN, 0.0);
+                        std::vector<double> w_aug(augN, 0.0);
                         for (c = 0; c < solveCount; c ++)
                         {
-                            BRMatrix solveMat = linMat;
-                            std::vector<double> w(poseCount, 0.0);
+                            BRMatrix solveMat = A;
+                            // y_aug[0..N-1] = yCols[c]; y_aug[N..] = 0
+                            for (unsigned ai = 0; ai < poseCount; ++ai)
+                                y_aug[ai] =
+                                    (ai < yCols[c].size())
+                                    ? yCols[c][ai] : 0.0;
+                            for (unsigned k = 0;
+                                 k < (unsigned)polyDim; ++k)
+                                y_aug[poseCount + k] = 0.0;
+                            std::fill(w_aug.begin(),
+                                      w_aug.end(), 0.0);
                             int singularIndex = -1;
                             bool ok = solveMat.solve(
-                                yCols[c], w.data(), singularIndex);
+                                y_aug, w_aug.data(), singularIndex);
                             if (!ok)
                             {
                                 geOk = false;
@@ -2116,45 +2208,24 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                 break;
                             }
                             for (i = 0; i < poseCount; i ++)
-                                wMatTrial(i, c) = w[i];
+                                wMatTrial(i, c) = w_aug[i];
+                            for (int pk = 0; pk < polyDim; ++pk)
+                                polyMatTrial((unsigned)pk, c) =
+                                    w_aug[poseCount + (unsigned)pk];
                         }
                         if (geOk)
                         {
                             wMat            = wMatTrial;
+                            polyMat         = polyMatTrial;
                             lastSolveMethod = 1;
                             solved          = true;
                             if (exposeDataVal > 2)
                                 MGlobal::displayInfo(
                                     thisName + MString(
-                                        ": solver = GE (fallback)"));
-                            break;
+                                        ": solver = augmented GE "
+                                        "(polyDim ") +
+                                    polyDim + ")");
                         }
-
-                        // Both tiers failed at currentLambda. Step λ
-                        // up (×10) and inject delta into the diagonal.
-                        // Never let currentLambda stagnate at 0.0.
-                        double nextLambda;
-                        if (currentLambda <= 0.0)
-                            nextLambda = LAMBDA_CEIL_TIERED * 1.0e-3;
-                        else
-                            nextLambda = currentLambda * 10.0;
-
-                        if (nextLambda > LAMBDA_CEIL_TIERED)
-                            nextLambda = LAMBDA_CEIL_TIERED;
-
-                        // If we are already at ceil and still failing,
-                        // do not loop forever: break out so the
-                        // kFailure path can fire with currentLambda
-                        // showing the ceil value we attempted.
-                        if (nextLambda <= currentLambda)
-                            break;
-
-                        const double delta = nextLambda - appliedLambda;
-                        for (unsigned dd = 0; dd < poseCount; ++dd)
-                            linMat(dd, dd) += delta;
-                        appliedLambda = nextLambda;
-                        currentLambda = nextLambda;
-                        retryCount ++;
                     }
 
                     if (!solved)
@@ -2163,44 +2234,31 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         MGlobal::displayInfo(
                             thisName + MString(": RBF Error"));
                         MGlobal::displayInfo(
-                            MString("K matrix singular even after "
-                                    "bounded retry. Final lambda = ") +
-                            currentLambda + ", kernel index = " +
-                            kernelVal + ", retries = " +
-                            retryCount + ".");
+                            MString("RBF system singular at user "
+                                    "lambda = ") + userLambda +
+                            ", kernel index = " + kernelVal +
+                            ", polyDim = " + polyDim + ".");
                         if (lastSingular >= 0)
                             MGlobal::displayInfo(
                                 MString("Last singular pose index: ") +
                                 lastSingular);
                         MGlobal::displayInfo(
-                            "The pose set is genuinely degenerate "
-                            "(two or more poses are exact duplicates "
-                            "in the encoded driver space).");
+                            "The pose set is genuinely degenerate: "
+                            "either two or more poses are exact "
+                            "duplicates in the encoded driver space, "
+                            "or (for CPD kernels) the poses lie on a "
+                            "hyperplane making the polynomial basis "
+                            "rank-deficient.");
                         matDebug.show(thisName,
                             "Pose Input Values (Poses appear in rows)");
                         MGlobal::displayError(
                             MString("RBF decomposition failed at "
                                     "kernel index ") + kernelVal +
-                            " even at lambda = " + currentLambda +
-                            "; remove duplicate poses or pick a "
-                            "different kernel "
-                            "(M_P0_LAMBDA_RETRY_TIERED_CEIL).");
+                            " with polyDim = " + polyDim +
+                            "; remove duplicate poses or move poses "
+                            "off a common hyperplane "
+                            "(M_P0_RBF_POLYNOMIAL_AUGMENTATION).");
                         return MStatus::kFailure;
-                    }
-
-                    // Surface the auto-bump to the TD so they can
-                    // tune λ permanently in the UI if they wish.
-                    // Threshold > 0 means we did at least one retry.
-                    if (retryCount > 0)
-                    {
-                        MGlobal::displayWarning(thisName + MString(
-                            ": bounded lambda retry escalated from ") +
-                            userLambda + " to " + currentLambda +
-                            " (" + retryCount + " retries, ceil " +
-                            LAMBDA_CEIL_TIERED +
-                            ") to stabilize K. Consider raising "
-                            "'Regularization (lambda)' to this value "
-                            "or reducing pose redundancy.");
                     }
 
                     if (exposeDataVal > 2)
@@ -2213,6 +2271,15 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
 
                 bool qwaAnyClipped = false;
                 bool qwaAnyDegenerate = false;
+                // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): pass
+                // polyMat + polyDim so getPoseWeights can add the
+                // polynomial term to CPD-kernel inference. polyDim is
+                // re-derived from kernelVal + matPoses cols here so
+                // the inference side stays consistent with the
+                // training-side dispatch above.
+                const int polyDimInfer =
+                    getPolynomialDim(kernelVal,
+                                     (int)matPoses.getColSize());
                 getPoseWeights(weightsArray,
                                matPoses,
                                inputNorms,
@@ -2229,7 +2296,9 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                quatGroupStarts,
                                isQuatMember,
                                qwaAnyClipped,
-                               qwaAnyDegenerate);
+                               qwaAnyDegenerate,
+                               polyMat,             // M_P0_RBF_POLYNOMIAL_AUGMENTATION
+                               polyDimInfer);
                 if (qwaAnyClipped && !qwaClippedWarningIssued)
                 {
                     MGlobal::displayWarning(thisName + MString(
@@ -4647,6 +4716,61 @@ std::vector<double> RBFtools::normalizeVector(std::vector<double> vec, std::vect
 
     return vec;
 }
+
+
+//
+// M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): polynomial dimension
+// for the given kernel. CPD kernels need polynomial augmentation of
+// degree (m - 1) where m is the kernel's conditional-positive-definite
+// order. Gaussian variants are strictly PD and need no augmentation.
+//
+// Kernel id (per cpp:212-218 schema):
+//   0 = Linear                            CPD m = 1 → polyDim = 1
+//   1 = Gaussian 1   (strictly PD)        polyDim = 0
+//   2 = Gaussian 2   (strictly PD)        polyDim = 0
+//   3 = Thin Plate                        CPD m = 2 → polyDim = 1 + d
+//   4 = Multi-Quadric Biharmonic (MQB)    CPD m = 1 → polyDim = 1
+//   5 = Inverse Multi-Quadric Biharmonic
+//                                  (IMQB) CPD m = 1 → polyDim = 1
+//
+// User λ-sweep + visual repro confirmed kernels 0/3/4/5 all need
+// augmentation under dense / redundant pose sets — the uniform 1e-5
+// (8e7a6d3) and tiered 1e-3 (4a3cae4) ceil attempts were band-aids
+// over a math defect. Polynomial augmentation is the mathematically
+// correct treatment of CPD kernels per Wendland 2004 §10, Schaback
+// 1995, and Wahba 1990.
+//
+int RBFtools::getPolynomialDim(short kernelType, int driverDim)
+{
+    if (kernelType == 1 || kernelType == 2) return 0;   // Gaussian
+    if (kernelType == 3) return 1 + driverDim;          // TPS
+    return 1;                                           // Linear / MQB / IMQB
+}
+
+
+//
+// M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): evaluate the
+// polynomial basis at the given (normalised) input. Output is
+//   polyDim == 0   : empty
+//   polyDim == 1   : [1.0]
+//   polyDim > 1    : [1.0, vec[0], vec[1], ..., vec[polyDim - 2]]
+//
+// The same basis is used for (a) filling the P block of the augmented
+// training matrix at each pose row, and (b) the polynomial term of
+// inference at the current driver vector. Coordinate frame match
+// (both normalised) is the caller's responsibility.
+//
+void RBFtools::polyBasis(const std::vector<double> &vec, int polyDim,
+                         std::vector<double> &out)
+{
+    out.assign((size_t)(polyDim > 0 ? polyDim : 0), 0.0);
+    if (polyDim == 0) return;
+    out[0] = 1.0;
+    if (polyDim == 1) return;
+    const int linearTerms = polyDim - 1;
+    for (int i = 0; i < linearTerms && (size_t)i < vec.size(); ++i)
+        out[1 + i] = vec[i];
+}
 //
 // Description:
 //      Calculate the individual output weights based on the current
@@ -4686,7 +4810,9 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
                                   const std::vector<int> &quatGroupStarts,
                                   const std::vector<bool> &isQuatMember,
                                   bool &qwaAnyClippedOut,
-                                  bool &qwaAnyDegenerateOut)
+                                  bool &qwaAnyDegenerateOut,
+                                  const BRMatrix &polyMatArg,
+                                  int polyDim)
 {
     unsigned int poseCount = poses.getRowSize();
     unsigned int valueCount = out.length();
@@ -4783,6 +4909,38 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
                     }
                 }
             }
+        }
+    }
+
+    // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): polynomial term
+    // of CPD-kernel inference. Adds Σ_k polyMat(k, j) * p_k(driver)
+    // to each scalar output channel. polyDim == 0 (Gaussian) skips
+    // this loop entirely — bit-identical to the pre-augmentation
+    // single-kernel path.
+    //
+    // Coordinate frame match: the training-side P matrix was filled
+    // from matPoses rows, which are post-normalizeColumns (cpp:2942
+    // in getPoseData). Inference-side polyBasis is evaluated on the
+    // normalised driver (line above this comment block: ``driver =
+    // normalizeVector(driver, norms);``). Both sides share the same
+    // coordinate frame so the augmented system's [w; a] solution
+    // generalises correctly to the inference call.
+    //
+    // Quat-group dimensions (isQuatMember[j] == true) skip the
+    // polynomial accumulate for the same reason they skipped the
+    // RBF accumulate above — those dimensions are owned by the QWA
+    // post-loop below and must not be double-contributed.
+    if (polyDim > 0)
+    {
+        std::vector<double> p_x;
+        polyBasis(driver, polyDim, p_x);
+        for (j = 0; j < valueCount; ++j)
+        {
+            if (haveMask && isQuatMember[j]) continue;
+            double polySum = 0.0;
+            for (int k = 0; k < polyDim; ++k)
+                polySum += polyMatArg((unsigned)k, j) * p_x[(size_t)k];
+            out[j] += polySum;
         }
     }
 

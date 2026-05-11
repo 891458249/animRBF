@@ -250,6 +250,33 @@ public:
                                short kernelType);
     static double interpolateRbf(double value, double width, short kernelType);
     static std::vector<double> normalizeVector(std::vector<double> vec, std::vector<double> factors);
+    // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): polynomial-
+    // augmentation helpers for the conditionally-positive-definite
+    // (CPD) kernel family. Mathematically, kernels like Thin Plate,
+    // Multi-Quadric, and Inverse Multi-Quadric are CPD of order m,
+    // meaning the RBF interpolation system K w = y is rank-deficient
+    // without a polynomial augmentation of degree (m - 1). The
+    // augmented system
+    //   [ K + λI   P ] [ w ]   [ y ]
+    //   [ P^T      0 ] [ a ] = [ 0 ]
+    // is invertible (when P has full column rank, i.e. poses are in
+    // general position). The polynomial basis P is the trailing
+    // matrix of polyBasis() evaluated at every training pose.
+    //
+    // getPolynomialDim returns the number of polynomial basis
+    // functions for a given (kernel, driverDim) pair:
+    //   Gaussian 1 / Gaussian 2 (strictly PD)        → 0
+    //   Linear / MQB / IMQB     (CPD order m = 1)    → 1 (constant)
+    //   Thin Plate              (CPD order m = 2)    → 1 + driverDim
+    static int getPolynomialDim(short kernelType, int driverDim);
+    // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): evaluate the
+    // polynomial basis [1, x_0, x_1, ..., x_{polyDim - 2}] at the
+    // given (normalised) input vector. ``out`` is resized to polyDim.
+    // polyDim == 0 leaves ``out`` empty; polyDim == 1 yields the
+    // constant {1.0}; polyDim > 1 prepends the constant and appends
+    // the first (polyDim - 1) entries of ``vec``.
+    static void polyBasis(const std::vector<double> &vec, int polyDim,
+                          std::vector<double> &out);
     // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): replay the per-pose
     // distance + interpolateRbf loop without doing the per-channel
     // weighted sum. Used by applyOutputEncodingBlend so the quat
@@ -314,7 +341,14 @@ public:
                                const std::vector<int> &quatGroupStarts,
                                const std::vector<bool> &isQuatMember,
                                bool &qwaAnyClippedOut,
-                               bool &qwaAnyDegenerateOut);
+                               bool &qwaAnyDegenerateOut,
+                               // M_P0_RBF_POLYNOMIAL_AUGMENTATION:
+                               // polynomial coefficients (polyDim ×
+                               // valueCount) + dim. polyDim == 0
+                               // means no augmentation (Gaussian);
+                               // polyMat is then ignored.
+                               const BRMatrix &polyMatArg,
+                               int polyDim);
 
     virtual double interpolateWeight(double value, int type);
     virtual double blendCurveWeight(double value);
@@ -494,6 +528,12 @@ private:
     double meanDist;
     MIntArray poseModes;
     BRMatrix wMat;
+    // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): polynomial
+    // coefficients matrix (polyDim × solveCount). Runtime state,
+    // not persisted to .ma. Rebuilt each evalInput=true alongside
+    // wMat. Inference adds polyMat * polyBasis(driver) to the RBF
+    // sum. polyDim == 0 (Gaussian) leaves polyMat unused / empty.
+    BRMatrix polyMat;
     
     std::vector<double> inputNorms;
 

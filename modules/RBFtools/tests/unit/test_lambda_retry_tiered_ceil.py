@@ -35,6 +35,8 @@ import os
 import re
 import unittest
 
+import pytest
+
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TESTS_DIR = os.path.dirname(_HERE)
@@ -47,6 +49,23 @@ def _read(path):
         return fh.read()
 
 
+# M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11) supersedes
+# M_P0_LAMBDA_RETRY_TIERED_CEIL by removing the entire retry loop
+# in favour of mathematically-correct polynomial augmentation for
+# CPD kernels. All six guards below were AST/regex assertions on
+# LAMBDA_CEIL_TIERED / MAX_RETRIES_TIERED / kIsStrictlyPDKernel
+# constructs that no longer exist in cpp. Inverting each assertion
+# was rejected — class-level skip mirrors the
+# test_m_p0_auto_adaptive_lambda.py treatment from
+# M_P0_KERNEL_SWITCH_ROLLBACK_2 (91adfc9) and keeps the historical
+# guard intent readable to future audit readers.
+#
+# Behavioural verification of the polynomial-augmented solver lives
+# in test_polynomial_augmentation.py + Maya-side λ-sweep diag.
+@pytest.mark.skip(
+    reason="M_P0_RBF_POLYNOMIAL_AUGMENTATION: tiered retry loop "
+           "removed; polynomial augmentation is the correct math for "
+           "CPD kernels (see test_polynomial_augmentation.py).")
 class TestLambdaRetryTieredCeil(unittest.TestCase):
 
     def test_PERMANENT_a_strictly_pd_detection_literal(self):
