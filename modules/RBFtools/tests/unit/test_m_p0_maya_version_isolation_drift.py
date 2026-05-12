@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""M_P0_MAYA_VERSION_ISOLATION Phase 6 PERMANENT guard.
+"""M_P0_MAYA_VERSION_ISOLATION PERMANENT guard (Phase 6 origin;
+extended for M_P0_MAYA_2022_FROM_SCRATCH Phase 11F).
 
-scripts_2022/ must exactly match the output of
+scripts_2022/ must exactly match the output of the current
 ``tools/sync_2022_from_2025.py`` applied to the current scripts/.
-Detects two regression classes:
+Detects three regression classes:
 
   1. Drift -- somebody hand-edited scripts_2022/ and forgot to update
      the sync script's transformation rules; OR somebody changed
@@ -12,6 +13,11 @@ Detects two regression classes:
      v0/v1/v2 must NEVER regress. Independent guard so a future
      change to the sync script's escape logic can't silently let
      non-ASCII through.
+  3. (Phase 11F) Phase 11C smoke invariants -- ast.parse, byte-ASCII,
+     _STR_TYPES helper, PySide2 hard-pin, 0 PySide6 imports, R7
+     defensive try/except, anchors held. The smoke script is the
+     canonical place for these checks; this test re-runs it from the
+     test runner so a sweep catches them.
 """
 from __future__ import absolute_import
 
@@ -28,6 +34,8 @@ import pytest
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.normpath(os.path.join(_HERE, "..", "..", "..", ".."))
 _SYNC_SCRIPT = os.path.join(_REPO_ROOT, "tools", "sync_2022_from_2025.py")
+_SMOKE_SCRIPT = os.path.join(
+    _REPO_ROOT, "tools", "audit_phase11_maya2022_smoke.py")
 _SCRIPTS_2022 = os.path.join(
     _REPO_ROOT, "modules", "RBFtools", "scripts_2022")
 
@@ -102,3 +110,34 @@ def test_PERMANENT_b_scripts_2022_is_pure_ascii():
             "regression. Files with offending byte positions (first 5 "
             "each):\n  " + "\n  ".join(
                 "{0} -> {1}".format(p, ps) for p, ps in offenders))
+
+
+def test_PERMANENT_c_phase11_smoke_audit_passes():
+    """(Phase 11F) Run tools/audit_phase11_maya2022_smoke.py.
+
+    Smoke catches the seven Phase 11C invariants that the byte-drift
+    test cannot: AST validity, _STR_TYPES helper placement, PySide2
+    hard-pin in compat.py, 0 PySide6/shiboken6 imports anywhere,
+    help_button R7 defensive try/except, and the four Python-side
+    anchors held in scripts/.
+
+    Independent of the drift test: drift can pass (byte-equal to sync
+    output) yet the sync script itself could have regressed the
+    smoke invariants. This guard catches that case.
+    """
+    if not os.path.exists(_SMOKE_SCRIPT):
+        pytest.skip("smoke script not present: {0}".format(_SMOKE_SCRIPT))
+    proc = subprocess.Popen(
+        [sys.executable, _SMOKE_SCRIPT],
+        cwd=_REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    stdout, stderr = proc.communicate()
+    if proc.returncode != 0:
+        pytest.fail(
+            "Phase 11C smoke audit failed.\nstdout:\n{0}\nstderr:\n{1}".format(
+                stdout.decode("utf-8", errors="replace"),
+                stderr.decode("utf-8", errors="replace"),
+            )
+        )
