@@ -7,6 +7,41 @@ from __future__ import absolute_import
 
 from RBFtools.ui.compat import QtWidgets, QtCore
 
+# M_P0_PY2_PY3_DUAL_RUNTIME_COMPAT_v2 Phase F (2026-05-12):
+# Module-level defensive import of help_texts.get_help_text.
+# If help_texts.py fails to parse (e.g. a future regression
+# re-introduces a raw non-ASCII byte without a u-prefix) the
+# UI keeps running and shows a diagnostic placeholder instead
+# of crashing.  After Phase E the source is 100% ASCII at byte
+# level so the fallback never triggers in normal operation --
+# this is belt-and-suspenders, not graceful degradation.
+try:
+    from RBFtools.ui.help_texts import get_help_text as _get_help_text
+    _HELP_TEXTS_OK = True
+    _HELP_TEXTS_ERR = None
+except Exception as _exc:  # noqa: BLE001 -- SyntaxError + ImportError
+    import warnings as _warnings
+    _warnings.warn(
+        "RBFtools.ui.help_texts failed to import (likely py2/py3 "
+        "encoding issue in source). Help bubbles will show a "
+        "diagnostic placeholder. Error: {0}".format(_exc),
+        RuntimeWarning,
+    )
+    _HELP_TEXTS_OK = False
+    _HELP_TEXTS_ERR = _exc
+
+    def _get_help_text(key):
+        return (
+            u"[\u26a0 RBFtools help_texts.py import failed - "
+            u"see Maya Script Editor warning]\n\n"
+            u"Error: {0}\n\n"
+            u"Patch ID: M_P0_PY2_PY3_DUAL_RUNTIME_COMPAT_v2 "
+            u"Phase F fallback. help_texts.py has a Python "
+            u"parse error (likely non-ASCII byte without a "
+            u"\\uXXXX escape or u-prefix).".format(_HELP_TEXTS_ERR)
+        )
+
+
 
 class HelpBubble(QtWidgets.QWidget):
     """A floating tooltip-like bubble that can be pinned.
@@ -104,8 +139,7 @@ class HelpButton(QtWidgets.QToolButton):
 
     def _show_bubble(self):
         bubble = self._get_bubble()
-        from RBFtools.ui.help_texts import get_help_text
-        bubble.set_text(get_help_text(self._help_key))
+        bubble.set_text(_get_help_text(self._help_key))
         bubble.reposition(self.mapToGlobal(QtCore.QPoint(self.width(), 0)))
         bubble.show()
 
@@ -252,16 +286,14 @@ class ComboHelpButton(HelpButton):
 
     def _show_bubble(self):
         bubble = self._get_bubble()
-        from RBFtools.ui.help_texts import get_help_text
-        bubble.set_text(get_help_text(self._current_help_key()))
+        bubble.set_text(_get_help_text(self._current_help_key()))
         bubble.reposition(self.mapToGlobal(QtCore.QPoint(self.width(), 0)))
         bubble.show()
 
     def _refresh_bubble_for_index(self, idx):
         """Update an already-visible pinned bubble to show help for *idx*."""
         if self._pinned and self._bubble is not None and self._bubble.isVisible():
-            from RBFtools.ui.help_texts import get_help_text
-            self._bubble.set_text(get_help_text(self._help_key_for_index(idx)))
+            self._bubble.set_text(_get_help_text(self._help_key_for_index(idx)))
 
     def _on_combo_changed(self, index):
         """Fired when user actually selects (clicks) an item."""

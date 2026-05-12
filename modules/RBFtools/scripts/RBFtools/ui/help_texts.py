@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Help text dictionary for all UI controls — English and Chinese.
+Help text dictionary for all UI controls -- English and Chinese.
 """
 
 from __future__ import absolute_import
@@ -207,50 +207,50 @@ _EN = {
 
     # -- Per-option: Interpolation --
     "interp_linear":
-        "Linear interpolation — constant rate of change.\n\n"
+        u"Linear interpolation \u2014 constant rate of change.\n\n"
         "The weight changes at a uniform speed from 0 to 1. "
         "No easing, no acceleration. Simplest and most predictable.",
 
     "interp_slow":
-        "Slow (ease-in) — starts slowly, accelerates toward the end.\n\n"
+        u"Slow (ease-in) \u2014 starts slowly, accelerates toward the end.\n\n"
         "The weight ramps up gradually at first, then speeds up. "
         "Good for movements that need a gentle start.",
 
     "interp_fast":
-        "Fast (ease-out) — starts quickly, decelerates toward the end.\n\n"
+        u"Fast (ease-out) \u2014 starts quickly, decelerates toward the end.\n\n"
         "The weight changes rapidly at first, then slows down. "
         "Good for movements that need a snappy start.",
 
     "interp_smooth1":
-        "Smooth 1 (ease-in-out) — slow start and end, faster in the middle.\n\n"
+        u"Smooth 1 (ease-in-out) \u2014 slow start and end, faster in the middle.\n\n"
         "A gentle S-curve with moderate smoothing. Good general-purpose "
         "easing for natural-looking transitions.",
 
     "interp_smooth2":
-        "Smooth 2 (ease-in-out, stronger) — more pronounced S-curve.\n\n"
+        u"Smooth 2 (ease-in-out, stronger) \u2014 more pronounced S-curve.\n\n"
         "Stronger easing than Smooth 1, with a flatter start and end. "
         "Use for softer, more cushioned transitions.",
 
     "interp_curve":
-        "Curve — fully custom ramp curve.\n\n"
+        u"Curve \u2014 fully custom ramp curve.\n\n"
         "Open the Attribute Editor to edit the ramp shape directly. "
         "Provides complete control over the falloff profile.",
 
     # -- Per-option: Kernel --
     "kernel_linear":
         "Linear kernel: \xcf\x86(r) = r\n\n"
-        "The simplest kernel — weight falls off linearly with distance. "
+        u"The simplest kernel \u2014 weight falls off linearly with distance. "
         "Produces sharp, tent-like transitions between poses. "
         "Radius Type is ignored (always uses direct distance).\n\n"
         "Pros: Fast, predictable.\n"
-        "Cons: Not smooth at pose locations (C\u2070 continuity only).",
+        u"Cons: Not smooth at pose locations (C\u2070 continuity only).",
 
     "kernel_gaussian1":
         "Gaussian 1 kernel: \xcf\x86(r) = exp(-r\xc2\xb2)\n\n"
         "Standard bell-curve falloff. Each pose has a smooth, rounded "
         "region of influence that fades to zero. "
         "Radius controls the width of the bell curve.\n\n"
-        "Pros: Smooth (C\u221e), well-behaved, most commonly used.\n"
+        u"Pros: Smooth (C\u221e), well-behaved, most commonly used.\n"
         "Cons: Can produce near-zero weights far from any pose.",
 
     "kernel_gaussian2":
@@ -258,24 +258,24 @@ _EN = {
         "A wider variant of the Gaussian bell curve. The '/2' denominator "
         "makes each pose's influence spread further before fading.\n\n"
         "Pros: Broader falloff, smoother blending across distant poses.\n"
-        "Cons: Less localised — nearby poses may interfere more.",
+        u"Cons: Less localised \u2014 nearby poses may interfere more.",
 
     "kernel_thin_plate":
         "Thin Plate Spline kernel: \xcf\x86(r) = r\xc2\xb2 \xc2\xb7 ln(r)\n\n"
         "Inspired by the physical bending of a thin metal plate. "
         "Produces very smooth interpolation with minimal oscillation.\n\n"
         "Pros: Excellent for scattered data, minimal overshoot.\n"
-        "Cons: Not strictly positive-definite — may need regularisation.",
+        u"Cons: Not strictly positive-definite \u2014 may need regularisation.",
 
     "kernel_multi_quadratic":
-        "Multi-Quadratic Biharmonic kernel: \xcf\x86(r) = \u221a(1 + r\xc2\xb2)\n\n"
+        u"Multi-Quadratic Biharmonic kernel: \xcf\x86(r) = \u221a(1 + r\xc2\xb2)\n\n"
         "A biharmonic kernel that grows without bound. Produces globally "
         "smooth interpolation where distant poses still contribute.\n\n"
         "Pros: Very smooth, good for large pose sets.\n"
         "Cons: Distant poses may have too much influence; can be slow.",
 
     "kernel_inv_multi_quadratic":
-        "Inverse Multi-Quadratic Biharmonic kernel: \xcf\x86(r) = 1/\u221a(1 + r\xc2\xb2)\n\n"
+        u"Inverse Multi-Quadratic Biharmonic kernel: \xcf\x86(r) = 1/\u221a(1 + r\xc2\xb2)\n\n"
         "The inverse of the Multi-Quadratic. Influence decays toward zero "
         "for distant poses, providing more localised blending.\n\n"
         "Pros: Smooth and localised, always positive.\n"
@@ -283,38 +283,38 @@ _EN = {
 
     # -- Per-option: Radius Type --
     "rtype_mean_distance":
-        "Mean Distance — the radius is set to the average of all pairwise "
+        u"Mean Distance \u2014 the radius is set to the average of all pairwise "
         "distances between stored poses.\n\n"
         "A robust automatic choice that adapts to the overall spread of "
         "your pose data. Works well in most situations.",
 
     "rtype_variance":
-        "Variance — the radius is set to the statistical variance of "
+        u"Variance \u2014 the radius is set to the statistical variance of "
         "inter-pose distances.\n\n"
         "Produces a wider radius than Mean Distance when poses are "
         "unevenly distributed. Use when poses are clustered.",
 
     "rtype_std_dev":
-        "Standard Deviation — the radius is the square root of the variance.\n\n"
+        u"Standard Deviation \u2014 the radius is the square root of the variance.\n\n"
         "A balanced middle ground between Mean Distance and Variance. "
         "Often provides the most natural-looking transitions.",
 
     "rtype_custom":
-        "Custom — manually set the radius value using the Radius spinner.\n\n"
+        u"Custom \u2014 manually set the radius value using the Radius spinner.\n\n"
         "Full control over the influence width. Smaller values produce "
         "sharper transitions; larger values produce smoother blending.\n"
         "Required for fine-tuning edge cases.",
 
     # -- Per-option: RBF Mode --
     "rbf_mode_generic":
-        "Generic RBF — computes distance in per-attribute space.\n\n"
+        u"Generic RBF \u2014 computes distance in per-attribute space.\n\n"
         "Each driver attribute (translate X, rotate Y, etc.) is treated "
         "as an independent dimension. Distance is measured using the "
         "chosen Distance Type (Euclidean or Angle).\n\n"
         "Best for: attribute-driven setups, non-transform drivers.",
 
     "rbf_mode_matrix":
-        "Matrix RBF — computes distance using full 4x4 transform matrices.\n\n"
+        u"Matrix RBF \u2014 computes distance using full 4x4 transform matrices.\n\n"
         "The driver's world-space matrix is decomposed for distance "
         "calculation, with optional twist decomposition along a chosen axis.\n\n"
         "Best for: transform-driven setups, joint-based rigs where "
@@ -322,14 +322,14 @@ _EN = {
 
     # -- Per-option: Distance Type --
     "dist_euclidean":
-        "Euclidean distance — straight-line distance in attribute space.\n\n"
+        u"Euclidean distance \u2014 straight-line distance in attribute space.\n\n"
         "d = sqrt(sum((a_i - b_i)^2))\n\n"
         "Standard distance metric. Works well for translation and "
         "general numeric attributes. May be less ideal for pure rotation "
         "attributes due to gimbal effects.",
 
     "dist_angle":
-        "Angular distance — measures the angle between attribute vectors.\n\n"
+        u"Angular distance \u2014 measures the angle between attribute vectors.\n\n"
         "Treats each set of driver attributes as a direction vector and "
         "computes the angle between them. Ideal for rotation-only drivers "
         "where magnitude doesn't matter, only direction.",
@@ -427,33 +427,33 @@ _EN = {
     # M_HELPTEXT_ENC_PER_KEY (2026-04-29): per-encoding help keys.
     # ComboHelpButton in rbf_section.py:233 uses key_map = ["enc_raw",
     # "enc_quaternion", "enc_bendroll", "enc_expmap", "enc_swingtwist"]
-    # — _help_key_for_index returns the indexed key inside range, never
+    # -- _help_key_for_index returns the indexed key inside range, never
     # falling back to "input_encoding" for valid combo selections.
     # Without these keys get_help_text returns "" -> empty HelpBubble.
     # The five entries below mirror the d01a964 input_encoding long-
     # form guide split into per-encoding subsections so each combo
     # value shows the relevant content.
     "enc_raw":
-        "Raw (Euler) — read driver bone's Rotate X/Y/Z Euler "
+        u"Raw (Euler) \u2014 read driver bone's Rotate X/Y/Z Euler "
         "values directly.\n\n"
         "Pros: simplest.\n"
-        "Cons: Gimbal lock — when bone rotation exceeds ~90° or "
+        u"Cons: Gimbal lock \u2014 when bone rotation exceeds ~90\u00b0 or "
         "flips, X/Y/Z values jump discontinuously, RBF distance "
         "becomes meaningless, driven bones explode.\n\n"
         "Use case: simple single-axis mechanical structures only "
         "(door hinges, pistons).",
 
     "enc_quaternion":
-        "Quaternion — convert rotation to (w, x, y, z) "
+        u"Quaternion \u2014 convert rotation to (w, x, y, z) "
         "quaternion.\n\n"
-        "Pros: gimbal-lock free, handles 360° rotation correctly.\n"
-        "Cons: 4D vector — Euclidean distance is less linearly "
+        u"Pros: gimbal-lock free, handles 360\u00b0 rotation correctly.\n"
+        u"Cons: 4D vector \u2014 Euclidean distance is less linearly "
         "intuitive than 3D.\n\n"
         "Use case: full-360 controllers without twist-decomposition "
         "needs.",
 
     "enc_bendroll":
-        "BendRoll — decompose rotation into bend (axis "
+        u"BendRoll \u2014 decompose rotation into bend (axis "
         "perpendicular to bone) and roll (axis along the bone).\n\n"
         "Pros: similar to SwingTwist but optimized for bend/roll "
         "separation on certain axis combinations.\n\n"
@@ -461,7 +461,7 @@ _EN = {
         "rigs where local bend extraction is needed.",
 
     "enc_expmap":
-        u"ExpMap (Exponential Map) — ★ RBF FAVORITE\n\n"
+        u"ExpMap (Exponential Map) \u2014 \u2605 RBF FAVORITE\n\n"
         "Represents rotation as a 3D vector: direction = rotation "
         "axis, length = rotation angle.\n\n"
         "Pros: gimbal-lock-free like Quaternion + only 3D like "
@@ -469,14 +469,14 @@ _EN = {
         "perception. Smoothest interpolation.\n\n"
         "Use case: most multi-to-many non-linear RBF deformation "
         "drives (facial expressions, complex muscle helper bones) "
-        "— first choice.",
+        u"\u2014 first choice.",
 
     "enc_swingtwist":
-        u"SwingTwist — ★ LIMB RIG FAVORITE\n\n"
+        u"SwingTwist \u2014 \u2605 LIMB RIG FAVORITE\n\n"
         "Decompose rotation into:\n"
-        u"  · Swing — bone direction (compass-like; "
+        u"  \u00b7 Swing \u2014 bone direction (compass-like; "
         "up/down/left/right pointing)\n"
-        u"  · Twist — bone self-axis rotation\n\n"
+        u"  \u00b7 Twist \u2014 bone self-axis rotation\n\n"
         "Pros: lets you isolate one axis. e.g. drive shoulder "
         "muscles by arm-up-amount (swing) while ignoring arm-twist "
         "(twist).\n\n"
@@ -518,7 +518,7 @@ _EN = {
         "average instead of scalar weighted sum.\n\n"
         "Invalid entries (out-of-range, overlapping, or colliding with "
         "an outputIsScale flag inside the 4-slot range) are dropped at "
-        "compute() time with a one-time warning — the rig keeps "
+        u"compute() time with a one-time warning \u2014 the rig keeps "
         "evaluating; the dropped groups simply revert to scalar output.",
 
     # -- M_HELPBUBBLE_BATCH (2026-04-29): red-frame-area HelpButton
@@ -529,10 +529,10 @@ _EN = {
     "output_encoding":
         "Node-level output encoding for the driven values fed into "
         "the C++ output[] array.\n\n"
-        "  · Euler — the default; raw 3-tuple Euler angles.\n"
-        "  · Quaternion — driven groups represent unit quaternions; "
+        u"  \u00b7 Euler \u2014 the default; raw 3-tuple Euler angles.\n"
+        u"  \u00b7 Quaternion \u2014 driven groups represent unit quaternions; "
         "matches the inputEncoding=Quaternion flow on the input side.\n"
-        "  · ExpMap — driven groups encoded as exponential map "
+        u"  \u00b7 ExpMap \u2014 driven groups encoded as exponential map "
         "vectors; pairs with the per-driver-group rotateOrder for "
         "consistent reconstruction at evaluation time.\n\n"
         "Switch this to match the encoding your downstream rig "
@@ -541,16 +541,16 @@ _EN = {
 
     # -- M_P1_ENC_COMBO_FIX (2026-04-29): per-output-encoding keys
     # for the OutputEncodingCombo's ComboHelpButton. Mirrors
-    # M_HELPTEXT_ENC_PER_KEY's input-encoding split — each item
+    # M_HELPTEXT_ENC_PER_KEY's input-encoding split -- each item
     # gets its own bubble describing semantics + typical usage +
     # edge cases instead of the merged "output_encoding" blob.
     "output_enc_euler":
-        "Output Encoding — Euler (default)\n\n"
+        u"Output Encoding \u2014 Euler (default)\n\n"
         "Each driven attribute group is a raw Euler triple "
         "(rx, ry, rz). The C++ compute() weighted-sum is applied "
         "directly per channel; no quaternion or exp-map "
         "reconstruction step.\n\n"
-        "★ Default for joint translate / rotate channels and any "
+        u"\u2605 Default for joint translate / rotate channels and any "
         "driven attribute that is NOT inherently rotational "
         "(blendshape weights, custom scalars, scale).\n\n"
         "Edge: gimbal-influenced extreme rotations on a single "
@@ -558,7 +558,7 @@ _EN = {
         "Quaternion or ExpMap for those cases.",
 
     "output_enc_quaternion":
-        "Output Encoding — Quaternion\n\n"
+        u"Output Encoding \u2014 Quaternion\n\n"
         "Driven attribute groups are interpreted as unit "
         "quaternions (4 channels per group). C++ compute() runs a "
         "quaternion-weighted average (M2.2 QWA) instead of a "
@@ -569,33 +569,33 @@ _EN = {
         "where each 4-slot group starts in the output array.\n\n"
         "Edge: groups whose 4-slot range collides with an "
         "outputIsScale flag are dropped at compute() with a "
-        "one-time warning — the rig keeps evaluating, dropped "
+        u"one-time warning \u2014 the rig keeps evaluating, dropped "
         "groups simply revert to scalar output.",
 
     "output_enc_expmap":
-        "Output Encoding — ExpMap (Exponential Map)\n\n"
+        u"Output Encoding \u2014 ExpMap (Exponential Map)\n\n"
         "Driven attribute groups are encoded as 3-component "
         "exp-map vectors. The C++ compute() interpolates in "
         "exp-map space and reconstructs rotations on read; works "
         "well for medium-range rotations without the gimbal "
         "artifacts of raw Euler.\n\n"
-        "★ Useful when the driven side is a single rotational "
+        u"\u2605 Useful when the driven side is a single rotational "
         "joint (twist corrective, bend joint) and you need "
         "smoother blend behaviour than Euler but don't want to "
         "spend the extra channel of a quaternion group.\n\n"
         "Edge: large rotations near the pi-radian shell can fold "
-        "back through the origin — keep the per-pose rotation "
+        u"back through the origin \u2014 keep the per-pose rotation "
         "magnitudes inside |angle| < pi to avoid antipodal jumps.",
 
     "outer_tabs_overview":
         "Three-tab navigation for the RBF Pose Editor:\n"
-        "  · DriverDriven — pick the driver bones / attrs and the "
+        u"  \u00b7 DriverDriven \u2014 pick the driver bones / attrs and the "
         "driven joints / attrs the solver maps between. Edits here "
         "rebuild the per-pose schema.\n"
-        "  · BaseDrivenPose — the rest / baseline output values per "
+        u"  \u00b7 BaseDrivenPose \u2014 the rest / baseline output values per "
         "driven attr; subtracted from each pose so deltas are what "
         "the solver actually interpolates.\n"
-        "  · Pose — the live pose grid: add new poses, recall / "
+        u"  \u00b7 Pose \u2014 the live pose grid: add new poses, recall / "
         "delete existing ones, edit per-row driver + driven "
         "samples.\n\n"
         "Switching tabs is non-destructive; all three views read "
@@ -605,11 +605,11 @@ _EN = {
         "Wire the currently selected attrs from THIS tab's source "
         "(driver or driven) into the active node's "
         "input[] / output[] arrays.\n\n"
-        "Path-A semantics — operates on the per-tab attribute list "
+        u"Path-A semantics \u2014 operates on the per-tab attribute list "
         "directly; no pose data is touched. Idempotent: clicking "
         "twice on the same selection reuses existing slots.\n\n"
         "When the panel-level Batch checkbox is on, Connect sweeps "
-        "EVERY tab in the panel instead of just the active one — "
+        u"EVERY tab in the panel instead of just the active one \u2014 "
         "useful for re-applying the same attribute set to all "
         "drivers at once.",
 
@@ -619,7 +619,7 @@ _EN = {
         "Walks the precise per-attribute connections so other "
         "tabs / unrelated nodes are untouched. After Disconnect "
         "the node still keeps its driverSource[] / drivenSource[] "
-        "metadata entry — only the data path is broken; "
+        u"metadata entry \u2014 only the data path is broken; "
         "Add Driver / Add Driven is NOT undone.\n\n"
         "Batch checkbox: when on, Disconnect runs across every "
         "tab in the panel.",
@@ -628,7 +628,7 @@ _EN = {
         "Append a new driver source tab to the active node and "
         "open it for attribute selection.\n\n"
         "Each driver source maps to one driverSource[] entry on the "
-        "shape — a (node, attrs, weight, encoding) tuple with the "
+        u"shape \u2014 a (node, attrs, weight, encoding) tuple with the "
         "driver's .message connected to driverSource_node.\n\n"
         "Pick the driver bone / control object first, then choose "
         "which of its attrs participate. Duplicate (bone, attr) "
@@ -637,7 +637,7 @@ _EN = {
     "source_tab_add_driven":
         "Append a new driven source tab and open it for attribute "
         "selection.\n\n"
-        "Each driven source maps to one drivenSource[] entry — the "
+        u"Each driven source maps to one drivenSource[] entry \u2014 the "
         "joint / control whose attrs the RBF compute will write "
         "into. Select all driven attrs the solver should drive on "
         "this object before clicking Connect.\n\n"
@@ -652,7 +652,7 @@ _EN = {
         "Use this to re-broadcast the same attribute set to a list "
         "of similarly-set-up driver bones (e.g. an arm chain) "
         "without click-cycling tabs. The Add Driver button is NOT "
-        "affected — that always creates one new tab.\n\n"
+        u"affected \u2014 that always creates one new tab.\n\n"
         "Batch is a session-only flag; not persisted on the node.",
 
     "source_tab_batch_driven":
@@ -672,18 +672,18 @@ _EN = {
         "outputs that could evaluate independently. Each new node "
         "inherits the same driver topology + the subset of pose "
         "values relevant to its driven joint.\n\n"
-        "Destructive on the original node — best run on a "
+        u"Destructive on the original node \u2014 best run on a "
         "duplicate first to compare evaluation parity.",
 
     "cleanup_modes_overview":
         "Three cleanup modes share the Remove Unnecessary Datas "
         "button below; pick one before clicking it.\n\n"
-        "  · Remove Connectionless Input — drops input[] slots "
+        u"  \u00b7 Remove Connectionless Input \u2014 drops input[] slots "
         "with no upstream connection, then renumbers downstream "
         "data so pose vectors stay aligned.\n"
-        "  · Remove Connectionless Output — same idea on the "
+        u"  \u00b7 Remove Connectionless Output \u2014 same idea on the "
         "output side; useful after blendshape / joint pruning.\n"
-        "  · Remove Redundant Pose — drops poses whose driver "
+        u"  \u00b7 Remove Redundant Pose \u2014 drops poses whose driver "
         "vector duplicates another pose's within tolerance.\n\n"
         "All three are destructive but reversible by undo.",
 
@@ -692,7 +692,7 @@ _EN = {
         "less input, connectionless output, or redundant pose).\n\n"
         "The button reads the radio selection at click time, so "
         "you can switch modes between runs. Status output goes "
-        "to the Maya Script Editor — review it before saving the "
+        u"to the Maya Script Editor \u2014 review it before saving the "
         "scene; the cleanup may have changed the pose / attribute "
         "count.\n\n"
         "Single undo step; safe to repeat.",
@@ -700,7 +700,7 @@ _EN = {
     "btn_refresh_profile":
         "Run the per-node profiler and render the report inline.\n\n"
         "The profile is intentionally NOT auto-recomputed on node "
-        "switch — large rigs can take a noticeable second to "
+        u"switch \u2014 large rigs can take a noticeable second to "
         "summarize, and the data is read-only context (pose count, "
         "input / output dimensionality, kernel / radius signature, "
         "per-driver weight totals).\n\n"
