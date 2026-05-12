@@ -6,7 +6,7 @@ plug-ins: plug-ins/linux64/2020
 + MAYAVERSION:2022 PLATFORM:linux MODULE_NAME any PATH_TO_MODULE_CONTENT
 plug-ins: plug-ins/linux64/2022
 [r] icons: icons
-[r] scripts: scripts
+[r] scripts: scripts_2022
 
 + MAYAVERSION:2023 PLATFORM:linux MODULE_NAME any PATH_TO_MODULE_CONTENT
 plug-ins: plug-ins/linux64/2023
@@ -34,7 +34,7 @@ plug-ins: plug-ins/macOS/2020
 + MAYAVERSION:2022 PLATFORM:mac MODULE_NAME any PATH_TO_MODULE_CONTENT
 plug-ins: plug-ins/macOS/2022
 [r] icons: icons
-[r] scripts: scripts
+[r] scripts: scripts_2022
 
 + MAYAVERSION:2023 PLATFORM:mac MODULE_NAME any PATH_TO_MODULE_CONTENT
 plug-ins: plug-ins/macOS/2023
@@ -62,7 +62,7 @@ plug-ins: plug-ins/win64/2020
 + MAYAVERSION:2022 PLATFORM:win64 MODULE_NAME any PATH_TO_MODULE_CONTENT
 plug-ins: plug-ins/win64/2022
 [r] icons: icons
-[r] scripts: scripts
+[r] scripts: scripts_2022
 
 + MAYAVERSION:2023 PLATFORM:win64 MODULE_NAME any PATH_TO_MODULE_CONTENT
 plug-ins: plug-ins/win64/2023
