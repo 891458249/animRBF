@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Pytest / unittest discovery shim — Maya + PySide mock framework.
 
 Dual-environment support

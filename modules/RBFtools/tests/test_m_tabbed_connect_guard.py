@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M_TABBED_CONNECT_GUARD - Connect / Disconnect pre-flight idempotency
 checks (2026-04-27 user request).
 

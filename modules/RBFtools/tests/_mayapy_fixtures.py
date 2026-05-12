@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """mayapy session-scoped fixture (Milestone 1.5.1).
 
 This module is the **only legitimate place** in the test tree that

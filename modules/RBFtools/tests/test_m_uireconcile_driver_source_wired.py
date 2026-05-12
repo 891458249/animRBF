@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M_UIRECONCILE - DriverSourceListEditor wiring guards + mock E2E.
 
 #36 T_DRIVER_SOURCE_ADD_BUTTON_WIRED — 4 source-scan + mock E2E

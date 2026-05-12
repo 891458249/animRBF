@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M_B24d_matrix_followup - Matrix mode driverList wiring tests.
 
 Lock-in coverage for the M_B24d_matrix_followup sub-task:

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M_B24c - Mirror multi-source migration tests + #33 source-scan.
 
 Locks the M_B24c contract:

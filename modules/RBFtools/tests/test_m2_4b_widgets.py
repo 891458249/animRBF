@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M2.4b — Ordered list editor widgets + visibility wiring.
 
 T1  _OrderedListEditorBase public API surface

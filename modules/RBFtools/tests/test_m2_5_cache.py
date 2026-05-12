@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M2.5 — per-pose SwingTwist cache tests.
 
 Test layout

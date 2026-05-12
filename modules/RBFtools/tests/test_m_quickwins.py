@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M_QUICKWINS - Item 2 (i18n retranslate coverage) + Item 3
 (default RBF type on create_node) + Item 4a (Limit label).
 

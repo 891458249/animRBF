@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M_B24a2-2 — Versioned JSON schema tests.
 
 Covers:

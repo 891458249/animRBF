@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M_B24b2 — 3 active downstream multi-source adaptation tests +
 5 legacy single-driver sanity tests + Mirror dialog wiring sanity.
 

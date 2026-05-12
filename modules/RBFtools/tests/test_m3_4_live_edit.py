@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M3.4 — Live Edit Mode tests (algo only).
 
 Test layout

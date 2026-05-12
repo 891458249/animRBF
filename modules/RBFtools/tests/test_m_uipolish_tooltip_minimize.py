@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M_UIPOLISH - tooltip coverage + HelpBubble minimize-aware tests.
 
 Two new permanent guards land in this module:

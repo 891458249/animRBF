@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M1.5.2 — T_M1_5_2_CALIBRATION_DEFERRED (#22 PERMANENT GUARD).
 
 Locks the P4 disposition: _K_* benchmark calibration was probed

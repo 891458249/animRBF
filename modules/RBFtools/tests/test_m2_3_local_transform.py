@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M2.3 — Local-Transform double-storage spec tests.
 
 T1  decompose_matrix_quat_pure basics (identity / translate / rotate / scale)

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M2.2 — Quaternion Weighted Average (QWA) output encoding.
 
 Covers:

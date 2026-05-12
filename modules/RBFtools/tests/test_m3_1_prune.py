@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M3.1 — Pose Pruner tests.
 
 Test layout

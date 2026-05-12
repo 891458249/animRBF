@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M3.2 — Mirror Tool tests (math, naming rule, orchestrator).
 
 T1   mirror_translate per axis

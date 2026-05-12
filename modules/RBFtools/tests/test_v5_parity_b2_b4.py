@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """v5.0 FINAL CONSTITUTIONAL EVENT 2/6 — T_V5_PARITY_B2_LIVE +
 T_V5_PARITY_B4_LIVE activation tests.
 

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M3.7 — aliasAttr auto-naming tests.
 
 Test layout

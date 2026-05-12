@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M_B24a2-1 — multi-source driver API + legacy migration tests.
 
 Covers:

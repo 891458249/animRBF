@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Phase 2 - PoseGridEditor (multi-source-aware Pose tab grid).
 
 Replaces the legacy QTableView (PoseTableModel) inside the Pose

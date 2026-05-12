@@ -29,6 +29,17 @@ import warnings
 import maya.cmds as cmds
 
 
+# M_P0_PY2_PY3_DUAL_RUNTIME_COMPAT (2026-05-12): module-local string
+# type tuple. Maya 2022 optional py2 runtime (mayapy2) defines
+# unicode; py3 (Maya 2022 default + Maya 2025) does not, so the
+# NameError guard collapses to a single-element tuple under py3.
+# Private (leading underscore) so it does not leak as core API.
+try:
+    _STR_TYPES = (str, unicode)  # noqa: F821 — py2-only name
+except NameError:
+    _STR_TYPES = (str,)
+
+
 # =====================================================================
 #  M_B24a2-1 — Multi-source driver public API
 # =====================================================================
@@ -61,7 +72,7 @@ class DriverSource(object):
     __slots__ = ("_node", "_attrs", "_weight", "_encoding")
 
     def __init__(self, node, attrs, weight=1.0, encoding=0):
-        if not isinstance(node, str):
+        if not isinstance(node, _STR_TYPES):
             raise TypeError(
                 "DriverSource.node must be a str, got {!r}".format(
                     type(node).__name__))
@@ -1953,7 +1964,7 @@ class DrivenSource(object):
     __slots__ = ("node", "attrs")
 
     def __init__(self, node, attrs):
-        if not isinstance(node, str):
+        if not isinstance(node, _STR_TYPES):
             raise TypeError(
                 "DrivenSource.node must be a str, got {!r}".format(
                     type(node).__name__))

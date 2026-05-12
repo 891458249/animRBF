@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M_B24b1 — UI widget tests + #27/#28 PERMANENT GUARDs.
 
 Mock-pattern tests (M2.4a/b style) — headless mayapy cannot stand up

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """M_UIRECONCILE_PLUS - Item 4b per-driver-source attribute picker.
 
 Closes the M_UIRECONCILE half-completion gap: the + button correctly
