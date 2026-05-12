@@ -572,12 +572,16 @@ def _normalise_eol(src, eol):
 def transform_source(src_bytes, rel_path):
     """Apply Rules 1-5 (+6/7 audit) to one Python source. Returns
     transformed bytes (pure ASCII).
-    """
-    # Detect line ending of source file
-    head = src_bytes[:512]
-    eol = "\r\n" if b"\r\n" in head else "\n"
 
+    Output line endings are ALWAYS LF (`\\n`), independent of the
+    source file's line endings. This is required for the drift
+    detector (Phase 6) to be stable across checkouts with different
+    ``core.autocrlf`` settings -- otherwise a Linux clone (LF) and a
+    Windows clone (CRLF) of scripts/ would produce different
+    scripts_2022/ bytes from the same canonical source.
+    """
     src = src_bytes.decode("utf-8")
+    # Normalise input EOL to LF so tokenize sees a consistent stream
     src = src.replace("\r\n", "\n").replace("\r", "\n")
 
     # Rule 1
@@ -623,9 +627,10 @@ def transform_source(src_bytes, rel_path):
             "Non-ASCII byte survived transform in {0}: {1}".format(
                 rel_path, exc))
 
-    # Normalise to source file's EOL convention
-    if eol != "\n":
-        out_bytes = out_bytes.replace(b"\n", eol.encode("ascii"))
+    # Output ALWAYS LF (see docstring); Git auto-LF translation on
+    # Windows checkouts of scripts_2022 still works because
+    # .gitattributes (added in the same patch) marks scripts_2022 as
+    # text/auto.
     return out_bytes
 
 
@@ -746,10 +751,13 @@ def sync_all(check_only=False, verbose=False):
                         print("WROTE: {0} ({1} bytes)".format(
                             dst_path, len(expected)))
             else:
+                # Non-.py files (e.g. .mel) -- copy with EOL normalised
+                # to LF to keep the drift check stable across autocrlf.
                 other_count += 1
+                with open(src_path, "rb") as fh:
+                    src_bytes = fh.read()
+                expected = src_bytes.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
                 if check_only:
-                    with open(src_path, "rb") as fh:
-                        expected = fh.read()
                     if not os.path.exists(dst_path):
                         diffs.append((dst_path, "missing"))
                         continue
@@ -758,7 +766,8 @@ def sync_all(check_only=False, verbose=False):
                     if actual != expected:
                         diffs.append((dst_path, "byte differs"))
                 else:
-                    shutil.copy2(src_path, dst_path)
+                    with open(dst_path, "wb") as fh:
+                        fh.write(expected)
     return diffs, py_count, other_count
 
 
