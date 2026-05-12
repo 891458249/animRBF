@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M2.1a — Input encoding (Raw, Quaternion, ExpMap) + Bug 2 fix.
 
 Tests the Python mirror of the C++ compute() M2.1a path: effective

@@ -40,17 +40,6 @@ import os
 import tempfile
 
 
-# M_P0_PY2_PY3_DUAL_RUNTIME_COMPAT (2026-05-12): module-local string
-# type tuple — mirrors the same try/except guard in core.py. Defined
-# here (rather than importing from core) because _STR_TYPES is
-# private (leading underscore) and importing private names across
-# modules muddies the API contract.
-try:
-    _STR_TYPES = (str, unicode)  # noqa: F821 — py2-only name
-except NameError:
-    _STR_TYPES = (str,)
-
-
 # === Schema version (addendum §M3.0 + §M_B24a2 — bump protocol) ===
 # Changing this string breaks downstream engine integration's
 # compatibility gate. Any schema evolution MUST introduce a new
@@ -618,7 +607,7 @@ def _validate_node_dict(ndata, rpt, mode, idx):
 
     # ---- name + mode ----
     name = ndata["name"]
-    if not isinstance(name, _STR_TYPES) or not name:
+    if not isinstance(name, str) or not name:
         rpt.fail(prefix + ".name: must be non-empty string")
     if ndata["type_mode"] not in _TYPE_MODE_INT:
         rpt.fail(prefix + ".type_mode: expected one of {}, got {!r}".format(

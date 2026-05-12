@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M1.4 — Regularized solver with Cholesky + GE fallback.
 
 Mirrors RBFtools::compute() M1.4 path:

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Python mirror of the C++ distance helpers added in M1.1.
 
 These functions MUST stay behaviourally identical to the C++ implementations in

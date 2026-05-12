@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M2.4a — widget structural + i18n contract tests.
 
 T1  INPUT_ENCODING_LABELS length / order matches C++ enum

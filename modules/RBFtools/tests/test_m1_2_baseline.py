@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M1.2 — Output Base Value + outputIsScale spec tests.
 
 Validates the Python reference mirror of the C++ baseline pipeline

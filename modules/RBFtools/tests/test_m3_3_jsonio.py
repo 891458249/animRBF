@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M3.3 — JSON Import / Export tests.
 
 Test layout

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M2.1b — BendRoll + SwingTwist encodings + Swing-Twist decomposition.
 
 T12' (rewritten from M2.1a): BendRoll / SwingTwist actually land and

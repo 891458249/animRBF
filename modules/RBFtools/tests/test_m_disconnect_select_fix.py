@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M_DISCONNECT_FIX + M_SELECT_SEMANTIC_FIX (Phase 1, P0 + P1
 2026-04-27).
 

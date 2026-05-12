@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M3.0-spillover tests (added in M3.2 commit per addendum §M3.0.5).
 
 Helpers tested:

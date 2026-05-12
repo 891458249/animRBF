@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Permanent guard: no hardcoded user-visible strings in widgets.
 
 Scans every widget source file for ``setText`` / ``addItem`` /

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M1.3 — Driver Clamp spec tests.
 
 Mirrors the C++ compute() clamp branch:

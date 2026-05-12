@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M3.6 — Auto-neutral-sample tests.
 
 Test layout

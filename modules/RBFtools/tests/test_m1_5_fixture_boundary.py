@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """T_M1_5_FIXTURE_BOUNDARY — the 18th PERMANENT GUARD.
 
 Decouples the two test-infrastructure layers:

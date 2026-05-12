@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M1.1 — Distance computation spec tests.
 
 Tests are written against the Python reference mirror in `_reference_impl.py`.

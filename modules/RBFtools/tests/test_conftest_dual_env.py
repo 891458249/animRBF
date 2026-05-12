@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """T_CONFTEST_DUAL_ENV — the 17th PERMANENT GUARD.
 
 Guards the dual-environment contract that lets tests run under

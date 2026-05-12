@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M3.0 — Shared infrastructure tests.
 
 T0   SCHEMA_VERSION immutability — PERMANENT GUARD

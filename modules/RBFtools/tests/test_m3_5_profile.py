@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M3.5 — Pose Profiler tests.
 
 Test layout

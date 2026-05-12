@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M2.4a — core.set_node_multi_attr transactional contract tests.
 
 T0a  Full write: removeMultiInstance × N existing → setAttr × M new

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M_B24a1 — driverSource compound + outputEncoding schema guards.
 
 Two PERMANENT GUARDs (#23, #24) + one M_B24a1 acceptance test

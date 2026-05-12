@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """M1.5.1b — three PERMANENT GUARDs (#19, #20, #21) for the
 .mll-rebuild-for-Maya-2025 sub-task.
 
