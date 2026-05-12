@@ -297,7 +297,14 @@ def _build_mod_content(content_path, versions=None):
             lines.append("[r] icons: icons")
         else:
             lines.append("icons: icons")
-        lines.append("[r] scripts: scripts")
+        # M_P0_MAYA_VERSION_ISOLATION (2026-05-12): Maya 2022 (py2
+        # mayapy + py3 mayapy) loads the byte-level-ASCII fork at
+        # scripts_2022/. All other versions stay on the canonical
+        # scripts/ path (Maya 2025 frozen at milestone).
+        if ver == "2022":
+            lines.append("[r] scripts: scripts_2022")
+        else:
+            lines.append("[r] scripts: scripts")
         lines.append("")
     return "\n".join(lines) + "\n"
 

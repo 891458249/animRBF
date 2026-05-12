@@ -47,6 +47,14 @@ a = Analysis(
         # copy the module content into the user's Maya modules
         # directory at runtime. The (src, dst) tuple's dst is
         # relative to the unpacked _MEIPASS root at runtime.
+        #
+        # M_P0_MAYA_VERSION_ISOLATION (2026-05-12): this single
+        # ``modules`` entry transparently picks up BOTH
+        # ``modules/RBFtools/scripts/`` (Maya 2025 canonical) AND
+        # ``modules/RBFtools/scripts_2022/`` (py2/py3 compat fork).
+        # No spec change was required for the dual-scripts layout.
+        # ``installer_gui.py:_build_mod_content`` routes Maya 2022
+        # to scripts_2022 via the generated .mod file.
         (os.path.join(HERE, 'modules'), 'modules'),
         (os.path.join(HERE, 'resources'), 'resources'),
     ],
