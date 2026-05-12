@@ -68,8 +68,13 @@ class T_M_P0_REPO_ROOT_TIDY(unittest.TestCase):
             for line in out.splitlines()
             if line.strip() and "/" not in line
         )
-        expected = [".gitignore", "LICENSE", "README.md",
-                    "installer_gui.py"]
+        # M_P0_MAYA_VERSION_ISOLATION (2026-05-12): ``.gitattributes``
+        # added at repo root to pin scripts_2022/ to LF endings so the
+        # sync-script drift detector is byte-stable across autocrlf
+        # configurations. Git only honours ``.gitattributes`` at the
+        # repo root, so its location here is mandatory.
+        expected = [".gitattributes", ".gitignore", "LICENSE",
+                    "README.md", "installer_gui.py"]
         self.assertEqual(
             root_files, expected,
             "Repo root tracked file set drift. Expected exactly "
