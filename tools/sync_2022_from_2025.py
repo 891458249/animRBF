@@ -214,6 +214,19 @@ def _ascii_escape_string_token(tok_string):
     # Rule 2: any raw non-ASCII char in the (post-Rule-3) body becomes a
     # \uXXXX or \UXXXXXXXX escape.
     has_non_ascii = any(ord(c) > 127 for c in new_body)
+
+    # Phase 7 hotfix (M_P0_MAYA_VERSION_ISOLATION):
+    # Rule 3 may have produced \uXXXX / \UXXXXXXXX escapes from \xHH
+    # multi-byte sequences. py2 requires a u-prefix for \uXXXX to
+    # decode as a Unicode escape; without it, ``"φ"`` is six
+    # literal ASCII chars instead of phi. Auto-promote the prefix
+    # whenever the post-Rule-3 body contains such an escape. The
+    # negative-lookbehind handles ``\\u`` (an escaped backslash
+    # followed by literal ``u``) so we do not over-promote.
+    has_unicode_escape = bool(
+        re.search(r'(?<!\\)(?:\\\\)*\\[uU][0-9a-fA-F]{4}', new_body)
+    )
+
     if has_non_ascii:
         escaped = []
         for c in new_body:
@@ -225,9 +238,12 @@ def _ascii_escape_string_token(tok_string):
             else:
                 escaped.append("\\U{0:08x}".format(cp))
         new_body = "".join(escaped)
-        # Auto-prefix u if not already u/b
-        if not (_is_bytes_prefix(prefix) or "u" in prefix.lower()):
-            prefix = "u" + prefix
+
+    # Auto-prefix u if literal contains raw non-ASCII (Rule 2) OR
+    # post-Rule-3 \uXXXX / \UXXXXXXXX escapes (Phase 7 hotfix).
+    if (has_non_ascii or has_unicode_escape) and not (
+            _is_bytes_prefix(prefix) or "u" in prefix.lower()):
+        prefix = "u" + prefix
 
     return prefix + quote + new_body + quote
 
