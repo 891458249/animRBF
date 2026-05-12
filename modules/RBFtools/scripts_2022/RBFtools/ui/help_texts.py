@@ -238,44 +238,44 @@ _EN = {
 
     # -- Per-option: Kernel --
     "kernel_linear":
-        "Linear kernel: \u03c6(r) = r\n\n"
+        u"Linear kernel: \u03c6(r) = r\n\n"
         u"The simplest kernel \u2014 weight falls off linearly with distance. "
         "Produces sharp, tent-like transitions between poses. "
         "Radius Type is ignored (always uses direct distance).\n\n"
         "Pros: Fast, predictable.\n"
-        "Cons: Not smooth at pose locations (C\u2070 continuity only).",
+        u"Cons: Not smooth at pose locations (C\u2070 continuity only).",
 
     "kernel_gaussian1":
-        "Gaussian 1 kernel: \u03c6(r) = exp(-r\u00b2)\n\n"
+        u"Gaussian 1 kernel: \u03c6(r) = exp(-r\u00b2)\n\n"
         "Standard bell-curve falloff. Each pose has a smooth, rounded "
         "region of influence that fades to zero. "
         "Radius controls the width of the bell curve.\n\n"
-        "Pros: Smooth (C\u221e), well-behaved, most commonly used.\n"
+        u"Pros: Smooth (C\u221e), well-behaved, most commonly used.\n"
         "Cons: Can produce near-zero weights far from any pose.",
 
     "kernel_gaussian2":
-        "Gaussian 2 kernel: \u03c6(r) = exp(-r\u00b2/2)\n\n"
+        u"Gaussian 2 kernel: \u03c6(r) = exp(-r\u00b2/2)\n\n"
         "A wider variant of the Gaussian bell curve. The '/2' denominator "
         "makes each pose's influence spread further before fading.\n\n"
         "Pros: Broader falloff, smoother blending across distant poses.\n"
         u"Cons: Less localised \u2014 nearby poses may interfere more.",
 
     "kernel_thin_plate":
-        "Thin Plate Spline kernel: \u03c6(r) = r\u00b2 \u00b7 ln(r)\n\n"
+        u"Thin Plate Spline kernel: \u03c6(r) = r\u00b2 \u00b7 ln(r)\n\n"
         "Inspired by the physical bending of a thin metal plate. "
         "Produces very smooth interpolation with minimal oscillation.\n\n"
         "Pros: Excellent for scattered data, minimal overshoot.\n"
         u"Cons: Not strictly positive-definite \u2014 may need regularisation.",
 
     "kernel_multi_quadratic":
-        "Multi-Quadratic Biharmonic kernel: \u03c6(r) = \u221a(1 + r\u00b2)\n\n"
+        u"Multi-Quadratic Biharmonic kernel: \u03c6(r) = \u221a(1 + r\u00b2)\n\n"
         "A biharmonic kernel that grows without bound. Produces globally "
         "smooth interpolation where distant poses still contribute.\n\n"
         "Pros: Very smooth, good for large pose sets.\n"
         "Cons: Distant poses may have too much influence; can be slow.",
 
     "kernel_inv_multi_quadratic":
-        "Inverse Multi-Quadratic Biharmonic kernel: \u03c6(r) = 1/\u221a(1 + r\u00b2)\n\n"
+        u"Inverse Multi-Quadratic Biharmonic kernel: \u03c6(r) = 1/\u221a(1 + r\u00b2)\n\n"
         "The inverse of the Multi-Quadratic. Influence decays toward zero "
         "for distant poses, providing more localised blending.\n\n"
         "Pros: Smooth and localised, always positive.\n"
