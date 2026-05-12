@@ -1,0 +1,302 @@
+# -*- coding: utf-8 -*-
+u"""
+Help button widget \u2014 '?' button with hover/pin tooltip bubble.
+"""
+
+from __future__ import absolute_import
+
+from RBFtools.ui.compat import QtWidgets, QtCore
+
+# M_P0_MAYA_2022_FROM_SCRATCH R7 (auto-injected): defensive import.
+# Module-level try/except so a bad help_texts.py source cannot
+# crash the UI. After sync, scripts_2022/help_texts.py is 100%
+# ASCII at byte level so this fallback never triggers in normal
+# operation -- belt-and-suspenders, not graceful degradation.
+try:
+    from RBFtools.ui.help_texts import get_help_text as _get_help_text
+    _HELP_TEXTS_OK = True
+    _HELP_TEXTS_ERR = None
+except Exception as _exc:  # noqa: BLE001
+    import warnings as _warnings
+    _warnings.warn(
+        "RBFtools.ui.help_texts failed to import (likely py2 "
+        "encoding issue). Help bubbles will show diagnostic "
+        "placeholder. Error: {0}".format(_exc),
+        RuntimeWarning,
+    )
+    _HELP_TEXTS_OK = False
+    _HELP_TEXTS_ERR = _exc
+
+    def _get_help_text(key):
+        return (
+            u"[\u26a0 RBFtools help_texts.py import "
+            u"failed - see Maya Script Editor warning]\n\n"
+            u"Error: {0}\n\n"
+            u"Patch ID: M_P0_MAYA_2022_FROM_SCRATCH R7 fallback. "
+            u"Re-run tools/sync_2022_from_2025.py to refresh "
+            u"scripts_2022 from the canonical scripts/ (Maya "
+            u"2025 path). A non-ASCII byte sneaked in without "
+            u"a \\uXXXX escape."
+            .format(_HELP_TEXTS_ERR)
+        )
+
+
+class HelpBubble(QtWidgets.QWidget):
+    """A floating tooltip-like bubble that can be pinned.
+
+    - Unpinned: appears on hover, disappears on leave.
+    - Pinned: stays visible and follows the main window.
+    """
+
+    def __init__(self, parent=None):
+        super(HelpBubble, self).__init__(
+            parent,
+            QtCore.Qt.Tool
+            | QtCore.Qt.FramelessWindowHint
+            | QtCore.Qt.WindowStaysOnTopHint
+        )
+        self.setAttribute(QtCore.Qt.WA_ShowWithoutActivating)
+        self.setStyleSheet(
+            "HelpBubble {"
+            "  background: #2b2b2b;"
+            "  border: 1px solid #555;"
+            "  border-radius: 6px;"
+            "  padding: 8px;"
+            "}"
+            "QLabel {"
+            "  color: #ddd;"
+            "  font-size: 12px;"
+            "  background: transparent;"
+            "}"
+        )
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        self._label = QtWidgets.QLabel()
+        self._label.setWordWrap(True)
+        self._label.setMaximumWidth(280)
+        lay.addWidget(self._label)
+
+    def set_text(self, text):
+        self._label.setText(text)
+        self.adjustSize()
+
+    def reposition(self, anchor_global_pos):
+        """Position the bubble to the right of the anchor point."""
+        self.move(anchor_global_pos.x() + 20, anchor_global_pos.y() - 10)
+
+
+class HelpButton(QtWidgets.QToolButton):
+    """Small '?' button with hover and click tooltip behavior."""
+
+    # Class-level tracking: only one pinned bubble at a time
+    _active_pinned = None
+
+    def __init__(self, help_key, parent=None):
+        super(HelpButton, self).__init__(parent)
+        self._help_key = help_key
+        self._pinned = False
+        self._bubble = None
+        self._main_window = None
+
+        self.setText("?")
+        self.setFixedSize(18, 18)
+        self.setStyleSheet(
+            "QToolButton {"
+            "  border: 1px solid #666;"
+            "  border-radius: 9px;"
+            "  background: #3a3a3a;"
+            "  color: #aaa;"
+            "  font-size: 11px;"
+            "  font-weight: bold;"
+            "}"
+            "QToolButton:hover {"
+            "  background: #505050;"
+            "  color: #fff;"
+            "  border-color: #888;"
+            "}"
+        )
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.clicked.connect(self._on_click)
+
+    def _get_bubble(self):
+        if self._bubble is None:
+            self._bubble = HelpBubble()
+        return self._bubble
+
+    def _find_main_window(self):
+        """Walk up the parent chain to find the QMainWindow."""
+        if self._main_window is not None:
+            return self._main_window
+        w = self.parent()
+        while w is not None:
+            if isinstance(w, QtWidgets.QMainWindow):
+                self._main_window = w
+                return w
+            w = w.parent()
+        return None
+
+    def _show_bubble(self):
+        bubble = self._get_bubble()
+        bubble.set_text(_get_help_text(self._help_key))
+        bubble.reposition(self.mapToGlobal(QtCore.QPoint(self.width(), 0)))
+        bubble.show()
+
+    def _hide_bubble(self):
+        if self._bubble is not None:
+            self._bubble.hide()
+
+    def _on_click(self):
+        if self._pinned:
+            self._pinned = False
+            self._hide_bubble()
+            self._uninstall_move_filter()
+            if HelpButton._active_pinned is self:
+                HelpButton._active_pinned = None
+        else:
+            if HelpButton._active_pinned is not None and HelpButton._active_pinned is not self:
+                HelpButton._active_pinned._on_click()
+            self._pinned = True
+            HelpButton._active_pinned = self
+            self._show_bubble()
+            self._install_move_filter()
+
+    def _install_move_filter(self):
+        win = self._find_main_window()
+        if win:
+            win.installEventFilter(self)
+        # M_UIPOLISH (Hardening 4): also listen to QApplication state
+        # changes so a Maya alt-tab away (no minimize) hides the
+        # pinned bubble. Idempotent -- Qt deduplicates connect() if the
+        # same signal/slot pair is already wired.
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                app.applicationStateChanged.connect(
+                    self._on_application_state_changed)
+            except Exception:
+                pass
+
+    def _uninstall_move_filter(self):
+        win = self._find_main_window()
+        if win:
+            win.removeEventFilter(self)
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                app.applicationStateChanged.disconnect(
+                    self._on_application_state_changed)
+            except (TypeError, RuntimeError):
+                # disconnect raises when not connected; harmless.
+                pass
+
+    def _on_application_state_changed(self, state):
+        """M_UIPOLISH (C.2 fallback): when Maya loses application
+        active state (alt-tab to another app, screen-saver, etc.)
+        hide the pinned bubble. Idempotent (Hardening 4) - only
+        toggles when actually pinned + visible."""
+        if state == QtCore.Qt.ApplicationInactive:
+            if (self._pinned and self._bubble is not None
+                    and self._bubble.isVisible()):
+                self._on_click()
+
+    def eventFilter(self, obj, event):
+        """Track main-window events.
+
+        - Move / Resize (legacy, M_B24b1): reposition pinned bubble.
+        - WindowStateChange / Hide (M_UIPOLISH C.2): hide the pinned
+          bubble when Maya is minimised or the main window hides.
+
+        Always returns False (non-consuming) - red line 14 backcompat
+        parity: never swallow events the rest of the app expects."""
+        et = event.type()
+        # Legacy path - 0-modification (red line 14 backcompat parity).
+        if et in (QtCore.QEvent.Move, QtCore.QEvent.Resize):
+            if self._pinned and self._bubble and self._bubble.isVisible():
+                self._bubble.reposition(
+                    self.mapToGlobal(QtCore.QPoint(self.width(), 0)))
+        # M_UIPOLISH C.2 / Hardening 2 + 4 - hide on minimise / hide.
+        # Idempotent: only un-pins when pinned AND bubble visible.
+        elif et in (QtCore.QEvent.WindowStateChange, QtCore.QEvent.Hide):
+            if (self._pinned and self._bubble is not None
+                    and self._bubble.isVisible()):
+                self._on_click()
+        return False
+
+    def enterEvent(self, event):
+        if not self._pinned:
+            self._show_bubble()
+        super(HelpButton, self).enterEvent(event)
+
+    def leaveEvent(self, event):
+        if not self._pinned:
+            self._hide_bubble()
+        super(HelpButton, self).leaveEvent(event)
+
+    def hideEvent(self, event):
+        """Clean up when the button itself is hidden."""
+        if self._pinned:
+            self._pinned = False
+            if HelpButton._active_pinned is self:
+                HelpButton._active_pinned = None
+            self._uninstall_move_filter()
+        self._hide_bubble()
+        super(HelpButton, self).hideEvent(event)
+
+
+class ComboHelpButton(HelpButton):
+    """HelpButton that dynamically shows help text based on a QComboBox's
+    current selection or hovered item in the open dropdown.
+
+    - Hover / click '?': shows help for the *current* combo index.
+    - While pinned + combo dropdown open: hovering over items updates
+      the bubble text in real time.
+    - When dropdown closes or item is selected: updates to the final
+      selected index.
+
+    Parameters
+    ----------
+    combo : QComboBox
+        The combo box to observe.
+    key_map : list[str]
+        Help text keys indexed by combo index.
+    fallback_key : str
+        Static key used if combo index is out of range.
+    """
+
+    def __init__(self, combo, key_map, fallback_key="", parent=None):
+        super(ComboHelpButton, self).__init__(
+            fallback_key or key_map[0], parent)
+        self._combo = combo
+        self._key_map = key_map
+        self._fallback_key = fallback_key
+        # Update when an item is actually selected
+        self._combo.currentIndexChanged.connect(self._on_combo_changed)
+        # Update when an item is merely hovered/highlighted in the open popup
+        self._combo.highlighted.connect(self._on_combo_highlighted)
+
+    def _help_key_for_index(self, idx):
+        if 0 <= idx < len(self._key_map):
+            return self._key_map[idx]
+        return self._fallback_key or self._help_key
+
+    def _current_help_key(self):
+        return self._help_key_for_index(self._combo.currentIndex())
+
+    def _show_bubble(self):
+        bubble = self._get_bubble()
+        bubble.set_text(_get_help_text(self._current_help_key()))
+        bubble.reposition(self.mapToGlobal(QtCore.QPoint(self.width(), 0)))
+        bubble.show()
+
+    def _refresh_bubble_for_index(self, idx):
+        """Update an already-visible pinned bubble to show help for *idx*."""
+        if self._pinned and self._bubble is not None and self._bubble.isVisible():
+            self._bubble.set_text(_get_help_text(self._help_key_for_index(idx)))
+
+    def _on_combo_changed(self, index):
+        """Fired when user actually selects (clicks) an item."""
+        self._refresh_bubble_for_index(index)
+
+    def _on_combo_highlighted(self, index):
+        """Fired when user hovers over an item in the open dropdown popup."""
+        self._refresh_bubble_for_index(index)
