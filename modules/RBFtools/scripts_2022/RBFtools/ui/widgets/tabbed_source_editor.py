@@ -29,8 +29,49 @@ and forwards to the controller.
 
 from __future__ import absolute_import
 
-from RBFtools.ui.compat import QtCore, QtWidgets
+from RBFtools.ui.compat import QtCore, QtGui, QtWidgets
 from RBFtools.ui.i18n import tr
+
+
+# ----------------------------------------------------------------------
+# M_P0_DRIVER_CONNECT_UX_REVAMP Part B (2026-05-12) -- per-tab
+# connection status indicator. _STATUS_ICON_CACHE caches one QIcon per
+# state so repeated refresh_tab_indicators calls are cheap.
+# ----------------------------------------------------------------------
+
+_STATUS_ICON_CACHE = {}
+
+_STATUS_COLORS = {
+    "connected":    "#4CAF50",  # green   -- every metadata attr wired
+    "partial":      "#FFC107",  # amber   -- some attrs unwired (broken)
+    "disconnected": "#F44336",  # red     -- 0 wired or empty source
+}
+
+
+def _make_status_icon(state):
+    """Return a 12x12 QIcon with a coloured dot for *state*.
+
+    Uses low-level QPixmap + QPainter so PySide2 and PySide6 render
+    identically (the Qt enum locations changed between Qt5 and Qt6
+    but the QPainter primitives are stable).
+    """
+    cached = _STATUS_ICON_CACHE.get(state)
+    if cached is not None:
+        return cached
+    color_name = _STATUS_COLORS.get(state, "#888888")
+    pm = QtGui.QPixmap(12, 12)
+    pm.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(pm)
+    try:
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setBrush(QtGui.QColor(color_name))
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.drawEllipse(1, 1, 10, 10)
+    finally:
+        painter.end()
+    icon = QtGui.QIcon(pm)
+    _STATUS_ICON_CACHE[state] = icon
+    return icon
 
 
 # ----------------------------------------------------------------------
@@ -313,15 +354,27 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         # The legacy path simply emitted attrsApplyRequested for
         # the active tab -- Bug repro: prior behaviour ignored
         # _chk_batch entirely so checking it had zero effect on
-        # path-A button clicks (vs the path-B pose-editor flow
-        # which DID consult it via _gather_routed_targets).
+        # path-A button clicks.
+        #
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part E.3 (2026-05-12):
+        # dedupe attr selection preserving order before emitting.
+        # selected_attrs() comes from QListWidget.selectedItems()
+        # and is typically already unique, but defensive dedupe
+        # shields against any future re-implementation that might
+        # emit duplicates (which would double-wire input[]).
         idx = self._tabs.currentIndex()
         if idx < 0:
             return
         content = self._tabs.widget(idx)
         if content is None:
             return
-        attrs = list(content.selected_attrs())
+        attrs_raw = list(content.selected_attrs())
+        seen = set()
+        attrs = []
+        for a in attrs_raw:
+            if a not in seen:
+                seen.add(a)
+                attrs.append(a)
         if self.is_batch_mode():
             self.attrsApplyBatchRequested.emit(attrs)
         else:
@@ -481,6 +534,39 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
             out.append((node, list(blueprint)))
         return out
 
+    def refresh_tab_indicators(self, controller):
+        """M_P0_DRIVER_CONNECT_UX_REVAMP Part B (2026-05-12) -- walk
+        every tab and stamp a connection-status dot on its title bar.
+
+        Called by main_window in response to:
+          * driverSourcesChanged signal (post add/remove/set)
+          * currentNodeChanged signal (node switch)
+          * connect_routed post-storm callback
+          * manual Reload click
+
+        Driver panels query ``controller.driver_source_connection_state``;
+        driven panels (which do not yet have a state helper) get a
+        neutral grey dot. Subclasses override ``_query_state(controller,
+        index)`` to plug in driven-side support later without touching
+        this loop.
+        """
+        if controller is None:
+            return
+        for i in range(self._tabs.count()):
+            state = self._query_state(controller, i)
+            try:
+                self._tabs.setTabIcon(i, _make_status_icon(state))
+            except Exception:
+                # PySide rendering glitches must not crash the panel.
+                pass
+
+    def _query_state(self, controller, index):
+        """Default: panel role is unknown -> grey dot. The driver
+        subclass overrides to call
+        ``controller.driver_source_connection_state(index)``.
+        """
+        return "unknown"
+
     def set_sources(self, sources, available_attrs_per_source=None):
         """Programmatic rebuild from list[DriverSource | DrivenSource].
 
@@ -581,6 +667,16 @@ class TabbedDriverSourceEditor(_TabbedSourceEditorBase):
     _header_key       = "driver_source_list_header"
     _add_button_key   = "btn_add_driver"
     _empty_hint_key   = "driver_source_list_empty_hint"
+
+    def _query_state(self, controller, index):
+        """M_P0_DRIVER_CONNECT_UX_REVAMP Part B: query connection
+        state for tab *index* via the controller. Returns one of
+        "connected" / "partial" / "disconnected".
+        """
+        try:
+            return controller.driver_source_connection_state(index)
+        except Exception:
+            return "disconnected"
 
 
 class TabbedDrivenSourceEditor(_TabbedSourceEditorBase):

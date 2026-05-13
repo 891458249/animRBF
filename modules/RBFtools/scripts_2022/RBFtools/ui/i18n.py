@@ -562,6 +562,19 @@ _EN = {
     "msg_disconnect_precise":
         "Disconnected the selected attributes only; other "
         "attributes on this source remain wired.",
+    # M_P0_DRIVER_CONNECT_UX_REVAMP (2026-05-12) -- per-tab idempotent
+    # Connect dispatch + attr count change confirmation.
+    "title_attr_count_change":         "Driver attr count change",
+    "msg_attr_count_change_will_rewire":
+        "Driver {0} attr count will change from {1} to {2}. This "
+        "will trigger re-wiring of all {3} subsequent driver "
+        "source(s). Continue?",
+    "driver_idempotent_skip":
+        "Driver {0} already fully connected with the same attrs; "
+        "skipping (idempotent).",
+    "connect_all_already_connected":
+        "All driver tabs are already fully connected with the "
+        "selected attrs (idempotent skip).",
     # M_BATCH_PATH_A_WIRE (2026-04-28) -- confirm dialogs for the
     # cross-tab broadcast Connect / Disconnect.
     "title_batch_apply_confirm":      "Batch apply across all tabs?",
@@ -1066,6 +1079,18 @@ _ZH = {
     "title_disconnect_precise":       u"\u7cbe\u786e\u65ad\u5f00",
     "msg_disconnect_precise":
         u"\u4ec5\u65ad\u5f00\u6240\u9009\u5c5e\u6027;\u6b64\u76ee\u6807\u7684\u5176\u4ed6\u5c5e\u6027\u4fdd\u6301\u8fde\u63a5\u3002",
+    # M_P0_DRIVER_CONNECT_UX_REVAMP (2026-05-12)
+    "title_attr_count_change":         u"\u9a71\u52a8\u5c5e\u6027\u6570\u53d8\u5316",
+    "msg_attr_count_change_will_rewire":
+        u"Driver {0} \u7684 attr \u6570\u5c06\u4ece {1} \u53d8\u4e3a {2}\uff0c"
+        u"\u8fd9\u4f1a\u89e6\u53d1\u540e\u7eed {3} \u4e2a driver source \u7684\u91cd\u8fde\u3002"
+        u"\u662f\u5426\u7ee7\u7eed\uff1f",
+    "driver_idempotent_skip":
+        u"Driver {0} \u5df2\u7528\u76f8\u540c\u5c5e\u6027\u5b8c\u6574\u8fde\u63a5\uff0c"
+        u"\u8df3\u8fc7 (\u5e42\u7b49).",
+    "connect_all_already_connected":
+        u"\u6240\u6709 driver tab \u90fd\u5df2\u7528\u5f53\u524d\u6240\u9009\u5c5e\u6027"
+        u"\u5b8c\u6574\u8fde\u63a5\uff0c\u65e0\u9700\u91cd\u8fde (\u5e42\u7b49).",
     # M_BATCH_PATH_A_WIRE (2026-04-28)
     "title_batch_apply_confirm":      u"\u8de8\u6240\u6709\u6807\u7b7e\u9875\u6279\u91cf\u8fde\u63a5?",
     "msg_batch_apply_confirm":

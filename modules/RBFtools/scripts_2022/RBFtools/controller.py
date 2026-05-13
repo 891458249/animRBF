@@ -356,6 +356,30 @@ class MainController(QtCore.QObject):
                 "read_driver_sources failed: {}".format(exc))
             return []
 
+    def driver_source_connection_state(self, index):
+        """M_P0_DRIVER_CONNECT_UX_REVAMP Part A.3 (2026-05-12) --
+        forward to :func:`core.driver_source_connection_state` for
+        the active node's driverSource[index].
+
+        ``index`` is the tab-position (dense) index. The
+        sparse-multi translation matches the rest of the controller
+        API surface so callers do not need to think about the
+        sparse subscript layout.
+        """
+        if not self._current_node:
+            return "disconnected"
+        multi_idx = self._list_idx_to_sparse("driver", index)
+        if multi_idx is None:
+            return "disconnected"
+        try:
+            return core.driver_source_connection_state(
+                self._current_node, multi_idx)
+        except Exception as exc:
+            cmds.warning(
+                "driver_source_connection_state failed: {}".format(
+                    exc))
+            return "disconnected"
+
     # =================================================================
     #  M_ROTORDER_UI_REFACTOR (2026-04-29) -- driver-tab-synced
     #  rotate-order self-heal.
