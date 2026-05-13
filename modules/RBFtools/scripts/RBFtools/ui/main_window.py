@@ -1987,23 +1987,67 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         return out
 
     def _on_driver_source_attrs_apply(self, index, attrs):
-        """M_CONNECT_DISCONNECT_FIX Bug 1 (2026-04-28): Connect
-        button on a driver tab. Replaces the legacy
-        M_TABBED_CONNECT_GUARD unconditional "already connected
-        -> block" path with the user-spec A.3 / B.1 overlap-aware
-        dispatch:
+        """M_CONNECT_DISCONNECT_FIX Bug 1 (2026-04-28) +
+        M_P0_DRIVER_CONNECT_UX_REVAMP Part C+E (2026-05-12):
+        Connect button on a driver tab.
 
           * empty selection           -> info dialog + abort
-          * any non-empty selection   -> proceed; controller's
-            set_driver_source_attrs handles overlapping (break-then-
-            rebuild via _disconnect_or_purge) AND pure-new (append)
-            uniformly. The plan-dict surfaces overlapping attrs as
-            cmds.warning trace so the TD can see what was reset.
+          * connected + same attrs    -> idempotent skip (Part E.1)
+          * partial state             -> force atomic re-wire to
+                                         recover from broken state
+          * attr count change with
+            subsequent sources        -> Part C confirmation dialog
+          * otherwise                 -> proceed via
+                                         set_driver_source_attrs
         """
         plan = self._guard_attrs_apply(
             "driver", int(index), list(attrs))
         if plan is None:
             return  # blocked: empty selection
+
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part E.1: indicator-guided
+        # idempotent short-circuit. If the tab is fully wired AND
+        # the user's selection matches the existing metadata, the
+        # click is a no-op -- no DG churn, no metadata churn.
+        state = self._ctrl.driver_source_connection_state(int(index))
+        sources = self._ctrl.read_driver_sources()
+        existing_attrs = (
+            list(sources[index].attrs)
+            if 0 <= index < len(sources) else [])
+        new_attrs = list(attrs)
+        if state == "connected" and existing_attrs == new_attrs:
+            try:
+                cmds.warning(
+                    tr("driver_idempotent_skip").format(index))
+            except Exception:
+                pass
+            return
+
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part C: attr count change
+        # confirmation. When the count differs AND there are
+        # downstream sources, surface the re-wiring scope so the
+        # user can cancel before the storm fires.
+        if (0 <= index < len(sources)
+                and len(existing_attrs) != len(new_attrs)
+                and index < len(sources) - 1):
+            n_subsequent = len(sources) - index - 1
+            try:
+                result = QtWidgets.QMessageBox.question(
+                    self,
+                    tr("title_attr_count_change"),
+                    tr("msg_attr_count_change_will_rewire").format(
+                        index, len(existing_attrs),
+                        len(new_attrs), n_subsequent),
+                    QtWidgets.QMessageBox.Yes
+                    | QtWidgets.QMessageBox.No)
+                if result != QtWidgets.QMessageBox.Yes:
+                    return
+            except Exception:
+                # Headless / unavailable QMessageBox: proceed without
+                # blocking (the existing cmds.warning trace still
+                # informs the user).
+                pass
+
         if plan["overlapping"]:
             cmds.warning(
                 "Connect (driver[{}]): overlapping attrs {!r} will "
@@ -2238,6 +2282,13 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # gone (the legacy AttributeList it warned about no longer
         # exists). The tabbed editor IS the multi-source UI - no
         # additional notice needed.
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part B (2026-05-12): refresh
+        # the per-tab connection indicator dots after every reload
+        # so the dots reflect the post-mutation state.
+        try:
+            self._driver_source_list.refresh_tab_indicators(self._ctrl)
+        except Exception:
+            pass
         # Phase 2: cascade the rebuild into the pose grid so its
         # column structure tracks the new driver source list.
         self._refresh_pose_grid()
@@ -2388,37 +2439,87 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
 
     def _on_connect(self):
         # M_LIVE_DEBUG (2026-04-28): top-of-slot trace so a live
-        # operator can confirm the new code path is loaded. Goes
-        # to cmds.warning so it appears in Script Editor with the
-        # yellow icon even if 'Print all warnings' is off.
+        # operator can confirm the new code path is loaded.
         try:
             cmds.warning(">>> ON_CONNECT TRIGGERED <<<")
         except Exception:
             print(">>> ON_CONNECT TRIGGERED <<<")
-        # M_CRASH_FIX (2026-04-28) — three-defense protocol:
-        #   1. Pure-string gather BEFORE any cmds.* call. Once
-        #      _gather_routed_targets returns, the UI is no longer
-        #      consulted for the duration of the storm.
-        #   2. core.connect_routed wraps the connectAttr loop in
-        #      _node_state_frozen so partial-wire compute() cannot
-        #      crash the kernel.
-        #   3. _is_updating lock blocks _refresh_pose_grid +
-        #      _refresh_base_pose_panel re-entry from any node-
-        #      change callback that fires mid-storm.
+        # M_CRASH_FIX (2026-04-28) -- three-defense protocol +
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part E.2 (2026-05-12):
+        # indicator-guided per-tab filter applied BEFORE the
+        # connect_routed storm so already-green tabs with the same
+        # attrs are skipped (idempotent batch / pose-panel click).
         # Step 1: pure-string gather.
         driver_targets, driven_targets = (
             self._gather_routed_targets())
+
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part E.2: filter driver
+        # targets whose tab is already fully wired with the same
+        # attrs. Defends against duplicate-wire accumulation when
+        # the user repeats Connect or runs Connect on an already-
+        # consistent rig.
+        try:
+            sources = self._ctrl.read_driver_sources()
+        except Exception:
+            sources = []
+        filtered_drivers = []
+        skipped = []
+        for i, (node, attrs) in enumerate(driver_targets):
+            if i >= len(sources):
+                filtered_drivers.append((node, attrs))
+                continue
+            try:
+                state = self._ctrl.driver_source_connection_state(i)
+            except Exception:
+                state = "disconnected"
+            existing_attrs = list(sources[i].attrs)
+            if state == "connected" and existing_attrs == list(attrs):
+                skipped.append(i)
+                continue
+            filtered_drivers.append((node, attrs))
+        if skipped:
+            try:
+                cmds.warning(
+                    "Connect: {} already-connected driver tab(s) "
+                    "skipped (idempotent): indices {}".format(
+                        len(skipped), skipped))
+            except Exception:
+                pass
+
+        # Part E.2: if EVERY driver tab was filtered AND there are
+        # no driven targets to act on either, surface the dedicated
+        # all-already-connected dialog so the click does not look
+        # like a no-op.
+        if not filtered_drivers and not driven_targets:
+            try:
+                cmds.confirmDialog(
+                    title="RBFtools",
+                    message=tr("connect_all_already_connected"),
+                    button=["OK"], defaultButton="OK")
+            except Exception:
+                try:
+                    cmds.warning(tr("connect_all_already_connected"))
+                except Exception:
+                    pass
+            return
+
         # Step 2: enter critical section.
         self._set_interaction_enabled(False)
         self._is_updating = True
         try:
             self._ctrl.connect_routed(
-                driver_targets, driven_targets)
+                filtered_drivers, driven_targets)
         finally:
             self._is_updating = False
             self._set_interaction_enabled(True)
         # Step 3: ONE consolidated refresh outside the lock.
         self._refresh_pose_grid()
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part B: post-storm
+        # indicator refresh so the dots reflect the new state.
+        try:
+            self._driver_source_list.refresh_tab_indicators(self._ctrl)
+        except Exception:
+            pass
 
     def _on_disconnect(self):
         # M_LIVE_DEBUG: top-of-slot trace. See _on_connect note.
