@@ -32,10 +32,17 @@ from __future__ import absolute_import
 
 import io
 import os
+import sys
 import unittest
 from unittest import mock
 
-import conftest
+# Allow `import conftest` regardless of cwd at pytest invocation
+# (root-level sweep cwd is the repo root, not modules/RBFtools/tests).
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+
+import conftest  # noqa: E402
 
 
 _REPO_ROOT = os.path.normpath(

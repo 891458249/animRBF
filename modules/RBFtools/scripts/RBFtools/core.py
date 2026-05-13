@@ -1812,16 +1812,12 @@ def set_driver_source_attrs(node, index, new_attrs):
     with undo_chunk("RBFtools: set driver source attrs"), \
          _node_state_frozen(shape):
         # 1) Disconnect every existing wire of source[index..end].
-        for i in range(index, len(sources)):
-            s = sources[i]
-            if not s.node:
-                continue
-            for attr in s.attrs:
-                plug = "{}.{}".format(s.node, attr)
-                sub_idx = _subscript_of_existing_input(plug, shape)
-                if sub_idx is not None:
-                    _disconnect_or_purge(
-                        shape, "input", sub_idx, plug)
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part A: drive the disconnect
+        # loop from the pre_wires snapshot so _subscript_of_existing
+        # _input is called exactly once per attr (the snapshot pass).
+        for src_node_w, attr_w, sub_idx in pre_wires:
+            plug = "{}.{}".format(src_node_w, attr_w)
+            _disconnect_or_purge(shape, "input", sub_idx, plug)
 
         # M_P0_DRIVER_CONNECT_UX_REVAMP Part A: track every wire we
         # create so rollback can disconnect them cleanly.
