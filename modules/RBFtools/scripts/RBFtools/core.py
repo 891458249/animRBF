@@ -1746,33 +1746,29 @@ def disconnect_driver_source_attrs(node, index, attrs=None):
 
 def set_driver_source_attrs(node, index, new_attrs):
     """M_UIRECONCILE_PLUS (Item 4b) +
-    M_CONNECT_DISCONNECT_FIX Bug 1 (2026-04-28): replace the attrs
-    list of an existing driverSource[index] entry.
+    M_CONNECT_DISCONNECT_FIX Bug 1 (2026-04-28) +
+    M_P0_DRIVER_CONNECT_UX_REVAMP Part A (2026-05-12): replace the
+    attrs list of an existing driverSource[index] entry.
 
-    M_CONNECT_DISCONNECT_FIX 加固 1 / 加固 6 (2026-04-28):
-      * Overlapping attrs (those that are BOTH in existing AND in
-        new_attrs) are first severed via :func:`_disconnect_or_purge`
-        so any unitConversion ghost is purged before the heavy
-        rebuild fires (atomic protocol reuse).
-      * Pure-new attrs (those in new_attrs but NOT existing) just
-        flow through the rebuild append path.
-      * The MStringArray's final order matches ``new_attrs`` —
-        :func:`add_driver_source` writes the attrs in list order
-        and that is the user's selection order from the tabbed
-        editor's QListWidget.
+    M_P0_DRIVER_CONNECT_UX_REVAMP Part A (atomic rewrite):
+      * Step 2 + 4 connectAttr exceptions are no longer swallowed
+        by cmds.warning -- they raise + trigger full rollback.
+      * Step 3 (driverSource_attrs metadata write) is moved AFTER
+        Step 2 + 4 so metadata is updated ONLY when every wire
+        landed successfully. Eliminates the metadata-vs-wire drift
+        that polluted the base offset of subsequent sources.
+      * Pre-snapshot of source[index..end] wires recorded BEFORE
+        Step 1 disconnect; on failure the snapshot drives the
+        restore loop that puts every wire back at its original
+        input[] subscript.
+      * All-or-nothing semantics: success returns True with
+        metadata + wires consistent; failure returns False and
+        the node returns to its pre-call state.
 
-    Implementation (post-fix): read the full source list, replace
-    index'th entry's attrs, then remove + re-add every source in
-    order. The remove-all + re-add-all rebuild handles input[] /
-    driverList[] subscript shifts correctly when len(new_attrs)
-    differs from len(existing). The pre-clean step ensures
-    overlapping wires drop their unitConversion artefacts before
-    the rebuild restores them.
-
-    Returns True on success, False if the index is out of range or
-    the underlying mutation raised. Failures emit cmds.warning so
-    the controller layer surfaces them to the TD via the script
-    editor.
+    Returns True on full success, False if the index is out of
+    range or any wire/metadata mutation raised (with rollback
+    already applied). The honest-failure anchor is strengthened:
+    silent warn -> atomic raise + rollback.
     """
     shape = get_shape(node)
     sources = read_driver_info_multi(node)
@@ -1786,120 +1782,201 @@ def set_driver_source_attrs(node, index, new_attrs):
             "set_driver_source_attrs: index {} out of range "
             "(0..{})".format(index, len(sources) - 1))
         return False
-    # M_REBUILD_REFACTOR (2026-04-28): incremental diff replaces
-    # the legacy remove-all + re-add-all rebuild that compounded
-    # Bug A residue (input[] empty subscripts + duplicate
-    # connections accumulating across N sources). The new flow:
-    #   * Disconnect every wire of source[index..end] via
-    #     _disconnect_or_purge (atomic protocol — purges
-    #     unitConversion ghosts + cleans empty subscripts).
-    #   * Re-wire source[index] with new_attrs at its base offset.
-    #   * Re-wire source[i>index] with their UNCHANGED attrs at the
-    #     SHIFTED base. driverSource[] metadata of i>index is
-    #     untouched (no churn).
-    #   * Final _sweep_empty_subscripts chaser.
-    # Sources strictly before `index` are never touched — they
-    # already hold the correct input[0..base-1] subscripts.
     target = sources[index]
     src_node = target.node
     existing_attrs = list(target.attrs)
     new_attrs_list = list(new_attrs)
     # No-op short-circuit when the user re-clicks Connect with no
-    # actual change — saves an entire DG storm.
+    # actual change -- saves an entire DG storm.
     if existing_attrs == new_attrs_list:
         return True
     removed = [a for a in existing_attrs if a not in new_attrs_list]
     added = [a for a in new_attrs_list if a not in existing_attrs]
     base = sum(len(s.attrs) for s in sources[:index])
+
+    # M_P0_DRIVER_CONNECT_UX_REVAMP Part A: pre-snapshot original
+    # wires of source[index..end]. Each tuple records (source_node,
+    # attr_name, original input[] subscript) so rollback can put
+    # the wire back at its original slot if Step 2 or Step 4 fails.
+    pre_wires = []
+    for i in range(index, len(sources)):
+        s = sources[i]
+        if not s.node:
+            continue
+        for attr in s.attrs:
+            plug = "{}.{}".format(s.node, attr)
+            sub_idx = _subscript_of_existing_input(plug, shape)
+            if sub_idx is not None:
+                pre_wires.append((s.node, attr, sub_idx))
+
     with undo_chunk("RBFtools: set driver source attrs"), \
          _node_state_frozen(shape):
-        # 1) Disconnect every existing wire of source[index..end]
-        # via the atomic helper. Sources < index are skipped
-        # entirely (their wiring is unchanged).
+        # 1) Disconnect every existing wire of source[index..end].
         for i in range(index, len(sources)):
             s = sources[i]
             if not s.node:
                 continue
             for attr in s.attrs:
                 plug = "{}.{}".format(s.node, attr)
-                sub_idx = _subscript_of_existing_input(
-                    plug, shape)
+                sub_idx = _subscript_of_existing_input(plug, shape)
                 if sub_idx is not None:
                     _disconnect_or_purge(
                         shape, "input", sub_idx, plug)
-        # 2) Reconnect source[index] with new_attrs IN ORDER at
-        # input[base..base+len(new_attrs)-1]. Per-attr existence
-        # check defends against a deleted bone attr. force=True
-        # is belt-and-suspenders; the slot is guaranteed empty by
-        # the disconnect above.
-        if src_node and _exists(src_node):
-            for i, attr in enumerate(new_attrs_list):
-                if not cmds.attributeQuery(
-                        attr, node=src_node, exists=True):
-                    cmds.warning(
-                        "set_driver_source_attrs: {}.{} does not "
-                        "exist; skipping".format(src_node, attr))
-                    continue
-                src_plug = "{}.{}".format(src_node, attr)
-                dst_plug = "{}.input[{}]".format(shape, base + i)
-                try:
+
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part A: track every wire we
+        # create so rollback can disconnect them cleanly.
+        connected_step2 = []
+        connected_step4 = []
+
+        try:
+            # 2) Re-wire source[index] with new_attrs at
+            # input[base..base+len(new_attrs)-1]. ATOMIC: any
+            # connectAttr exception raises out of the loop and the
+            # except block rolls back everything.
+            if src_node and _exists(src_node):
+                for i, attr in enumerate(new_attrs_list):
+                    if not cmds.attributeQuery(
+                            attr, node=src_node, exists=True):
+                        raise RuntimeError(
+                            "set_driver_source_attrs: {}.{} does "
+                            "not exist".format(src_node, attr))
+                    src_plug = "{}.{}".format(src_node, attr)
+                    dst_plug = "{}.input[{}]".format(
+                        shape, base + i)
                     cmds.connectAttr(
                         src_plug, dst_plug, force=True)
-                except Exception as exc:
-                    cmds.warning(
-                        "set_driver_source_attrs: {} -> {} "
-                        "failed: {}".format(
-                            src_plug, dst_plug, exc))
-        # 3) Update source[index]'s driverSource_attrs MStringArray
-        # in user selection order.
-        attrs_plug = "{}.driverSource[{}].driverSource_attrs".format(
-            shape, index)
-        try:
+                    connected_step2.append((src_plug, dst_plug))
+
+            # 4) Re-wire source[i>index] with their EXISTING attrs
+            # at the shifted base. ATOMIC: same raise-and-rollback
+            # contract.
+            next_base = base + len(new_attrs_list)
+            for i in range(index + 1, len(sources)):
+                s = sources[i]
+                if not s.node or not _exists(s.node):
+                    next_base += len(s.attrs)
+                    continue
+                for j, attr in enumerate(s.attrs):
+                    if not cmds.attributeQuery(
+                            attr, node=s.node, exists=True):
+                        continue
+                    src_plug = "{}.{}".format(s.node, attr)
+                    dst_plug = "{}.input[{}]".format(
+                        shape, next_base + j)
+                    cmds.connectAttr(
+                        src_plug, dst_plug, force=True)
+                    connected_step4.append((src_plug, dst_plug))
+                next_base += len(s.attrs)
+
+            # 3) Metadata write -- ONLY now that every wire landed.
+            # Moved AFTER Step 2 + 4 per M_P0_DRIVER_CONNECT_UX_REVAMP
+            # Part A: ensures driverSource_attrs reflects the actual
+            # wire state and the base offset computation for the next
+            # call stays consistent.
+            attrs_plug = (
+                "{}.driverSource[{}].driverSource_attrs".format(
+                    shape, index))
             if new_attrs_list:
                 cmds.setAttr(
                     attrs_plug, len(new_attrs_list),
                     *new_attrs_list, type="stringArray")
             else:
                 cmds.setAttr(attrs_plug, 0, type="stringArray")
+
         except Exception as exc:
-            cmds.warning(
-                "set_driver_source_attrs: failed to update "
-                "{}: {}".format(attrs_plug, exc))
-            return False
-        # 4) Re-wire source[i>index] with their EXISTING attrs at
-        # the shifted base. driverSource[] metadata is unchanged —
-        # only the input[] subscripts move.
-        next_base = base + len(new_attrs_list)
-        for i in range(index + 1, len(sources)):
-            s = sources[i]
-            if not s.node or not _exists(s.node):
-                next_base += len(s.attrs)
-                continue
-            for j, attr in enumerate(s.attrs):
-                if not cmds.attributeQuery(
-                        attr, node=s.node, exists=True):
+            # M_P0_DRIVER_CONNECT_UX_REVAMP Part A: rollback.
+            # Phase R1: disconnect everything we just connected.
+            for sp, dp in connected_step2 + connected_step4:
+                try:
+                    cmds.disconnectAttr(sp, dp)
+                except Exception:
+                    pass
+            # Phase R2: restore original wires from pre_wires
+            # snapshot. Each entry records the original subscript,
+            # so we can put every wire back exactly where it was.
+            for orig_node, orig_attr, orig_sub in pre_wires:
+                if not _exists(orig_node):
                     continue
-                src_plug = "{}.{}".format(s.node, attr)
-                dst_plug = "{}.input[{}]".format(
-                    shape, next_base + j)
+                if not cmds.attributeQuery(
+                        orig_attr, node=orig_node, exists=True):
+                    continue
+                src_plug = "{}.{}".format(orig_node, orig_attr)
+                dst_plug = "{}.input[{}]".format(shape, orig_sub)
                 try:
                     cmds.connectAttr(
                         src_plug, dst_plug, force=True)
-                except Exception as exc:
-                    cmds.warning(
-                        "set_driver_source_attrs: shift {} -> {} "
-                        "failed: {}".format(
-                            src_plug, dst_plug, exc))
-            next_base += len(s.attrs)
-        # 5) M_SWEEP_EMPTY chaser — orphan subscripts left by the
+                except Exception:
+                    # Best-effort restore -- if even the original
+                    # wire cannot be re-created the node is in a
+                    # disconnected state that the indicator will
+                    # surface as red/yellow.
+                    pass
+            cmds.warning(
+                "set_driver_source_attrs aborted + rolled back: "
+                "{}".format(exc))
+            return False
+
+        # 5) M_SWEEP_EMPTY chaser -- orphan subscripts left by the
         # disconnect storm above are removed (idempotent).
         _sweep_empty_subscripts(shape, "input")
+
     if removed or added:
         cmds.warning(
             "set_driver_source_attrs (incremental diff): "
             "removed {!r}, added {!r}, final={!r}".format(
                 removed, added, new_attrs_list))
     return True
+
+
+def driver_source_connection_state(node, index):
+    """M_P0_DRIVER_CONNECT_UX_REVAMP Part A.2 (2026-05-12) -- query
+    the wiring state of driverSource[index] on *node*.
+
+    Compares the driverSource_attrs metadata (declared attrs) with
+    the live input[] connections (actual wires) so the UI can
+    distinguish three honest states:
+
+    Returns
+    -------
+    str
+        ``"connected"``    -- every declared attr has a matching
+                              live shape.input[base+i] wire from
+                              the recorded driver_node.
+        ``"partial"``      -- metadata declares N attrs but only
+                              k<N have live wires. THIS IS AN
+                              INCONSISTENT STATE (silent-failure
+                              residue or manual user disconnect).
+                              The UI surfaces it as a yellow dot
+                              and the next "Connect" click forces
+                              an atomic re-wire.
+        ``"disconnected"`` -- metadata exists but 0 attrs have
+                              wires, or the source node is missing
+                              / the source has 0 declared attrs.
+    """
+    if not _exists(node):
+        return "disconnected"
+    shape = get_shape(node)
+    if not _exists(shape):
+        return "disconnected"
+    sources = read_driver_info_multi(node)
+    if index < 0 or index >= len(sources):
+        return "disconnected"
+    target = sources[index]
+    if not target.node or not _exists(target.node):
+        return "disconnected"
+    n_attrs = len(target.attrs)
+    if n_attrs == 0:
+        return "disconnected"
+    wired = 0
+    for attr in target.attrs:
+        plug = "{}.{}".format(target.node, attr)
+        if _subscript_of_existing_input(plug, shape) is not None:
+            wired += 1
+    if wired == 0:
+        return "disconnected"
+    if wired == n_attrs:
+        return "connected"
+    return "partial"
 
 
 def read_driver_info(node):
