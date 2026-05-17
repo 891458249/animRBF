@@ -67,6 +67,11 @@ class PoseGridEditor(QtWidgets.QWidget):
     poseRadiusChanged    = QtCore.Signal(int, float)
     addPoseRequested     = QtCore.Signal()
     deleteAllPosesRequested = QtCore.Signal()
+    # M_P0_POSE_DITHER_AND_UPDATE_FIX Phase 14 signals -- pose-panel
+    # buttons that act on the whole node rather than a single row.
+    ditherDriversRequested  = QtCore.Signal()
+    ditherDrivensRequested  = QtCore.Signal()
+    globalRadiusRequested   = QtCore.Signal(float)
 
     def __init__(self, parent=None):
         super(PoseGridEditor, self).__init__(parent)
@@ -115,7 +120,8 @@ class PoseGridEditor(QtWidgets.QWidget):
         self._scroll.setWidget(self._inner)
         outer.addWidget(self._scroll, 1)
 
-        # Bottom action row: Add Pose + Delete Poses.
+        # Bottom action row: Add Pose + Delete Poses + Phase 14
+        # dither / global-radius controls.
         btn_row = QtWidgets.QHBoxLayout()
         self._btn_add = QtWidgets.QPushButton(tr("add_pose"))
         self._btn_add.setToolTip(tr("pose_grid_add_pose_tip"))
@@ -128,8 +134,66 @@ class PoseGridEditor(QtWidgets.QWidget):
             self.deleteAllPosesRequested)
         btn_row.addWidget(self._btn_add)
         btn_row.addWidget(self._btn_delete_all)
+
+        # M_P0_POSE_DITHER_AND_UPDATE_FIX Part A: Dither Drivers.
+        self._btn_dither_drv = QtWidgets.QPushButton(
+            tr("btn_dither_drivers"))
+        self._btn_dither_drv.setToolTip(
+            tr("btn_dither_drivers_tip"))
+        self._btn_dither_drv.clicked.connect(
+            self._on_dither_drivers_clicked)
+        btn_row.addWidget(self._btn_dither_drv)
+
+        # M_P0_POSE_DITHER_AND_UPDATE_FIX Part B: Dither Drivens.
+        # main_window surfaces the warning dialog before invoking
+        # the controller because driven-side dither degrades training
+        # accuracy.
+        self._btn_dither_dvn = QtWidgets.QPushButton(
+            tr("btn_dither_drivens"))
+        self._btn_dither_dvn.setToolTip(
+            tr("btn_dither_drivens_tip"))
+        self._btn_dither_dvn.clicked.connect(
+            self._on_dither_drivens_clicked)
+        btn_row.addWidget(self._btn_dither_dvn)
+
+        # M_P0_POSE_DITHER_AND_UPDATE_FIX Part C-bis: global radius.
+        self._lbl_global_radius = QtWidgets.QLabel(
+            tr("lbl_global_radius"))
+        btn_row.addWidget(self._lbl_global_radius)
+        self._spin_global_radius = QtWidgets.QDoubleSpinBox()
+        self._spin_global_radius.setRange(0.001, 1000.0)
+        self._spin_global_radius.setDecimals(3)
+        self._spin_global_radius.setSingleStep(0.1)
+        self._spin_global_radius.setValue(5.0)
+        self._spin_global_radius.setToolTip(
+            tr("spin_global_radius_tip"))
+        btn_row.addWidget(self._spin_global_radius)
+
+        self._btn_apply_global_radius = QtWidgets.QPushButton(
+            tr("btn_apply_global_radius"))
+        self._btn_apply_global_radius.setToolTip(
+            tr("btn_apply_global_radius_tip"))
+        self._btn_apply_global_radius.clicked.connect(
+            self._on_apply_global_radius_clicked)
+        btn_row.addWidget(self._btn_apply_global_radius)
+
         btn_row.addStretch(1)
         outer.addLayout(btn_row)
+
+    # -- Phase 14 button slots ----------------------------------------
+
+    def _on_dither_drivers_clicked(self):
+        self.ditherDriversRequested.emit()
+
+    def _on_dither_drivens_clicked(self):
+        self.ditherDrivensRequested.emit()
+
+    def _on_apply_global_radius_clicked(self):
+        try:
+            value = float(self._spin_global_radius.value())
+        except Exception:
+            value = 5.0
+        self.globalRadiusRequested.emit(value)
 
     # ------------------------------------------------------------------
     # Public API
@@ -148,6 +212,23 @@ class PoseGridEditor(QtWidgets.QWidget):
         self._btn_add.setToolTip(tr("pose_grid_add_pose_tip"))
         self._btn_delete_all.setText(tr("delete_poses"))
         self._btn_delete_all.setToolTip(tr("pose_grid_delete_all_tip"))
+        # Phase 14 Phase controls.
+        try:
+            self._btn_dither_drv.setText(tr("btn_dither_drivers"))
+            self._btn_dither_drv.setToolTip(
+                tr("btn_dither_drivers_tip"))
+            self._btn_dither_dvn.setText(tr("btn_dither_drivens"))
+            self._btn_dither_dvn.setToolTip(
+                tr("btn_dither_drivens_tip"))
+            self._lbl_global_radius.setText(tr("lbl_global_radius"))
+            self._spin_global_radius.setToolTip(
+                tr("spin_global_radius_tip"))
+            self._btn_apply_global_radius.setText(
+                tr("btn_apply_global_radius"))
+            self._btn_apply_global_radius.setToolTip(
+                tr("btn_apply_global_radius_tip"))
+        except AttributeError:
+            pass
         # Header + rows are torn down + rebuilt on each set_data, so
         # any tr() string changes pick up automatically the next
         # cascade. No need to walk the existing tree here.

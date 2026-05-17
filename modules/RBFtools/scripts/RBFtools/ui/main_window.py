@@ -101,6 +101,11 @@ class _PoseEditorPanel(CollapsibleFrame):
     poseRadiusChanged        = QtCore.Signal(int, float)
     baseValueChangedV2       = QtCore.Signal(int, str, int, str, float)
     basePoseRecallRequested  = QtCore.Signal()
+    # M_P0_POSE_DITHER_AND_UPDATE_FIX Phase 14 -- panel-level re-emits
+    # from PoseGridEditor for the dither + global-radius buttons.
+    ditherDriversRequested   = QtCore.Signal()
+    ditherDrivensRequested   = QtCore.Signal()
+    globalRadiusRequested    = QtCore.Signal(float)
 
     def __init__(self, parent=None):
         super(_PoseEditorPanel, self).__init__(
@@ -248,6 +253,14 @@ class _PoseEditorPanel(CollapsibleFrame):
             self._on_grid_pose_value_changed_v2)
         self._pose_grid.poseRadiusChanged.connect(
             self.poseRadiusChanged)
+        # M_P0_POSE_DITHER_AND_UPDATE_FIX Phase 14: re-emit dither
+        # + global-radius signals at the panel level.
+        self._pose_grid.ditherDriversRequested.connect(
+            self.ditherDriversRequested)
+        self._pose_grid.ditherDrivensRequested.connect(
+            self.ditherDrivensRequested)
+        self._pose_grid.globalRadiusRequested.connect(
+            self.globalRadiusRequested)
 
         # Commit 3 (M_BASE_POSE): BaseDrivenPose tab. Inserted at
         # index 1 BETWEEN DriverDriven (0) and Pose (2) per the user's
@@ -1324,6 +1337,10 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._on_base_pose_value_changed)
         pe.basePoseRecallRequested.connect(
             self._on_base_pose_recall)
+        # M_P0_POSE_DITHER_AND_UPDATE_FIX Phase 14 -- dither + radius.
+        pe.ditherDriversRequested.connect(self._on_dither_drivers)
+        pe.ditherDrivensRequested.connect(self._on_dither_drivens)
+        pe.globalRadiusRequested.connect(self._on_global_radius)
 
         # Row context-menu callback
         pe._row_action_callback = self._on_pose_row_action
@@ -1809,6 +1826,87 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         """Phase 2: PoseGridEditor row delete (right-click menu)."""
         self._ctrl.delete_pose(int(pose_index))
         self._refresh_pose_grid()
+
+    # --- M_P0_POSE_DITHER_AND_UPDATE_FIX Phase 14 handlers ----------
+
+    def _on_dither_drivers(self):
+        """Part A handler: dispatch to controller.dither_driver_poses
+        and surface the perturbed-count feedback dialog. Refresh the
+        pose grid so the user sees the new (slightly perturbed)
+        values immediately."""
+        n = self._ctrl.dither_driver_poses(magnitude=0.005)
+        msg_key = ("dither_driver_done" if n > 0
+                   else "dither_driver_no_cluster")
+        try:
+            cmds.confirmDialog(
+                title="RBFtools",
+                message=tr(msg_key).format(n) if n > 0 else tr(msg_key),
+                button=["OK"], defaultButton="OK")
+        except Exception:
+            cmds.warning(
+                tr(msg_key).format(n) if n > 0 else tr(msg_key))
+        self._refresh_pose_grid()
+
+    def _on_dither_drivens(self):
+        """Part B handler: surface the warning dialog FIRST because
+        driven-side dither degrades training accuracy. Proceed only
+        when the user confirms."""
+        try:
+            confirm_label = tr("confirm_dither_driven_label")
+            cancel_label = tr("cancel_dither_driven_label")
+            result = cmds.confirmDialog(
+                title=tr("title_dither_driven_warning"),
+                message=tr("msg_dither_driven_warning"),
+                button=[confirm_label, cancel_label],
+                defaultButton=cancel_label,
+                cancelButton=cancel_label,
+                dismissString=cancel_label)
+            if result != confirm_label:
+                return
+        except Exception as exc:
+            cmds.warning(
+                "_on_dither_drivens: confirm dialog failed: "
+                "{} (aborting for safety)".format(exc))
+            return
+        n = self._ctrl.dither_driven_poses(magnitude=0.005)
+        msg_key = ("dither_driven_done" if n > 0
+                   else "dither_driven_no_cluster")
+        try:
+            cmds.confirmDialog(
+                title="RBFtools",
+                message=tr(msg_key).format(n) if n > 0 else tr(msg_key),
+                button=["OK"], defaultButton="OK")
+        except Exception:
+            cmds.warning(
+                tr(msg_key).format(n) if n > 0 else tr(msg_key))
+        self._refresh_pose_grid()
+
+    def _on_global_radius(self, radius):
+        """Part C-bis handler: bulk-apply spinbox value across every
+        pose. Refresh the grid so the radius column updates, then
+        surface a confirmation dialog with the actual write count."""
+        try:
+            r = float(radius)
+        except (TypeError, ValueError):
+            r = 5.0
+        n = self._ctrl.set_all_poses_radius(r)
+        self._refresh_pose_grid()
+        # Resolve the effective radius (controller clamps <=0 to
+        # DEFAULT_POSE_RADIUS); mirror that here for the user-
+        # visible message so the dialog text matches the kernel.
+        from RBFtools import core as _core_mod
+        effective_radius = (
+            r if r > 0.0 else _core_mod.DEFAULT_POSE_RADIUS)
+        try:
+            cmds.confirmDialog(
+                title="RBFtools",
+                message=tr("global_radius_done").format(
+                    n, effective_radius),
+                button=["OK"], defaultButton="OK")
+        except Exception:
+            cmds.warning(
+                tr("global_radius_done").format(
+                    n, effective_radius))
 
     def _on_pose_grid_delete_all(self):
         """Phase 2: PoseGridEditor 'Delete Poses' button - clears
