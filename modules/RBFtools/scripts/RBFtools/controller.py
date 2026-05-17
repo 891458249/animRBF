@@ -2072,6 +2072,99 @@ class MainController(QtCore.QObject):
             return []
         return core.read_base_pose_values(self._current_node)
 
+    # -- M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -------
+
+    # Signals -- emitted after a per-pose hierarchy / mask write so
+    # the UI can refresh the pose grid columns without a full reload.
+    # Declared on the class via QtCore.Signal in __init__ siblings;
+    # surface them as class-level attributes so MainController stays
+    # picklable / introspectable.
+    poseParentIndexChanged = QtCore.Signal(int, int)        # row, parent
+    poseDriverMaskChanged  = QtCore.Signal(int, list)       # row, mask
+
+    def set_pose_parent_index(self, row, parent_index):
+        """M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
+        write the per-pose poseParentIndex plug. -1 = "this pose is
+        a base"; >= 0 = "this pose is a delta of the pose at that
+        logical index". Phase 16 commit 2 added the plug; this
+        method is the controller-MVC-clean writer used by the pose
+        grid's Parent QComboBox column.
+
+        Hard-cap-2 layering (brief Stage 1.1): if the user picks a
+        parent that itself has parent != -1, the C++ training stage
+        will demote this pose back to base with a warn -- this
+        controller method does NOT enforce the cap, the plugin
+        does. UI just stores what the user typed.
+
+        On success emits :attr:`poseParentIndexChanged` so any
+        listeners (the pose grid currently) can refresh.
+        """
+        if not self._current_node:
+            cmds.warning(
+                "set_pose_parent_index: no active node")
+            return False
+        try:
+            shape = core.get_shape(self._current_node)
+            cmds.setAttr(
+                "{}.poseParentIndex[{}]".format(
+                    shape, int(row)),
+                int(parent_index))
+        except Exception as exc:
+            cmds.warning(
+                "set_pose_parent_index: plug write failed at row "
+                "{}: {}".format(row, exc))
+            return False
+        try:
+            self.poseParentIndexChanged.emit(
+                int(row), int(parent_index))
+        except Exception:
+            pass
+        return True
+
+    def set_pose_driver_mask(self, row, mask):
+        """M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
+        write the per-pose poseDriverMask plug. *mask* is a list of
+        flat-driver-vector indices; the empty list (default) means
+        "this pose cares about all drivers" (backward compatible
+        with Phase 15). Phase 16 commit 2 added the plug; this
+        method is the writer used by the pose grid's Driver Mask
+        popup column.
+
+        On success emits :attr:`poseDriverMaskChanged` so any
+        listeners can refresh.
+        """
+        if not self._current_node:
+            cmds.warning(
+                "set_pose_driver_mask: no active node")
+            return False
+        sanitized = []
+        for v in (mask or []):
+            try:
+                sanitized.append(int(v))
+            except Exception:
+                continue
+        try:
+            shape = core.get_shape(self._current_node)
+            plug = "{}.poseDriverMask[{}]".format(shape, int(row))
+            if sanitized:
+                cmds.setAttr(
+                    plug, len(sanitized), *sanitized,
+                    type="Int32Array")
+            else:
+                cmds.setAttr(
+                    plug, 0, type="Int32Array")
+        except Exception as exc:
+            cmds.warning(
+                "set_pose_driver_mask: plug write failed at row "
+                "{}: {}".format(row, exc))
+            return False
+        try:
+            self.poseDriverMaskChanged.emit(
+                int(row), list(sanitized))
+        except Exception:
+            pass
+        return True
+
     def set_base_pose_value(self, channel_idx, new_value):
         """Commit 3 (M_BASE_POSE): per-output baseline live-edit. Reads
         the current array, expands it if the user is editing a higher
