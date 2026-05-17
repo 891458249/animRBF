@@ -2138,12 +2138,31 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         }
                         if (!solved)
                         {
+                            // M_P0_RBF_ANTI_OVERSHOOT Part C.4
+                            // (2026-05-17): auto-tune BRMatrix
+                            // singular-pivot threshold to scale with
+                            // the user's regularization. Stronger
+                            // lambda -> stronger diagonal dominance,
+                            // so smaller pivots remain numerically
+                            // safe. Floor at 1e-9 to keep parity
+                            // with the JS sandbox reference; cap at
+                            // the legacy 1e-4 so unregularised /
+                            // tiny-lambda solves see no change.
+                            const double singTol =
+                                (userLambda > 0.0)
+                                ? ((userLambda * 1e-3 < 1.0e-9)
+                                   ? 1.0e-9
+                                   : (userLambda * 1e-3 < 1.0e-4
+                                      ? userLambda * 1e-3
+                                      : 1.0e-4))
+                                : 1.0e-4;
                             bool geOk = true;
                             BRMatrix wMatTrial;
                             wMatTrial.setSize(poseCount, solveCount);
                             for (c = 0; c < solveCount; c ++)
                             {
                                 BRMatrix solveMat = linMat;
+                                solveMat.setSingularThreshold(singTol);
                                 std::vector<double> w(poseCount, 0.0);
                                 int singularIndex = -1;
                                 bool ok = solveMat.solve(
@@ -2339,6 +2358,24 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         for (c = 0; c < solveCount; c ++)
                         {
                             BRMatrix solveMat = A;
+                            // M_P0_RBF_ANTI_OVERSHOOT Part C.4
+                            // (2026-05-17): same lambda-scaled
+                            // singular threshold used in the Cholesky-
+                            // fallback GE path above. Applied to the
+                            // augmented [K+lambdaI, P; P^T, 0] solve
+                            // so the augmented system inherits the
+                            // adaptive numerical tolerance.
+                            {
+                                const double singTolAug =
+                                    (userLambda > 0.0)
+                                    ? ((userLambda * 1e-3 < 1.0e-9)
+                                       ? 1.0e-9
+                                       : (userLambda * 1e-3 < 1.0e-4
+                                          ? userLambda * 1e-3
+                                          : 1.0e-4))
+                                    : 1.0e-4;
+                                solveMat.setSingularThreshold(singTolAug);
+                            }
                             // y_aug[0..N-1] = yCols[c]; y_aug[N..] = 0
                             for (unsigned ai = 0; ai < poseCount; ++ai)
                                 y_aug[ai] =
