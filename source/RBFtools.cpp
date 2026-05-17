@@ -2765,6 +2765,13 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         subnetCacheDirty = false;
                     }
                     else {
+                        // M_P0_RBF_HIERARCHICAL_TWO_LEVEL deltaNets
+                        // marker (strings-grep anchor for build
+                        // verification).
+                        static const char *kDeltaNetsMarker =
+                            "RBFtools: training deltaNets per "
+                            "parent_id with Shepard gating.";
+                        (void)kDeltaNetsMarker;
                         // -- driver mask union helper (Stage 2.2 /
                         // Stage 2.3 sibling union) ---------------------
                         auto buildUnion = [&](
@@ -3303,6 +3310,13 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     && !baseNet.poseIndices.empty()
                     && genericMode)
                 {
+                    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Shepard
+                    // gating marker (strings-grep anchor for
+                    // build verification).
+                    static const char *kHierarchicalMarker =
+                        "RBFtools: HIERARCHICAL Shepard-gated "
+                        "delta blend active.";
+                    (void)kHierarchicalMarker;
                     const unsigned nBase =
                         (unsigned)baseNet.poseIndices.size();
                     // Pass 1: phi_per_base_pose (Gaussian fallback
