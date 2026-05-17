@@ -1821,6 +1821,12 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._gather_role_info())
         self._ctrl.update_pose(
             int(pose_index), drv_node, dvn_node, drv_attrs, dvn_attrs)
+        # M_P0_POSE_DITHER_AND_UPDATE_FIX Part C (2026-05-12) -- the
+        # pose_model's dataChanged signal does not propagate into the
+        # PoseGridEditor custom widget tree, so a manual refresh is
+        # required for the updated values to display immediately.
+        # Mirrors the _on_pose_grid_delete pattern below.
+        self._refresh_pose_grid()
 
     def _on_pose_grid_delete(self, pose_index):
         """Phase 2: PoseGridEditor row delete (right-click menu)."""
