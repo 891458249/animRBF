@@ -1864,23 +1864,45 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                 // is exactly the "no hierarchy / all drivers" backward-
                 // compatible value -- a legacy node mid-upgrade still
                 // sees Phase 15-equivalent behaviour.
+                // M_P0_RBF_HIERARCHICAL_READ_FIX (2026-05-18) -- the
+                // original ship used jumpToArrayElement(k) (physical-
+                // slot index) and indexed currentPoseParentArr by k,
+                // which is wrong for sparse multis AND triggered
+                // phantom-value reads even when Python never wrote
+                // any setAttr on poseParentIndex (Maya internally
+                // pre-allocates slots for storable+usesArrayDataBuilder
+                // multis once they are touched in compute(), and
+                // those phantom slots can contain non-default values).
+                // Symptom: every legacy node's compute() reported "pose
+                // N parent (P) is itself a delta -- demoting" for
+                // every pose, then ran hierarchical training paths the
+                // user never asked for.
+                //
+                // Fix: mirror the working poseRadius read pattern
+                // (cpp:2018-2035) -- pre-fill the local cache with
+                // the schema default (-1 / empty mask), then walk
+                // the multi via elementIndex() + next() so logical
+                // indices line up with poseCount-keyed arrays.
                 std::vector<int> currentPoseParentArr;
                 std::vector<std::vector<int>> currentPoseDriverMaskArr;
+                currentPoseParentArr.assign(poseCount, -1);
+                currentPoseDriverMaskArr.assign(
+                    poseCount, std::vector<int>());
                 {
                     MArrayDataHandle ppHandle =
                         data.inputArrayValue(poseParentIndex, &status);
                     if (status == MStatus::kSuccess)
                     {
                         const unsigned cnt = ppHandle.elementCount();
-                        currentPoseParentArr.reserve(cnt);
                         for (unsigned k = 0; k < cnt; ++k)
                         {
-                            if (ppHandle.jumpToArrayElement(k)
-                                    == MStatus::kSuccess)
-                                currentPoseParentArr.push_back(
-                                    ppHandle.inputValue().asInt());
-                            else
-                                currentPoseParentArr.push_back(-1);
+                            unsigned idx = ppHandle.elementIndex();
+                            if (idx < poseCount)
+                            {
+                                int v = ppHandle.inputValue().asInt();
+                                currentPoseParentArr[idx] = v;
+                            }
+                            if (k + 1 < cnt) ppHandle.next();
                         }
                     }
                     MArrayDataHandle pdmHandle =
@@ -1888,23 +1910,26 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     if (status == MStatus::kSuccess)
                     {
                         const unsigned cnt = pdmHandle.elementCount();
-                        currentPoseDriverMaskArr.reserve(cnt);
                         for (unsigned k = 0; k < cnt; ++k)
                         {
-                            std::vector<int> maskRow;
-                            if (pdmHandle.jumpToArrayElement(k)
-                                    == MStatus::kSuccess)
+                            unsigned idx = pdmHandle.elementIndex();
+                            if (idx < poseCount)
                             {
+                                std::vector<int> maskRow;
                                 MObject maskData =
                                     pdmHandle.inputValue().data();
-                                MFnIntArrayData iadFn(maskData);
-                                MIntArray ia = iadFn.array();
-                                maskRow.reserve(ia.length());
-                                for (unsigned m = 0;
-                                     m < ia.length(); ++m)
-                                    maskRow.push_back(ia[m]);
+                                if (!maskData.isNull())
+                                {
+                                    MFnIntArrayData iadFn(maskData);
+                                    MIntArray ia = iadFn.array();
+                                    maskRow.reserve(ia.length());
+                                    for (unsigned m = 0;
+                                         m < ia.length(); ++m)
+                                        maskRow.push_back(ia[m]);
+                                }
+                                currentPoseDriverMaskArr[idx] = maskRow;
                             }
-                            currentPoseDriverMaskArr.push_back(maskRow);
+                            if (k + 1 < cnt) pdmHandle.next();
                         }
                     }
                 }
@@ -2715,7 +2740,16 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         int parent =
                             ((size_t)p < prevPoseParentArr.size())
                             ? prevPoseParentArr[p] : -1;
-                        if (parent < 0 || (unsigned)parent >= poseCount) {
+                        // M_P0_RBF_HIERARCHICAL_READ_FIX (2026-05-18)
+                        // -- treat self-parent (pose i pointing to
+                        // itself) as base. Self-cycle is geometrically
+                        // meaningless and a common shape for phantom
+                        // multi-slot reads (Maya pre-allocates with
+                        // unpredictable values). Hard cap defended by
+                        // both the (parent < 0) below and this guard.
+                        if (parent < 0
+                            || (unsigned)parent >= poseCount
+                            || parent == (int)p) {
                             basePoseIndices.push_back((int)p);
                             continue;
                         }
@@ -2724,7 +2758,8 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         int grand =
                             ((size_t)parent < prevPoseParentArr.size())
                             ? prevPoseParentArr[parent] : -1;
-                        if (grand >= 0 && (unsigned)grand < poseCount) {
+                        if (grand >= 0 && (unsigned)grand < poseCount
+                            && grand != parent) {
                             MGlobal::displayWarning(
                                 MString("M_P0_RBF_HIERARCHICAL_TWO_LEVEL: "
                                         "pose ") + p +
