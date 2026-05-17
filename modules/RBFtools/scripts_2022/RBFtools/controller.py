@@ -1882,13 +1882,39 @@ class MainController(QtCore.QObject):
         """Re-capture current scene values into an existing pose row.
 
         M_ADDPOSE_MULTI_DRIVEN: same multi-source snapshot as
-        :meth:`add_pose`."""
+        :meth:`add_pose`.
+
+        M_P0_POSE_DITHER_AND_UPDATE_FIX Part C (2026-05-12) -- write
+        the captured viewport state straight into the Maya
+        ``shape.poses[row]`` plugs so the RBF kernel sees the new
+        values without waiting for the next Apply (user-reported bug:
+        the per-row "Update" button had no visible effect until Apply
+        was clicked, because only the in-memory pose_model was
+        updated). The plug write only fires if the active node
+        already exists -- the legacy model-only fallback covers the
+        case where the Update button is clicked before Apply has
+        materialised the node.
+        """
         if not driver_node or not driven_node:
             return
         inputs = self._capture_multi_inputs(driver_node, driver_attrs)
         outputs = self._capture_multi_outputs(
             driven_node, driven_attrs)
         self._pose_model.update_pose_values(row, inputs, outputs)
+
+        # M_P0_POSE_DITHER_AND_UPDATE_FIX Part C plug write.
+        node = self._current_node
+        if node and cmds.objExists(node):
+            try:
+                shape = core.get_shape(node)
+                core.write_pose_inputs_to_node(
+                    shape, int(row), inputs)
+                core.write_pose_values_to_node(
+                    shape, int(row), outputs)
+            except Exception as exc:
+                cmds.warning(
+                    "update_pose: plug write failed at row {}: "
+                    "{}".format(row, exc))
 
     def delete_pose(self, row):
         """Remove a pose from the model (does NOT touch the node yet)."""
@@ -1927,6 +1953,115 @@ class MainController(QtCore.QObject):
             cmds.warning(
                 "set_pose_radius: plug write failed at row {}: "
                 "{}".format(row, exc))
+
+    # -- M_P0_POSE_DITHER_AND_UPDATE_FIX Part A+B+C-bis controller ---
+
+    def dither_driver_poses(self, magnitude=0.005, seed=42):
+        """M_P0_POSE_DITHER_AND_UPDATE_FIX Part A.3 (2026-05-12) --
+        forward to :func:`core.dither_driver_poses` for the active
+        node. Returns the count of perturbed (pose, slot) plugs so
+        the UI can surface "N channels dithered" feedback.
+        """
+        if not self._current_node:
+            cmds.warning("dither_driver_poses: no active node")
+            return 0
+        try:
+            n = core.dither_driver_poses(
+                self._current_node,
+                base_pose_index=0,
+                magnitude=magnitude,
+                seed=seed)
+        except Exception as exc:
+            cmds.warning(
+                "dither_driver_poses failed: {}".format(exc))
+            return 0
+        try:
+            from RBFtools.ui.i18n import tr
+            if n > 0:
+                self.statusMessage.emit(
+                    tr("dither_driver_done").format(n))
+            else:
+                self.statusMessage.emit(
+                    tr("dither_driver_no_cluster"))
+        except Exception:
+            pass
+        return n
+
+    def dither_driven_poses(self, magnitude=0.005, seed=42):
+        """M_P0_POSE_DITHER_AND_UPDATE_FIX Part B.3 (2026-05-12) --
+        driven-side dither dispatch. The caller (main_window)
+        surfaces the warning dialog before invoking this method
+        because driven-side dither injects noise into the training
+        target and can visibly degrade inference accuracy.
+        """
+        if not self._current_node:
+            cmds.warning("dither_driven_poses: no active node")
+            return 0
+        try:
+            n = core.dither_driven_poses(
+                self._current_node,
+                base_pose_index=0,
+                magnitude=magnitude,
+                seed=seed)
+        except Exception as exc:
+            cmds.warning(
+                "dither_driven_poses failed: {}".format(exc))
+            return 0
+        try:
+            from RBFtools.ui.i18n import tr
+            if n > 0:
+                self.statusMessage.emit(
+                    tr("dither_driven_done").format(n))
+            else:
+                self.statusMessage.emit(
+                    tr("dither_driven_no_cluster"))
+        except Exception:
+            pass
+        return n
+
+    def set_all_poses_radius(self, radius):
+        """M_P0_POSE_DITHER_AND_UPDATE_FIX Part C-bis.3 (2026-05-12)
+        -- bulk apply ``radius`` to every pose of the active node.
+
+        Two-step: (1) plug write via :func:`core.set_all_poses_radius`
+        so the kernel sees the new sigma; (2) sync pose_model rows so
+        the UI radius column refreshes immediately.
+
+        Values <= 0 are clamped by the core helper to
+        DEFAULT_POSE_RADIUS so a stray spinbox value cannot poison
+        the kernel.
+        """
+        if not self._current_node:
+            cmds.warning("set_all_poses_radius: no active node")
+            return 0
+        try:
+            n = core.set_all_poses_radius(
+                self._current_node, float(radius))
+        except Exception as exc:
+            cmds.warning(
+                "set_all_poses_radius failed: {}".format(exc))
+            return 0
+        # Sync pose_model rows so the UI radius column refreshes.
+        effective_radius = float(radius)
+        if effective_radius <= 0.0:
+            effective_radius = core.DEFAULT_POSE_RADIUS
+        try:
+            row_count = self._pose_model.rowCount()
+        except Exception:
+            row_count = 0
+        for row in range(row_count):
+            try:
+                self._pose_model.update_pose_radius(
+                    int(row), effective_radius)
+            except Exception:
+                pass
+        try:
+            from RBFtools.ui.i18n import tr
+            self.statusMessage.emit(
+                tr("global_radius_done").format(n, effective_radius))
+        except Exception:
+            pass
+        return n
 
     def read_base_pose_values(self):
         """Commit 3 (M_BASE_POSE): pass-through to

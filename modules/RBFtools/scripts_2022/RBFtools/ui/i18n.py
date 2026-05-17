@@ -575,6 +575,43 @@ _EN = {
     "connect_all_already_connected":
         "All driver tabs are already fully connected with the "
         "selected attrs (idempotent skip).",
+    # M_P0_POSE_DITHER_AND_UPDATE_FIX (2026-05-12) -- pose-panel
+    # dither + global-radius UX.
+    "btn_dither_drivers":              "Dither Drivers",
+    "btn_dither_drivers_tip":
+        "Add +/-0.005 random perturbation to clustered driver "
+        "channels (preserves Pose 0)",
+    "btn_dither_drivens":              "Dither Drivens",
+    "btn_dither_drivens_tip":
+        "Add +/-0.005 random perturbation to clustered driven "
+        "channels. WARNING: reduces RBF training accuracy.",
+    "title_dither_driven_warning":     "Dither Driven Output -- Warning",
+    "msg_dither_driven_warning":
+        "Adding noise to driven (output) values will reduce RBF "
+        "training accuracy. The trained weights will learn from "
+        "noisy targets, which may produce visible artifacts during "
+        "inference. Use only when driver-side dither alone cannot "
+        "resolve cluster issues. Continue?",
+    "confirm_dither_driven_label":     "Confirm",
+    "cancel_dither_driven_label":      "Cancel",
+    "dither_driver_done":
+        "Driver dither applied to {0} channel(s).",
+    "dither_driver_no_cluster":
+        "No clustered driver channels detected. Dither skipped.",
+    "dither_driven_done":
+        "Driven dither applied to {0} channel(s).",
+    "dither_driven_no_cluster":
+        "No clustered driven channels detected. Dither skipped.",
+    "lbl_global_radius":               "Radius:",
+    "spin_global_radius_tip":
+        "Per-pose RBF radius (sigma). 0.001 - 1000.0; non-positive "
+        "values fall back to the default.",
+    "btn_apply_global_radius":         "Apply Radius to All",
+    "btn_apply_global_radius_tip":
+        "Set the radius value above on every pose of the active "
+        "node",
+    "global_radius_done":
+        "Radius {1:.3f} applied to {0} pose(s).",
     # M_BATCH_PATH_A_WIRE (2026-04-28) -- confirm dialogs for the
     # cross-tab broadcast Connect / Disconnect.
     "title_batch_apply_confirm":      "Batch apply across all tabs?",
@@ -1091,6 +1128,40 @@ _ZH = {
     "connect_all_already_connected":
         u"\u6240\u6709 driver tab \u90fd\u5df2\u7528\u5f53\u524d\u6240\u9009\u5c5e\u6027"
         u"\u5b8c\u6574\u8fde\u63a5\uff0c\u65e0\u9700\u91cd\u8fde (\u5e42\u7b49).",
+    # M_P0_POSE_DITHER_AND_UPDATE_FIX (2026-05-12)
+    "btn_dither_drivers":              u"\u9a71\u52a8\u5668\u53bb\u91cd",
+    "btn_dither_drivers_tip":
+        u"\u5bf9\u9a71\u52a8\u5668 pose \u4e2d\u91cd\u590d\u7684\u5c5e\u6027\u52a0 \u00b10.005 \u968f\u673a\u6270\u52a8 "
+        u"(Pose 0 \u4e0d\u53d8)",
+    "btn_dither_drivens":              u"\u88ab\u9a71\u52a8\u5668\u53bb\u91cd",
+    "btn_dither_drivens_tip":
+        u"\u5bf9\u88ab\u9a71\u52a8\u5668 pose \u4e2d\u91cd\u590d\u7684\u5c5e\u6027\u52a0 \u00b10.005 \u968f\u673a\u6270\u52a8\u3002"
+        u"\u8b66\u544a: \u4f1a\u964d\u4f4e RBF \u8bad\u7ec3\u7cbe\u5ea6\u3002",
+    "title_dither_driven_warning":     u"\u88ab\u9a71\u52a8\u5668\u53bb\u91cd \u2014 \u8b66\u544a",
+    "msg_dither_driven_warning":
+        u"\u5bf9\u88ab\u9a71\u52a8\u5668 (\u8f93\u51fa) \u503c\u52a0\u566a\u97f3\u4f1a\u964d\u4f4e RBF \u8bad\u7ec3\u7cbe\u5ea6\u3002"
+        u"weights \u5b66\u5230\u7684\u662f\u5e26\u566a\u97f3\u7684\u76ee\u6807\uff0c\u53ef\u80fd\u5728 inference \u65f6"
+        u"\u4ea7\u751f\u53ef\u89c1 artifact\u3002\u4ec5\u5728\u9a71\u52a8\u5668\u53bb\u91cd\u65e0\u6cd5\u89e3\u51b3 cluster "
+        u"\u95ee\u9898\u65f6\u4f7f\u7528\u3002\u662f\u5426\u7ee7\u7eed\uff1f",
+    "confirm_dither_driven_label":     u"\u786e\u8ba4",
+    "cancel_dither_driven_label":      u"\u53d6\u6d88",
+    "dither_driver_done":
+        u"\u5df2\u5bf9 {0} \u4e2a\u9a71\u52a8\u5668\u901a\u9053\u52a0\u6270\u52a8\u3002",
+    "dither_driver_no_cluster":
+        u"\u672a\u68c0\u6d4b\u5230 cluster \u7684\u9a71\u52a8\u5668\u901a\u9053\uff0c\u5df2\u8df3\u8fc7\u3002",
+    "dither_driven_done":
+        u"\u5df2\u5bf9 {0} \u4e2a\u88ab\u9a71\u52a8\u5668\u901a\u9053\u52a0\u6270\u52a8\u3002",
+    "dither_driven_no_cluster":
+        u"\u672a\u68c0\u6d4b\u5230 cluster \u7684\u88ab\u9a71\u52a8\u5668\u901a\u9053\uff0c\u5df2\u8df3\u8fc7\u3002",
+    "lbl_global_radius":               u"\u534a\u5f84:",
+    "spin_global_radius_tip":
+        u"\u6bcf pose \u7684 RBF \u534a\u5f84 (sigma)\u3002\u8303\u56f4 0.001 - 1000.0; "
+        u"\u975e\u6b63\u503c\u4f1a\u56de\u9000\u5230\u9ed8\u8ba4\u503c\u3002",
+    "btn_apply_global_radius":         u"\u6279\u91cf\u8bbe\u7f6e\u534a\u5f84",
+    "btn_apply_global_radius_tip":
+        u"\u628a\u4e0a\u65b9\u534a\u5f84\u503c\u5e94\u7528\u5230\u5f53\u524d\u8282\u70b9\u7684\u6240\u6709 pose",
+    "global_radius_done":
+        u"\u5df2\u5bf9 {0} \u4e2a pose \u8bbe\u7f6e\u534a\u5f84 = {1:.3f}\u3002",
     # M_BATCH_PATH_A_WIRE (2026-04-28)
     "title_batch_apply_confirm":      u"\u8de8\u6240\u6709\u6807\u7b7e\u9875\u6279\u91cf\u8fde\u63a5?",
     "msg_batch_apply_confirm":
