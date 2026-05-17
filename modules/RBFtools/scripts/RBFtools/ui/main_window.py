@@ -2387,13 +2387,54 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._refresh_pose_grid()
 
     def _on_apply(self):
+        """Apply button -- M_P0_DRIVER_CONNECT_UX_REVAMP Part F.4
+        (2026-05-12): dispatch by driverSource topology so multi-
+        driver configurations route through apply_poses_routed (which
+        preserves input[]/output[] wiring) while single-driver legacy
+        rigs keep their bit-identical pre-Phase-13 path.
+
+        Multi-driver detection (any of):
+          * more than one driver source, OR
+          * any driver source with more than one attr, OR
+          * the same conditions on the driven side.
+        """
         self._set_interaction_enabled(False)
         try:
-            drv_node, dvn_node, drv_attrs, dvn_attrs = self._gather_role_info()
-            self._ctrl.apply_poses(
-                drv_node, dvn_node, drv_attrs, dvn_attrs)
+            try:
+                sources_drv = list(self._ctrl.read_driver_sources())
+            except Exception:
+                sources_drv = []
+            try:
+                sources_dvn = list(self._ctrl.read_driven_sources())
+            except Exception:
+                sources_dvn = []
+            is_multi = (
+                len(sources_drv) > 1
+                or any(len(s.attrs) > 1 for s in sources_drv)
+                or len(sources_dvn) > 1
+                or any(len(s.attrs) > 1 for s in sources_dvn))
+            if is_multi:
+                driver_targets = [
+                    (s.node, list(s.attrs)) for s in sources_drv]
+                driven_targets = [
+                    (s.node, list(s.attrs)) for s in sources_dvn]
+                self._ctrl.apply_poses_routed(
+                    driver_targets, driven_targets)
+            else:
+                drv_node, dvn_node, drv_attrs, dvn_attrs = (
+                    self._gather_role_info())
+                self._ctrl.apply_poses(
+                    drv_node, dvn_node, drv_attrs, dvn_attrs)
         finally:
             self._set_interaction_enabled(True)
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part F.4 / Part B: refresh
+        # tab indicators post-Apply so the user sees the green dots
+        # survive the storm (Part F's whole purpose). If Apply
+        # broke wiring this surfaces immediately as yellow / red.
+        try:
+            self._driver_source_list.refresh_tab_indicators(self._ctrl)
+        except Exception:
+            pass
 
     def _gather_routed_targets(self):
         """2026-04-28 (M_BATCH_ROUTING + M_CRASH_FIX defense 1 +

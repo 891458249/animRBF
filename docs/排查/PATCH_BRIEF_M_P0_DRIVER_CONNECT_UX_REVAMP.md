@@ -525,11 +525,225 @@ def _on_connect_clicked(self):
 
 ---
 
+### Part F — "应用" 按钮 multi-driver-aware (commit 2 同一 commit, 用户后续报告)
+
+**用户报告**: 多 driver tab 全绿 (3 个 driver 各自正确 wire) 后, click pose 面板 "应用" 按钮, 立刻 Driver 0/1 变红, 只有 Driver 2 (最后 active tab) 仍绿. error: `polyDim = 4 = 1+3`, plugin 看到 driver_dim = 3 (单一 driver 3 attr).
+
+**Root cause (Planner code-read 验证)**:
+
+1. [`_on_apply`](modules/RBFtools/scripts/RBFtools/ui/main_window.py:2389) 调 [`_gather_role_info`](modules/RBFtools/scripts/RBFtools/ui/main_window.py:2353)
+2. `_gather_role_info` 返回 **single-driver legacy 4-tuple**:
+   ```python
+   drv_node  = drv_sources[0].node      # 只取 FIRST driver node!
+   drv_attrs = flatten all driver attrs # 但 attrs 是全部平铺
+   ```
+3. `controller.apply_poses(drv_node, dvn_node, drv_attrs, dvn_attrs)` → `core.apply_poses(...)`
+4. `core.apply_poses` 内 Step 1: `clear_node_data(node)` **清掉 input[] / poses[] / output[] / baseValue[] / outputIsScale[] 全部 multi-instance**
+5. Step 2: 写新 pose data 用 single `drv_node` + flatten `drv_attrs`
+6. **没重 wire multi-driver input[]** — Apply 设计上不重 wire (legacy 假设单 driver)
+7. 结果: input[] 被清, driverSource[] metadata 仍在, 状态变 "disconnected" (或 partial if 某 hook 半 re-wire)
+
+#### F.1 新 core API `apply_poses_routed`
+
+[core.py](modules/RBFtools/scripts/RBFtools/core.py) 加 multi-driver-aware Apply:
+
+```python
+def apply_poses_routed(node, driver_targets, driven_targets, poses):
+    """Multi-driver-aware Apply.
+    
+    Unlike legacy apply_poses (single driver_node + flat attrs):
+      * driver_targets: [(driver_node, [attrs]), ...] preserves
+        per-source identity.
+      * driven_targets: same shape.
+      * clear_node_data is called with skip_io=True — clears
+        poses[] / baseValue[] / outputIsScale[] but PRESERVES
+        input[] / output[] connections (multi-driver wiring stays).
+      * pose data writes use flatten driver attrs in driverSource[]
+        order (matches add_driver_source append order, so
+        shape.input[i] -> pose col i mapping is preserved).
+      * post-apply: re-validate driverSource[] metadata is consistent
+        with provided driver_targets; warn on drift.
+    
+    Math: identical to apply_poses (same pose data, same kernel),
+    just doesn't destroy multi-driver wiring.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    # Flatten driver attrs preserving order (matches input[] subscript)
+    flat_drv_attrs = [a for _node, attrs in driver_targets for a in attrs]
+    flat_dvn_attrs = [a for _node, attrs in driven_targets for a in attrs]
+    # driver_node = first source node (for pose value sampling)
+    drv_node = driver_targets[0][0] if driver_targets else ""
+    dvn_node = driven_targets[0][0] if driven_targets else ""
+    
+    apply_succeeded = False
+    failed_step = None
+    try:
+        with undo_chunk("RBFtools: apply poses (routed)"), \
+             _node_state_frozen(shape):
+            try:
+                cmds.setAttr(shape + ".rbfMode", 0)
+            except Exception:
+                pass
+            # 1 - clear poses + baseline, NOT input[]/output[]
+            _clear_poses_only(node)  # new helper, see F.2
+            # 2 - write pose data (flat attrs)
+            for seq_idx, pose in enumerate(poses):
+                _write_pose_to_node(shape, seq_idx, pose)
+            # 3, 4, 5, 6, 7 - same as apply_poses (SwingTwist cache,
+            #                 baseline, outputIsScale, etc.)
+            ...
+            apply_succeeded = True
+    finally:
+        # Step 8 (nodeState 2 -> 0 unblock) — same as apply_poses
+        ...
+    # M_P0_DRIVER_CONNECT_UX_REVAMP Part F validation: verify
+    # driverSource[] metadata matches driver_targets
+    sources = read_driver_info_multi(node)
+    if len(sources) != len(driver_targets):
+        cmds.warning(
+            "apply_poses_routed: driverSource[] count drift "
+            "(metadata={}, targets={})".format(
+                len(sources), len(driver_targets)))
+    for i, (target_node, target_attrs) in enumerate(driver_targets):
+        if i >= len(sources):
+            break
+        if sources[i].node != target_node or \
+           list(sources[i].attrs) != list(target_attrs):
+            cmds.warning(
+                "apply_poses_routed: driverSource[{}] drift "
+                "(metadata={!r}, target={!r})".format(
+                    i, (sources[i].node, sources[i].attrs),
+                    (target_node, target_attrs)))
+    return apply_succeeded
+```
+
+#### F.2 新 helper `_clear_poses_only`
+
+```python
+def _clear_poses_only(node):
+    """Clear pose-related multi-instance data ONLY.
+    
+    Preserves: shape.input[] connections, shape.output[] connections
+               (i.e., multi-driver wiring stays alive across Apply).
+    Clears:    shape.poses[], baseValue[], outputIsScale[]
+               (pose-specific data that Apply rewrites).
+    
+    M_P0_DRIVER_CONNECT_UX_REVAMP Part F (2026-05-12): split out
+    from clear_node_data so multi-driver Apply doesn't destroy the
+    user's add_driver_source / set_driver_source_attrs wiring.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return get_transform(node)
+    with undo_chunk("RBFtools: clear poses only"):
+        for attr in ("poses", "baseValue", "outputIsScale"):
+            try:
+                indices = cmds.getAttr(
+                    "{}.{}".format(shape, attr), multiIndices=True) or []
+            except Exception:
+                indices = []
+            for idx in indices:
+                try:
+                    cmds.removeMultiInstance(
+                        "{}.{}[{}]".format(shape, attr, idx), b=True)
+                except Exception as exc:
+                    cmds.warning(
+                        "_clear_poses_only: removeMultiInstance "
+                        "{}.{}[{}] failed: {}".format(shape, attr, idx, exc))
+    return get_transform(shape)
+```
+
+#### F.3 controller `apply_poses_routed`
+
+```python
+def apply_poses_routed(self, driver_targets, driven_targets):
+    """Multi-driver Apply -- M_P0_DRIVER_CONNECT_UX_REVAMP Part F.
+    
+    Routes through core.apply_poses_routed which preserves input[]/
+    output[] wiring during Apply. Use for multi-driver scenarios;
+    legacy single-driver Apply still routes through apply_poses.
+    """
+    if not self._validate_apply_args_routed(driver_targets, driven_targets):
+        return
+    node = self._current_node
+    if not node or not cmds.objExists(node):
+        core.ensure_plugin()
+        node = core.create_node()
+        core.set_node_attr(node, "type", 1)
+    poses = self._pose_model.all_poses()
+    # M_P0_DUPLICATE_POSE_DETECT applies same way
+    duplicates = core._detect_duplicate_pose_inputs(poses)
+    if duplicates:
+        # ... same dialog as apply_poses ...
+        if not proceed:
+            return
+    core.apply_poses_routed(
+        node, driver_targets, driven_targets, poses)
+    self._current_node = core.get_transform(core.get_shape(node))
+    self.refresh_nodes()
+    self._load_settings()
+```
+
+#### F.4 `_on_apply` 改 multi-driver-aware
+
+```python
+def _on_apply(self):
+    self._set_interaction_enabled(False)
+    try:
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part F.4 — dispatch by
+        # driverSource topology. Multi-driver (>1 source OR any
+        # source with >1 attr) goes through apply_poses_routed
+        # which preserves input[]/output[] wiring across Apply.
+        sources_drv = self._ctrl.read_driver_sources()
+        sources_dvn = self._ctrl.read_driven_sources()
+        is_multi = (
+            len(sources_drv) > 1 or
+            any(len(s.attrs) > 1 for s in sources_drv) or
+            len(sources_dvn) > 1 or
+            any(len(s.attrs) > 1 for s in sources_dvn))
+        if is_multi:
+            driver_targets = [
+                (s.node, list(s.attrs)) for s in sources_drv]
+            driven_targets = [
+                (s.node, list(s.attrs)) for s in sources_dvn]
+            self._ctrl.apply_poses_routed(
+                driver_targets, driven_targets)
+        else:
+            drv_node, dvn_node, drv_attrs, dvn_attrs = (
+                self._gather_role_info())
+            self._ctrl.apply_poses(
+                drv_node, dvn_node, drv_attrs, dvn_attrs)
+    finally:
+        self._set_interaction_enabled(True)
+    # Refresh indicators post-Apply (must be green if wiring preserved)
+    self._driver_source_list.refresh_tab_indicators(self._ctrl)
+    self._refresh_pose_grid()
+```
+
+#### F.5 Part F 与 Part A/B/E 协同
+
+| 操作 | Part 路径 |
+|---|---|
+| 单 tab "连接" (driver source panel) | E.1 idempotent check → A.1 atomic set_driver_source_attrs → B refresh |
+| pose 面板 "连接" (batch routed) | E.2 filter → connect_routed → B refresh |
+| **pose 面板 "应用" (multi-driver)** | **F.4 dispatch → F.3 apply_poses_routed → F.2 _clear_poses_only (preserves input[]) → B refresh** |
+| pose 面板 "应用" (single-driver legacy) | _gather_role_info → controller.apply_poses → core.apply_poses (legacy clear_node_data) |
+
+#### F.6 i18n keys (复用)
+
+无新 key. 现有的 `connect_all_already_connected` 在 multi-driver Apply 也可能复用 (rare case).
+
+---
+
 ### Part D — Test (commit 3)
 
 新 unit test `modules/RBFtools/tests/test_m_p0_driver_connect_ux_revamp.py`:
 
 #### D.1 Cases (跑在 mayapy / cmds stub)
+
+注: Part D 测试数从 11 升到 14 (新增 case 12/13/14 覆盖 Part F).
 
 1. **`test_connection_state_connected`** — 创建 RBFnode + 1 driver 1 attr, 验证 state = "connected"
 2. **`test_connection_state_partial`** — 模拟 metadata 3 attr 但只 wire 1 个 input, 验证 state = "partial"
@@ -542,6 +756,9 @@ def _on_connect_clicked(self):
 9. **`test_idempotent_skip_batch_filters_connected_tabs`** — Part E.2: 3 tab 全绿, batch connect 走 _gather → 全 skip, connect_routed 收到 empty driver_targets, 0 wire churn
 10. **`test_attr_dedupe_preserves_order`** — Part E.3: 模拟 selected_attrs 返回 [X, Y, X, Z], 验证 _on_connect_clicked emit 去重后 [X, Y, Z]
 11. **`test_partial_state_forces_atomic_rewire`** — Part E.1: tab state=partial (人造 broken metadata vs wire), click 连接 → 触发 atomic re-wire (即使 attrs 与 metadata 同), 修复到 connected
+12. **`test_apply_poses_routed_preserves_input_wiring`** — Part F.3: 3 driver + 7 input wire 状态下 apply_poses_routed, 验证 apply 后 input[] 字节级**不变**, metadata 不变, 所有 tab state 仍 "connected"
+13. **`test_apply_poses_legacy_single_driver_still_works`** — Part F.4: 单 driver 单 attr scenario, _on_apply 走 legacy apply_poses path 不变, 行为与 Phase 13 之前一致 (回归测试)
+14. **`test_clear_poses_only_skips_input_output`** — Part F.2: 验证 _clear_poses_only 清掉 poses/baseValue/outputIsScale 但 input[]/output[] connections 保留
 
 #### D.2 UI test (optional, mayapy GUI)
 
@@ -554,7 +771,7 @@ def _on_connect_clicked(self):
 | # | Commit | Scope |
 |---|---|---|
 | 1 | `fix(plugin): set_driver_source_attrs atomic + rollback (M_P0_DRIVER_CONNECT_UX_REVAMP Part A)` | core.py: atomic set + driver_source_connection_state helper + controller.driver_source_connection_state |
-| 2 | `feat(ui): driver tab connection indicator + idempotent dispatch + attr count change UX (M_P0_DRIVER_CONNECT_UX_REVAMP Part B+C+E)` | tabbed_source_editor.py: tab icon + refresh hooks + attr dedupe; main_window.py: signal wire + count-change dialog + indicator-guided idempotent filter (both single-tab and batch paths); i18n.py: 4 new keys |
+| 2 | `feat(ui+plugin): driver tab indicator + idempotent dispatch + multi-driver Apply + UX dialog (M_P0_DRIVER_CONNECT_UX_REVAMP Part B+C+E+F)` | tabbed_source_editor.py: tab icon + refresh hooks + attr dedupe; main_window.py: signal wire + count-change dialog + indicator-guided idempotent filter (both single-tab and batch paths) + multi-driver Apply dispatch; i18n.py: 4 new keys; core.py: apply_poses_routed + _clear_poses_only; controller.py: apply_poses_routed |
 | 3 | `test(plugin+ui): atomic rollback + connection state + UX dialog (M_P0_DRIVER_CONNECT_UX_REVAMP Part D)` | new test_m_p0_driver_connect_ux_revamp.py (7 cases) + scratch/smoke_tab_indicator.py |
 | 4 | (若 .mll rebuild 不需) `chore(installer): rebuild for Phase 13` | installer 重打 |
 
@@ -639,6 +856,26 @@ mock `cmds.connectAttr` 在第 2 个 attr 抛 exception (UI test 不易演示, �
 4. 切 Driver 1 tab, **保留同样 attr selection** [rotateX, rotateY, rotateZ], click "连接"
 5. **期望**: 触发 atomic re-wire (跳过 E.1 idempotent skip 因 state != connected), 完成后回到 ● 绿
 
+#### 场景 G — "应用" 按钮 multi-driver wire 保留 (Part F, 用户后续报告核心)
+
+1. Driver 0 ● 绿 (Elbow.rotateX), Driver 1 ● 绿 (Shoulder.X/Y/Z), Driver 2 ● 绿 (L_Shoulder.X/Y/Z)
+2. `cmds.getAttr(shape + ".input", multiIndices=True)` = `[0, 1, 2, 3, 4, 5, 6]` (7 个 input)
+3. 摆 rig + 添加几个 pose
+4. **click pose 面板 "应用" 按钮**
+5. **期望**:
+   - 3 tab indicator **保持全绿** ✓ (不变红)
+   - input[] 字节级**不变** `[0, 1, 2, 3, 4, 5, 6]` ✓
+   - driverSource[] metadata 不变 ✓
+   - pose data 写入完成
+   - MQB / Gaussian solver 可以 train (除非数据真 ill-conditioned, 那是另一个问题)
+6. 跑诊断脚本 verify input/output/metadata 一致性
+
+#### 场景 H — legacy single-driver Apply 回归 (Part F.4)
+
+1. 单一 Driver 0 with 单 attr (Elbow.rotateX)
+2. 摆 pose + click "应用"
+3. **期望**: 走 legacy `apply_poses` path (`is_multi == False`), 行为与 Phase 13 之前一致, 0 regression
+
 ---
 
 ## 7. 风险评估
@@ -695,7 +932,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ### Commit 2
 
 ```
-feat(ui): driver tab connection indicator + idempotent dispatch + attr count change UX (M_P0_DRIVER_CONNECT_UX_REVAMP Part B+C+E)
+feat(ui+plugin): driver tab indicator + idempotent dispatch + multi-driver Apply + UX dialog (M_P0_DRIVER_CONNECT_UX_REVAMP Part B+C+E+F)
 
 Add per-tab connection indicator (red/yellow/green dot) to the
 driver source panel. Indicator queries
@@ -727,12 +964,28 @@ source[index] is not last source, surface confirmation dialog
 explaining the re-wiring scope. Prevents accidental cross-tab
 disruption.
 
+Multi-driver Apply path (Part F):
+  * core.apply_poses_routed: new API that takes
+    [(driver_node, [attrs]), ...] preserving per-source identity.
+    Calls _clear_poses_only (clears poses[]/baseValue[]/
+    outputIsScale[] BUT NOT input[]/output[]) instead of
+    clear_node_data -- multi-driver wiring stays alive through
+    Apply.
+  * controller.apply_poses_routed: routes through new core API
+    with same duplicate-pose pre-check as legacy apply_poses.
+  * main_window._on_apply: dispatch by driverSource topology;
+    multi-driver (>1 source OR any source >1 attr) goes through
+    apply_poses_routed, single-driver keeps legacy apply_poses.
+    Fixes user-reported regression where Apply on multi-driver
+    config wiped Driver 0/1 wiring and only Driver 2 (last active
+    tab) survived.
+
 i18n: 4 new keys (title_attr_count_change,
 msg_attr_count_change_will_rewire, driver_idempotent_skip,
-connect_all_already_connected — en + zh).
+connect_all_already_connected -- en + zh).
 
-Math: N/A (UI feature).
-Anchors held: 4/4.
+Math: N/A (UI + state machine).
+Anchors held: 4/4 (honest-failure strengthened, no math change).
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ```

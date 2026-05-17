@@ -2575,6 +2575,51 @@ def clear_node_data(node):
     return get_transform(shape)
 
 
+def _clear_poses_only(node):
+    """M_P0_DRIVER_CONNECT_UX_REVAMP Part F.2 (2026-05-12) -- clear
+    pose-related multi-instance data **only**.
+
+    Preserves ``shape.input[]`` and ``shape.output[]`` connections so
+    the user's multi-driver wiring stays alive across Apply. Clears
+    only the pose-specific multi attrs that Apply rewrites:
+
+        shape.poses[]          -- pose input/value samples
+        shape.baseValue[]      -- per-output baseline
+        shape.outputIsScale[]  -- per-output scale flag
+
+    Split out from :func:`clear_node_data` so the multi-driver Apply
+    path (:func:`apply_poses_routed`) doesn't destroy the user's
+    ``add_driver_source`` / ``set_driver_source_attrs`` wiring.
+
+    Returns
+    -------
+    str
+        The transform name (for call-chaining).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return get_transform(node)
+
+    with undo_chunk("RBFtools: clear poses only"):
+        for attr in ("poses", "baseValue", "outputIsScale"):
+            try:
+                indices = cmds.getAttr(
+                    "{}.{}".format(shape, attr), multiIndices=True) or []
+            except Exception:
+                indices = []
+            for idx in indices:
+                try:
+                    cmds.removeMultiInstance(
+                        "{}.{}[{}]".format(shape, attr, idx), b=True)
+                except Exception as exc:
+                    cmds.warning(
+                        "_clear_poses_only: removeMultiInstance "
+                        "{}.{}[{}] failed: {}".format(
+                            shape, attr, idx, exc))
+
+    return get_transform(shape)
+
+
 # =====================================================================
 #  7. RBF builder — wiring & evaluation
 # =====================================================================
@@ -4146,6 +4191,201 @@ def apply_poses(node, driver_node, driven_node,
                 cmds.warning(
                     "apply_poses: failed to flip nodeState to 0: "
                     "{} (TD must set Normal manually).".format(exc))
+
+
+def apply_poses_routed(node, driver_targets, driven_targets, poses):
+    """M_P0_DRIVER_CONNECT_UX_REVAMP Part F.1 (2026-05-12) --
+    multi-driver-aware Apply that preserves input[] / output[] wiring.
+
+    Unlike legacy :func:`apply_poses` which calls
+    :func:`clear_node_data` (wiping every multi attr including
+    ``input[]`` and ``output[]`` and forcing a re-wire on the next
+    Connect click), this path calls :func:`_clear_poses_only` so the
+    user's ``add_driver_source`` / ``set_driver_source_attrs`` wiring
+    stays alive across Apply.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of the RBFtools node.
+    driver_targets : list[tuple[str, list[str]]]
+        ``[(driver_node, [attrs]), ...]`` preserving per-source
+        identity. Flatten order MUST match ``shape.input[]`` subscript
+        layout (driverSource[] append order).
+    driven_targets : list[tuple[str, list[str]]]
+        Same shape for the driven side.
+    poses : list[PoseData]
+        Ordered pose data from the UI table.
+
+    Math: identical to :func:`apply_poses` (same kernel, same pose
+    samples). The only difference is the Step 1 clear is partial --
+    pose multi attrs only, NOT the input[]/output[] connections.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+
+    # Flatten driver / driven attrs preserving the driverSource[]
+    # append order so shape.input[i] -> pose col i mapping stays
+    # consistent with the existing wiring.
+    flat_drv_attrs = [
+        a for _node, attrs in driver_targets for a in attrs]
+    flat_dvn_attrs = [
+        a for _node, attrs in driven_targets for a in attrs]
+    drv_node = driver_targets[0][0] if driver_targets else ""
+    dvn_node = driven_targets[0][0] if driven_targets else ""
+
+    # v4 -> v5 upgrade notice mirrors apply_poses; the routed path
+    # supports the same lifecycle.
+    had_poses = False
+    try:
+        had_poses = bool(
+            cmds.getAttr(shape + ".poses", multiIndices=True) or [])
+    except Exception:
+        had_poses = False
+    if had_poses and not _node_has_baseline_schema(node):
+        cmds.warning(
+            "Upgrading node {} to v5 baseline schema".format(shape))
+
+    # M_P0_APPLY_NODESTATE_FIX style: per-fatal-step instrumentation
+    # + try/finally Step 8. Step 1 is replaced with _clear_poses_only
+    # so input[]/output[] connections survive Apply.
+    apply_succeeded = False
+    failed_step = None
+    try:
+        with undo_chunk("RBFtools: apply poses (routed)"), \
+             _node_state_frozen(get_shape(node)):
+            # 0 -- M_P0_APPLY_FORCE_GENERIC mirror.
+            try:
+                cmds.setAttr(shape + ".rbfMode", 0)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses_routed: could not force rbfMode=0 "
+                    "(M_P0_APPLY_FORCE_GENERIC defense): {}".format(
+                        exc))
+
+            # 1 -- M_P0_DRIVER_CONNECT_UX_REVAMP Part F.1: clear
+            # pose data only. input[] / output[] connections stay.
+            try:
+                _clear_poses_only(node)
+            except Exception:
+                failed_step = "1 (_clear_poses_only)"
+                raise
+
+            # 2 -- write pose data (packed sequential indices).
+            try:
+                for seq_idx, pose in enumerate(poses):
+                    _write_pose_to_node(shape, seq_idx, pose)
+            except Exception:
+                failed_step = "2 (_write_pose_to_node)"
+                raise
+
+            # 3 -- SwingTwist cache (advisory).
+            try:
+                write_pose_swing_twist_cache(node, poses)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses_routed step 3 (SwingTwist cache) "
+                    "failed: {} (continuing -- cache miss falls back "
+                    "to live decompose)".format(exc))
+
+            # 4 -- per-output baselines.
+            try:
+                baselines = capture_output_baselines(
+                    dvn_node, flat_dvn_attrs, poses=poses)
+                write_output_baselines(node, baselines)
+            except Exception:
+                failed_step = "4 (capture/write_output_baselines)"
+                raise
+
+            # 5 -- per-pose local transforms.
+            try:
+                local_xforms = capture_per_pose_local_transforms(
+                    dvn_node, flat_dvn_attrs, poses)
+                write_pose_local_transforms(node, local_xforms)
+            except Exception:
+                failed_step = (
+                    "5 (capture/write_pose_local_transforms)")
+                raise
+
+            # 6 -- auto-aliases (advisory).
+            try:
+                auto_alias_outputs(
+                    node, flat_drv_attrs, flat_dvn_attrs, force=False)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses_routed step 6 (auto-alias) failed: "
+                    "{} (continuing -- aliases are advisory)".format(
+                        exc))
+
+            # 7 -- trigger evaluation cycle.
+            try:
+                cmds.setAttr(shape + ".evaluate", 0)
+                cmds.setAttr(shape + ".evaluate", 1)
+            except Exception:
+                failed_step = "7 (evaluate trigger)"
+                raise
+
+            # 7b -- re-pin rbfMode=0 (belt-and-suspenders).
+            try:
+                cmds.setAttr(shape + ".rbfMode", 0)
+            except Exception:
+                pass
+
+            apply_succeeded = True
+    finally:
+        # 8 -- nodeState 2 -> 0 (Normal). Same as apply_poses.
+        try:
+            current_state = cmds.getAttr(shape + ".nodeState")
+        except Exception:
+            current_state = 0
+        if int(current_state) != 0:
+            try:
+                cmds.setAttr(shape + ".nodeState", 0)
+                if apply_succeeded:
+                    cmds.warning(
+                        "RBFtools: nodeState 2 (Blocking) -> 0 "
+                        "(Normal). RBF outputs now active on the "
+                        "driven channels.")
+                else:
+                    cmds.warning(
+                        "RBFtools: Apply (routed) raised inside "
+                        "step {} -- nodeState forced 2 -> 0 "
+                        "(Normal). POSE STATE MAY BE PARTIAL. "
+                        "Review Script Editor.".format(
+                            failed_step or "<unknown>"))
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses_routed: failed to flip nodeState "
+                    "to 0: {} (TD must set Normal manually).".format(
+                        exc))
+
+    # M_P0_DRIVER_CONNECT_UX_REVAMP Part F.1 post-apply audit: verify
+    # driverSource[] metadata is still consistent with driver_targets.
+    # If a sync glitch crept in, surface a cmds.warning so the user
+    # sees the drift in Script Editor (the indicator dots will also
+    # turn yellow / red).
+    try:
+        sources = read_driver_info_multi(node)
+    except Exception:
+        sources = []
+    if len(sources) != len(driver_targets):
+        cmds.warning(
+            "apply_poses_routed: driverSource[] count drift "
+            "(metadata={}, targets={})".format(
+                len(sources), len(driver_targets)))
+    for i, (target_node, target_attrs) in enumerate(driver_targets):
+        if i >= len(sources):
+            break
+        if (sources[i].node != target_node
+                or list(sources[i].attrs) != list(target_attrs)):
+            cmds.warning(
+                "apply_poses_routed: driverSource[{}] drift "
+                "(metadata={!r}, target={!r})".format(
+                    i, (sources[i].node, list(sources[i].attrs)),
+                    (target_node, list(target_attrs))))
+
+    return apply_succeeded
 
 
 def connect_poses(node, driver_node, driven_node,
