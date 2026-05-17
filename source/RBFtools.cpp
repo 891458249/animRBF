@@ -85,6 +85,9 @@ MObject RBFtools::poseValues;
 // math + backcompat contract. Both are top-level multi-double arrays
 // running parallel to poses[] / output[] respectively.
 MObject RBFtools::poseRadius;
+// M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18).
+MObject RBFtools::poseParentIndex;
+MObject RBFtools::poseDriverMask;
 MObject RBFtools::basePoseValue;
 // M2.3: pure-data per-pose local Transform snapshot.
 MObject RBFtools::poseLocalTransform;
@@ -177,7 +180,13 @@ RBFtools::RBFtools()
       prevDistanceTypeVal(-1),
       prevRadiusTypeVal(-1),
       prevRadiusVal(-1.0),
-      prevRegularizationVal(-1.0)
+      prevRegularizationVal(-1.0),
+      // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18): the
+      // sub-net cache starts dirty so the first compute() always
+      // (re)trains, even when the node was just loaded from a .ma
+      // with cached weights -- the new schema fields could have
+      // been edited externally between save and load.
+      subnetCacheDirty(true)
 {}
 
 RBFtools::~RBFtools()
@@ -368,6 +377,19 @@ MStatus RBFtools::initialize()
     nAttr.setDefault(5.0);
     nAttr.setMin(0.0);
     nAttr.setSoftMax(50.0);
+
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18): per-pose
+    // parent index. -1 (default) = "this pose is a base pose";
+    // >= 0 = "this pose is a delta of pose <value>". Hard-cap-2:
+    // delta-of-delta is auto-demoted to base + warn in training
+    // (see Stage 2.1). Parallel-indexed to poses[].
+    poseParentIndex = nAttr.create(
+        "poseParentIndex", "ppi", MFnNumericData::kInt);
+    nAttr.setKeyable(true);
+    nAttr.setArray(true);
+    nAttr.setUsesArrayDataBuilder(true);
+    nAttr.setDefault(-1);
+    nAttr.setStorable(true);
 
     // Commit 0 (M_BASE_POSE): per-output-channel additive baseline
     // (driven side). multi double, default 0.0 (bit-identical legacy
@@ -781,6 +803,18 @@ MStatus RBFtools::initialize()
     poseAttributes = tAttr.create("controlPoseAttributes", "cpa", MFnData::kStringArray);
     poseValues = tAttr.create("controlPoseValues", "cpv", MFnData::kDoubleArray);
 
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18): per-pose
+    // driver mask. Each element is a kIntArray listing the flat-
+    // driver-vector indices this pose cares about. Default empty
+    // array (legacy node / fresh pose) means "all drivers" --
+    // backward-compatible with Phase 15. The multi is parallel to
+    // poses[] (one mask per pose).
+    poseDriverMask = tAttr.create(
+        "poseDriverMask", "pdm", MFnData::kIntArray);
+    tAttr.setArray(true);
+    tAttr.setUsesArrayDataBuilder(true);
+    tAttr.setStorable(true);
+
     //
     // MFnCompoundAttribute
     //
@@ -953,6 +987,9 @@ MStatus RBFtools::initialize()
     addAttribute(restInput);
     // Commit 0 (M_PER_POSE_SIGMA / M_BASE_POSE)
     addAttribute(poseRadius);
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16.
+    addAttribute(poseParentIndex);
+    addAttribute(poseDriverMask);
     addAttribute(basePoseValue);
     addAttribute(poses);
     addAttribute(poseInput);
@@ -1044,6 +1081,15 @@ MStatus RBFtools::initialize()
     // Commit 0 (M_PER_POSE_SIGMA / M_BASE_POSE) — both feed compute().
     attributeAffects(RBFtools::poseRadius,    RBFtools::output);
     attributeAffects(RBFtools::basePoseValue, RBFtools::output);
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- two
+    // attributeAffects pairs only; promotion to evalInput=true on
+    // schema drift is handled by the prev-state cache compare in
+    // compute() (matches the prevBaseValueArr / prevQuatGroupConfigHash
+    // pattern at cpp:1791-1851). attributeAffects alone would reuse
+    // the cached baseNet / deltaNets and produce stale output after
+    // the user edits parent / mask live.
+    attributeAffects(RBFtools::poseParentIndex, RBFtools::output);
+    attributeAffects(RBFtools::poseDriverMask,  RBFtools::output);
     attributeAffects(RBFtools::centerAngle, RBFtools::output);
     attributeAffects(RBFtools::curveRamp, RBFtools::output);
     attributeAffects(RBFtools::direction, RBFtools::output);
@@ -1797,6 +1843,78 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     evalInput = true;
                     prevBaseValueArr = baseValueArr;
                     prevOutputIsScaleArr = outputIsScaleArr;
+                }
+
+                // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18)
+                // -- Schema cache invalidation. Same pattern as
+                // prevBaseValueArr above: attributeAffects(poseParentIndex
+                // / poseDriverMask, output) alone is not enough -- Maya
+                // would reuse the cached baseNet / deltaNets after a
+                // parent / mask edit and produce stale output. The
+                // compare here promotes evalInput=true on any drift and
+                // marks subnetCacheDirty so Stage 2 training (commit 3)
+                // knows to rebuild the sub-net pair.
+                //
+                // Reads are sparse-safe: pose count is upper-bounded by
+                // the largest sparse index in poses[]; the array is
+                // packed by sequential logical index so the per-pose
+                // attribute reads use the same jumpToElement protocol
+                // as outputIsScaleArr above. Missing elements fall back
+                // to the schema default (parent=-1 / empty mask), which
+                // is exactly the "no hierarchy / all drivers" backward-
+                // compatible value -- a legacy node mid-upgrade still
+                // sees Phase 15-equivalent behaviour.
+                std::vector<int> currentPoseParentArr;
+                std::vector<std::vector<int>> currentPoseDriverMaskArr;
+                {
+                    MArrayDataHandle ppHandle =
+                        data.inputArrayValue(poseParentIndex, &status);
+                    if (status == MStatus::kSuccess)
+                    {
+                        const unsigned cnt = ppHandle.elementCount();
+                        currentPoseParentArr.reserve(cnt);
+                        for (unsigned k = 0; k < cnt; ++k)
+                        {
+                            if (ppHandle.jumpToArrayElement(k)
+                                    == MStatus::kSuccess)
+                                currentPoseParentArr.push_back(
+                                    ppHandle.inputValue().asInt());
+                            else
+                                currentPoseParentArr.push_back(-1);
+                        }
+                    }
+                    MArrayDataHandle pdmHandle =
+                        data.inputArrayValue(poseDriverMask, &status);
+                    if (status == MStatus::kSuccess)
+                    {
+                        const unsigned cnt = pdmHandle.elementCount();
+                        currentPoseDriverMaskArr.reserve(cnt);
+                        for (unsigned k = 0; k < cnt; ++k)
+                        {
+                            std::vector<int> maskRow;
+                            if (pdmHandle.jumpToArrayElement(k)
+                                    == MStatus::kSuccess)
+                            {
+                                MObject maskData =
+                                    pdmHandle.inputValue().data();
+                                MFnIntArrayData iadFn(maskData);
+                                MIntArray ia = iadFn.array();
+                                maskRow.reserve(ia.length());
+                                for (unsigned m = 0;
+                                     m < ia.length(); ++m)
+                                    maskRow.push_back(ia[m]);
+                            }
+                            currentPoseDriverMaskArr.push_back(maskRow);
+                        }
+                    }
+                }
+                if (currentPoseParentArr     != prevPoseParentArr ||
+                    currentPoseDriverMaskArr != prevPoseDriverMaskArr)
+                {
+                    evalInput = true;
+                    prevPoseParentArr     = currentPoseParentArr;
+                    prevPoseDriverMaskArr = currentPoseDriverMaskArr;
+                    subnetCacheDirty      = true;
                 }
             }
 

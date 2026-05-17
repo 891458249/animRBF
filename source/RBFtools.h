@@ -26,6 +26,9 @@
 #include <maya/MFnMessageAttribute.h>
 #include <maya/MFnTypedAttribute.h>
 #include <maya/MFnStringArrayData.h>   // M_B24a1: driverSource_attrs default value
+#include <maya/MFnIntArrayData.h>      // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16:
+                                       //   poseDriverMask intArray reads
+#include <maya/MIntArray.h>
 #include <maya/MRampAttribute.h>
 
 #include <maya/MArrayDataBuilder.h>
@@ -56,6 +59,51 @@
 
 #include "BRMatrix.h"
 #include <vector>
+#include <unordered_map>   // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16:
+                           //   deltaNets parent-pose-index map.
+
+
+// ----------------------------------------------------------------------
+// M_P0_RBF_HIERARCHICAL_TWO_LEVEL (Phase 16) -- factored sub-net.
+// ----------------------------------------------------------------------
+// Each RBFSubNet trains its own weight matrix on a subset of poses
+// (rows) and a subset of driver dimensions (columns of the K matrix).
+// Phase 16 instantiates:
+//   * one baseNet covering every pose with poseParentIndex == -1, with
+//     activeDrivers = union of those poses' driver masks (empty mask
+//     means "all drivers", preserving backward compat); and
+//   * one deltaNet per base parent that has children (children =
+//     poses whose poseParentIndex points to that parent's logical
+//     index), with activeDrivers = union of the children's masks.
+//
+// Phase 15 math invariants are preserved per sub-net:
+//   * polynomial augmentation (polyDim = 1 + |activeDrivers|) -- the
+//     existing add-augmented-block solve runs per sub-net, so anchor
+//     M_P0_RBF_POLYNOMIAL_AUGMENTATION is honoured inside each net;
+//   * column-rank defence (C lite) records its drop mask in
+//     isActiveLinear per sub-net, so M_P0_RBF_COLUMN_RANK_DEFENSE
+//     fires independently for each net.
+struct RBFSubNet {
+    BRMatrix          wMat;             // weights, rows = poseIndices,
+                                        //   cols = solveCount.
+    BRMatrix          polyMat;          // polynomial augmentation,
+                                        //   rows = polyDim
+                                        //         (1 + activeDrivers.size()),
+                                        //   cols = solveCount.
+                                        //   M_P0_RBF_POLYNOMIAL_AUGMENTATION
+                                        //   preserved per sub-net.
+    std::vector<int>  activeDrivers;    // flat-driver-vector indices this
+                                        //   sub-net cares about (the
+                                        //   columns of K).
+    std::vector<int>  poseIndices;      // logical pose indices owned by
+                                        //   this sub-net (base: parent
+                                        //   == -1; delta: children of
+                                        //   one parent).
+    std::vector<bool> isActiveLinear;   // C lite mask per sub-net,
+                                        //   parallel to activeDrivers.
+                                        //   M_P0_RBF_COLUMN_RANK_DEFENSE
+                                        //   preserved per sub-net.
+};
 
 class RBFtools : public MPxLocatorNode
 {
@@ -465,6 +513,19 @@ public:
     // (arithmetic mean — preserves symmetry => Cholesky path of
     // M1.4 stays valid); at inference, query-vs-center j uses σ_j.
     static MObject poseRadius;
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- per-pose
+    // schema additions:
+    //   * poseParentIndex: int multi parallel to poses[]. Default -1
+    //     means "base pose" (legacy single-layer behaviour). >= 0
+    //     means "delta of poseParentIndex". Hard-cap-2 layers: any
+    //     value pointing at another delta is demoted to base at
+    //     training time + warned.
+    //   * poseDriverMask: intArray multi parallel to poses[]. Each
+    //     element lists the flat-driver-vector indices this pose
+    //     cares about. Empty array (default / legacy node) means
+    //     "all drivers" (numerically equivalent to Phase 15).
+    static MObject poseParentIndex;
+    static MObject poseDriverMask;
     // Commit 0 (M_BASE_POSE): per-output-channel additive baseline
     // applied at setOutputValues (driven side). Top-level multi
     // double, length = output[]. Empty array (legacy node) =>
@@ -560,6 +621,24 @@ private:
     // so the weight matrix is re-solved against the shifted Y targets.
     std::vector<double> prevBaseValueArr;
     std::vector<bool>   prevOutputIsScaleArr;
+
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18): prev-state
+    // snapshot for poseParentIndex + poseDriverMask. Same pattern as
+    // prevBaseValueArr / prevQuatGroupConfigHash -- attributeAffects on
+    // these plugs alone is NOT enough (Maya would re-use the cached
+    // baseNet / deltaNets after a parent change and produce stale
+    // output). compute() compares current vs prev per tick and trips
+    // evalInput = true + subnetCacheDirty = true on any drift.
+    std::vector<int>              prevPoseParentArr;
+    std::vector<std::vector<int>> prevPoseDriverMaskArr;
+
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 cache. INSTANCE members
+    // -- per RBFtools node, never shared. compute() at evalInput==true
+    // writes; inference path only reads. Static would corrupt across
+    // nodes (hard rail #12).
+    RBFSubNet                          baseNet;
+    std::unordered_map<int, RBFSubNet> deltaNets;
+    bool                               subnetCacheDirty;
 
     // M1.3: per-dimension raw-space bounds snapshot. Refilled inside the
     // evalInput==true training path in getPoseData / getPoseVectors, read
