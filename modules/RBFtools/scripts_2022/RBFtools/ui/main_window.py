@@ -106,6 +106,12 @@ class _PoseEditorPanel(CollapsibleFrame):
     ditherDriversRequested   = QtCore.Signal()
     ditherDrivensRequested   = QtCore.Signal()
     globalRadiusRequested    = QtCore.Signal(float)
+    # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- panel-
+    # level re-emits from PoseGridEditor for the per-row Parent combo
+    # + Driver Mask popup. RBFToolsWindow connects pe.poseParentChanged
+    # / pe.poseDriverMaskChanged to its controller-writer handlers.
+    poseParentChanged        = QtCore.Signal(int, int)        # row, parent
+    poseDriverMaskChanged    = QtCore.Signal(int, list)       # row, mask
 
     def __init__(self, parent=None):
         super(_PoseEditorPanel, self).__init__(
@@ -262,12 +268,17 @@ class _PoseEditorPanel(CollapsibleFrame):
         self._pose_grid.globalRadiusRequested.connect(
             self.globalRadiusRequested)
         # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
-        # per-row hierarchy editor signals wired through to the
-        # controller writers landed in commit 6 (8a8d32b).
+        # per-row hierarchy editor signals forwarded panel-level
+        # (mirrors dither/globalRadius pattern at lines 258-263).
+        # RBFToolsWindow wires pe.poseParentChanged + pe.poseDriverMask
+        # Changed to the controller writers landed in commit 6
+        # (8a8d32b). Hot-fix 2026-05-18: previous code connected to a
+        # non-existent _PoseEditorPanel._on_pose_grid_parent_changed
+        # which crashed plugin open with AttributeError.
         self._pose_grid.poseParentChanged.connect(
-            self._on_pose_grid_parent_changed)
+            self.poseParentChanged)
         self._pose_grid.poseDriverMaskChanged.connect(
-            self._on_pose_grid_driver_mask_changed)
+            self.poseDriverMaskChanged)
 
         # Commit 3 (M_BASE_POSE): BaseDrivenPose tab. Inserted at
         # index 1 BETWEEN DriverDriven (0) and Pose (2) per the user's
@@ -1344,6 +1355,13 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._on_base_pose_value_changed)
         pe.basePoseRecallRequested.connect(
             self._on_base_pose_recall)
+        # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- per-
+        # row hierarchy editor signals from the panel routed to local
+        # controller-writer handlers defined below (line ~1995/2007).
+        pe.poseParentChanged.connect(
+            self._on_pose_grid_parent_changed)
+        pe.poseDriverMaskChanged.connect(
+            self._on_pose_grid_driver_mask_changed)
         # M_P0_POSE_DITHER_AND_UPDATE_FIX Phase 14 -- dither + radius.
         pe.ditherDriversRequested.connect(self._on_dither_drivers)
         pe.ditherDrivensRequested.connect(self._on_dither_drivens)
