@@ -94,6 +94,23 @@ class PoseHeaderWidget(QtWidgets.QWidget):
         ph_pose = QtWidgets.QLabel("")
         ph_pose.setMinimumWidth(POSE_LABEL_MIN_W)
         drv_l.addWidget(ph_pose)
+        # M_P0_RBF_HIERARCHICAL_UI_LEFT_PLACEMENT (2026-05-18) -- two
+        # column-header placeholders matching the row-side
+        # Parent QComboBox + Driver Mask popup widths so the splitter
+        # geometry aligns driver-cluster groupboxes above the row's
+        # spinboxes. Without these the row widgets were pushed
+        # (80 + 60) px right of their header columns, causing visible
+        # mis-alignment when the window widened.
+        ph_parent = QtWidgets.QLabel(tr("pose_col_parent"))
+        ph_parent.setAlignment(QtCore.Qt.AlignCenter)
+        ph_parent.setMinimumWidth(80)   # mirrors HIERARCHY_PARENT_W
+        ph_parent.setToolTip(tr("pose_col_parent_tip"))
+        drv_l.addWidget(ph_parent)
+        ph_mask = QtWidgets.QLabel(tr("pose_col_driver_mask"))
+        ph_mask.setAlignment(QtCore.Qt.AlignCenter)
+        ph_mask.setMinimumWidth(60)     # mirrors HIERARCHY_MASK_W
+        ph_mask.setToolTip(tr("pose_col_driver_mask_tip"))
+        drv_l.addWidget(ph_mask)
         for src in self._driver_sources:
             box = BoneDataGroupBox(
                 src.node, list(src.attrs), side="driver")
