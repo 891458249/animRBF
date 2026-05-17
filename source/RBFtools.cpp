@@ -10,6 +10,8 @@
 #include "RBFtools.h"
 
 #include "math.h"
+#include <algorithm>   // M_P0_RBF_ANTI_OVERSHOOT Part C: std::swap
+#include <cmath>       // M_P0_RBF_ANTI_OVERSHOOT Part C: std::isfinite
 
 #ifdef _WIN64
 #define M_PI 3.1415926535897932384626433832795
@@ -1675,14 +1677,49 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     for (size_t j = 0; j < dim; ++j)
                         if (j % 5 == 4) clampSkipMask[j] = true;  // twist slot
                 }
+                // M_P0_RBF_ANTI_OVERSHOOT Part C (2026-05-17) -- input
+                // clamp safety guards. Audit found three silent-failure
+                // modes in this loop that the new Phase 15 design must
+                // close before the symmetric Output Clamp inherits them:
+                //   1. AABB inversion (max < min) silently produces a
+                //      reversed [lo, hi] range; auto-correct + warn.
+                //   2. clampInflation negative (e.g. user typo) inverts
+                //      the inflation direction; floor at 0.0.
+                //   3. NaN / Inf driver value bypasses the < / > checks
+                //      (NaN comparisons are false), letting non-finite
+                //      values reach the K matrix; replace with AABB
+                //      midpoint + warn.
+                const double safeInfl =
+                    (clampInflationVal > 0.0) ? clampInflationVal : 0.0;
                 for (size_t j = 0; j < dim; ++j)
                 {
                     if (clampSkipMask[j]) continue;
-                    const double r = poseMaxVec[j] - poseMinVec[j];
-                    const double lo = poseMinVec[j] - clampInflationVal * r;
-                    const double hi = poseMaxVec[j] + clampInflationVal * r;
-                    if (driver[j] < lo) driver[j] = lo;
-                    else if (driver[j] > hi) driver[j] = hi;
+                    double pmin = poseMinVec[j];
+                    double pmax = poseMaxVec[j];
+                    if (pmax < pmin) {
+                        std::swap(pmin, pmax);
+                        MGlobal::displayWarning(
+                            MString("RBFtools: AABB inverted "
+                                    "(poseMax < poseMin) at driver "
+                                    "channel ") + (unsigned)j +
+                            ", auto-corrected "
+                            "(M_P0_RBF_ANTI_OVERSHOOT Part C.1).");
+                    }
+                    const double r = pmax - pmin;
+                    const double lo = pmin - safeInfl * r;
+                    const double hi = pmax + safeInfl * r;
+                    double dv = driver[j];
+                    if (!std::isfinite(dv)) {
+                        dv = (pmin + pmax) * 0.5;
+                        MGlobal::displayWarning(
+                            MString("RBFtools: non-finite driver[") +
+                            (unsigned)j + "], replaced with AABB "
+                            "midpoint (M_P0_RBF_ANTI_OVERSHOOT "
+                            "Part C.3).");
+                    }
+                    if (dv < lo) dv = lo;
+                    else if (dv > hi) dv = hi;
+                    driver[j] = dv;
                 }
             }
 
