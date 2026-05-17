@@ -409,6 +409,12 @@ public:
     static MObject baseValue;
     static MObject clampEnabled;
     static MObject clampInflation;
+    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): output-side clamp
+    // attributes -- mirror of clampEnabled / clampInflation but for
+    // the inference OUTPUT (RBF y), aligning RBFtools defaults with
+    // Houdini rig::RBFInterpolation.clamp=True industry behaviour.
+    static MObject outputClampEnabled;
+    static MObject outputClampInflation;
     static MObject outputIsScale;
     static MObject radius;
     static MObject regularization;
@@ -562,6 +568,15 @@ private:
     // not participate in the weight solve.
     std::vector<double> poseMinVec;
     std::vector<double> poseMaxVec;
+
+    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): per-output-channel
+    // bounds. Refilled in the evalInput==true training path right
+    // after matValues is populated; the inference finalize loop clips
+    // each output value into [outputMinVec[c] - infl * r,
+    // outputMaxVec[c] + infl * r]. Cached so inference can stay
+    // branch-light. Lifetime mirrors poseMinVec / poseMaxVec.
+    std::vector<double> outputMinVec;
+    std::vector<double> outputMaxVec;
 
     // M1.4: last successful solver tier. 0 = Cholesky, 1 = GE (fallback).
     // Cross-compute hint: next training attempt prefers the method that

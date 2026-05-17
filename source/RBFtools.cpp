@@ -12,6 +12,7 @@
 #include "math.h"
 #include <algorithm>   // M_P0_RBF_ANTI_OVERSHOOT Part C: std::swap
 #include <cmath>       // M_P0_RBF_ANTI_OVERSHOOT Part C: std::isfinite
+#include <limits>      // M_P0_RBF_ANTI_OVERSHOOT Part A: numeric_limits
 
 #ifdef _WIN64
 #define M_PI 3.1415926535897932384626433832795
@@ -111,6 +112,8 @@ MObject RBFtools::allowNegative;
 MObject RBFtools::baseValue;
 MObject RBFtools::clampEnabled;
 MObject RBFtools::clampInflation;
+MObject RBFtools::outputClampEnabled;
+MObject RBFtools::outputClampInflation;
 MObject RBFtools::outputIsScale;
 MObject RBFtools::regularization;
 MObject RBFtools::solverMethod;
@@ -527,6 +530,25 @@ MStatus RBFtools::initialize()
     // 0.0 is v5 PART G.7's hard clamp; small positive values give a softer
     // hull to dampen edge-pop on out-of-training-range inputs.
     clampInflation = nAttr.create("clampInflation", "cli", MFnNumericData::kDouble);
+    nAttr.setKeyable(true);
+    nAttr.setStorable(true);
+    nAttr.setDefault(0.0);
+    nAttr.setMin(0.0);
+    nAttr.setSoftMax(1.0);
+
+    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): output-side clamp.
+    // Default ON aligns with Houdini rig::RBFInterpolation.clamp=True
+    // industry standard. Inference output is clipped into
+    // [outputMin - infl*r, outputMax + infl*r] where the bounds are
+    // captured from matValues per channel at training time.
+    outputClampEnabled = nAttr.create(
+        "outputClampEnabled", "oce", MFnNumericData::kBoolean);
+    nAttr.setKeyable(true);
+    nAttr.setStorable(true);
+    nAttr.setDefault(true);
+
+    outputClampInflation = nAttr.create(
+        "outputClampInflation", "oci", MFnNumericData::kDouble);
     nAttr.setKeyable(true);
     nAttr.setStorable(true);
     nAttr.setDefault(0.0);
@@ -958,6 +980,9 @@ MStatus RBFtools::initialize()
     addAttribute(outputIsScale);
     addAttribute(clampEnabled);
     addAttribute(clampInflation);
+    // M_P0_RBF_ANTI_OVERSHOOT Part A.
+    addAttribute(outputClampEnabled);
+    addAttribute(outputClampInflation);
     addAttribute(regularization);
     addAttribute(solverMethod);
     addAttribute(inputEncoding);
@@ -1006,6 +1031,9 @@ MStatus RBFtools::initialize()
     attributeAffects(RBFtools::outputIsScale, RBFtools::output);
     attributeAffects(RBFtools::clampEnabled, RBFtools::output);
     attributeAffects(RBFtools::clampInflation, RBFtools::output);
+    // M_P0_RBF_ANTI_OVERSHOOT Part A.
+    attributeAffects(RBFtools::outputClampEnabled, RBFtools::output);
+    attributeAffects(RBFtools::outputClampInflation, RBFtools::output);
     attributeAffects(RBFtools::regularization, RBFtools::output);
     attributeAffects(RBFtools::solverMethod, RBFtools::output);
     attributeAffects(RBFtools::inputEncoding, RBFtools::output);
@@ -1192,6 +1220,13 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
     MPlug clampInflationPlug(thisNode, RBFtools::clampInflation);
     bool clampEnabledVal = clampEnabledPlug.asBool();
     double clampInflationVal = clampInflationPlug.asDouble();
+    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): output-side clamp.
+    // Inference-only -- caching happens at training time; the plug
+    // read here is consumed by the per-channel finalize loop.
+    MPlug outputClampEnabledPlug(thisNode, RBFtools::outputClampEnabled);
+    MPlug outputClampInflationPlug(thisNode, RBFtools::outputClampInflation);
+    bool   outputClampEnabledVal   = outputClampEnabledPlug.asBool();
+    double outputClampInflationVal = outputClampInflationPlug.asDouble();
     // M1.4: solver configuration. Both participate in the train path;
     // regularization changes require a re-solve (attributeAffects handles
     // this — λ is folded into linMat, which is a local, not a cache).
@@ -1883,8 +1918,49 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
 
                 if (evalInput)
                 {
+                    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17):
+                    // capture per-output-channel min/max BEFORE the
+                    // weight solve. matValues is already filled by
+                    // getPoseData / getPoseVectors at this point; the
+                    // inference path consults outputMinVec /
+                    // outputMaxVec inside the per-channel finalize
+                    // loop to clip y back into [y_min - infl*r,
+                    // y_max + infl*r]. Stored as state so subsequent
+                    // compute() ticks (no evalInput) skip the recompute.
+                    outputMinVec.assign(
+                        solveCount,
+                        std::numeric_limits<double>::infinity());
+                    outputMaxVec.assign(
+                        solveCount,
+                        -std::numeric_limits<double>::infinity());
+                    {
+                        const unsigned mvRows = matValues.getRowSize();
+                        const unsigned mvCols = matValues.getColSize();
+                        const unsigned cClip =
+                            (mvCols < solveCount) ? mvCols : solveCount;
+                        for (unsigned p = 0; p < mvRows; ++p)
+                        {
+                            for (unsigned c = 0; c < cClip; ++c)
+                            {
+                                const double yv = matValues(p, c);
+                                if (!std::isfinite(yv)) continue;
+                                if (yv < outputMinVec[c])
+                                    outputMinVec[c] = yv;
+                                if (yv > outputMaxVec[c])
+                                    outputMaxVec[c] = yv;
+                            }
+                        }
+                        for (unsigned c = 0; c < solveCount; ++c)
+                        {
+                            if (!std::isfinite(outputMinVec[c]))
+                                outputMinVec[c] = 0.0;
+                            if (!std::isfinite(outputMaxVec[c]))
+                                outputMaxVec[c] = 0.0;
+                        }
+                    }
+
                     // MGlobal::displayInfo("Initialize matrices");
-                                        
+
                     // -------------------------------------------------
                     // distances
                     // -------------------------------------------------
@@ -2634,6 +2710,50 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     if (genericMode && i < outputIsScaleArr.size())
                     {
                         value += outputIsScaleArr[i] ? 1.0 : baseValueArr[i];
+                    }
+
+                    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17):
+                    // output clamp -- Houdini rig::RBFInterpolation
+                    // clamp=True industry default. Inference output
+                    // is clipped into the training driven-value range
+                    // (per channel), optionally inflated by alpha.
+                    // Part C safety guards: AABB inversion auto-
+                    // corrected, negative inflation floored to 0,
+                    // NaN/Inf replaced with the AABB midpoint.
+                    if (outputClampEnabledVal
+                        && genericMode
+                        && i < outputMinVec.size()
+                        && i < outputMaxVec.size())
+                    {
+                        double yMin = outputMinVec[i];
+                        double yMax = outputMaxVec[i];
+                        if (yMax < yMin) {
+                            std::swap(yMin, yMax);
+                            MGlobal::displayWarning(
+                                MString("RBFtools: output AABB "
+                                        "inverted (max < min) at "
+                                        "channel ") + (unsigned)i +
+                                ", auto-corrected "
+                                "(M_P0_RBF_ANTI_OVERSHOOT "
+                                "Part C.1).");
+                        }
+                        const double rOut = yMax - yMin;
+                        const double inflOut =
+                            (outputClampInflationVal > 0.0)
+                            ? outputClampInflationVal : 0.0;
+                        const double lo = yMin - inflOut * rOut;
+                        const double hi = yMax + inflOut * rOut;
+                        if (!std::isfinite(value)) {
+                            value = (yMin + yMax) * 0.5;
+                            MGlobal::displayWarning(
+                                MString("RBFtools: non-finite output "
+                                        "at channel ") + (unsigned)i +
+                                ", replaced with AABB midpoint "
+                                "(M_P0_RBF_ANTI_OVERSHOOT "
+                                "Part C.3).");
+                        }
+                        if (value < lo) value = lo;
+                        else if (value > hi) value = hi;
                     }
 
                     // Set the final weight.
