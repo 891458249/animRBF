@@ -87,6 +87,19 @@ _EN = {
     # clampInflation schema, more intuitive surface.
     "clamp_enabled":       "Limit Driver to Registered Pose Range",
     "clamp_inflation":     "Limit Inflation:",
+    # M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): output clamp
+    # exposure -- mirror of the input clamp pair, aligning with the
+    # Houdini rig::RBFInterpolation.clamp=True industry default.
+    "output_clamp_enabled":     "Limit Output to Trained Range",
+    "output_clamp_enabled_tip":
+        "Clip RBF output to the range of trained driven values, "
+        "preventing inter-pose overshoot / undershoot. Houdini "
+        "industry default (default ON).",
+    "output_clamp_inflation":   "Output Inflation:",
+    "output_clamp_inflation_tip":
+        "Allow output to exceed the trained range by this fraction. "
+        "0 = strict clamp, 0.05 = +/-5% margin, 1.0 = up to 100% "
+        "extrapolation.",
     # -- M2.4a: per-output scale flag (OutputScaleEditor) --
     "output_is_scale":     "Output Is Scale",
     "output_is_scale_hdr": "Mark scale-channel outputs (M1.2 anchor 1.0)",
@@ -694,6 +707,16 @@ _ZH = {
     # M_QUICKWINS Item 4a: \u6807\u7b7e\u66f4\u65b0\u4e3a"\u52a8\u4f5c\u8303\u56f4\u9650\u5236"\uff0c\u4e0e TD \u671f\u671b\u5bf9\u9f50
     "clamp_enabled":       u"\u52a8\u4f5c\u8303\u56f4\u9650\u5236\uff08\u8d85\u51fa\u5df2\u6ce8\u518c\u59ff\u52bf\u65f6\u505c\u6b62\uff09",
     "clamp_inflation":     u"\u9650\u5236\u81a8\u80c0\u6bd4\u4f8b\uff1a",
+    # M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17)
+    "output_clamp_enabled":     u"\u8f93\u51fa\u8303\u56f4\u9650\u5236\uff08\u9632\u8fc7\u51b2\uff09",
+    "output_clamp_enabled_tip":
+        u"\u5c06 RBF \u8f93\u51fa\u503c\u9650\u5236\u5728\u8bad\u7ec3 pose \u7684\u8f93\u51fa\u8303\u56f4\u5185\uff0c"
+        u"\u9632\u6b62 inter-pose overshoot/undershoot\u3002"
+        u"Houdini \u5de5\u4e1a\u6807\u51c6\uff0c\u9ed8\u8ba4\u5f00\u542f\u3002",
+    "output_clamp_inflation":   u"\u8f93\u51fa\u81a8\u80c0\u6bd4\u4f8b\uff1a",
+    "output_clamp_inflation_tip":
+        u"\u5141\u8bb8\u8f93\u51fa\u8d85\u51fa\u8bad\u7ec3\u8303\u56f4\u7684\u6bd4\u4f8b\u30020=\u4e25\u683c clamp\uff0c"
+        u"0.05=\u00b15% \u5f39\u6027\uff0c1.0=\u5141\u8bb8 100% \u5916\u63a8\u3002",
     "output_is_scale":     u"\u8f93\u51fa\u4e3a\u7f29\u653e",
     "output_is_scale_hdr": u"\u6807\u8bb0\u7f29\u653e\u901a\u9053\u8f93\u51fa\uff08M1.2 anchor 1.0\uff09",
     # -- M2.4b: ordered-list editors --

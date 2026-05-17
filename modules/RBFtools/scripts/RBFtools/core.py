@@ -437,6 +437,13 @@ def get_all_settings(node):
         "inputEncoding":        g(shape + ".inputEncoding",        0),
         "clampEnabled":         g(shape + ".clampEnabled",         False),
         "clampInflation":       g(shape + ".clampInflation",       0.0),
+        # M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): output-side
+        # clamp settings. Default true mirrors the C++ schema default
+        # (Houdini-aligned). When the plug cannot be read on a legacy
+        # node missing the attribute the UI falls back to the
+        # industry default, which keeps the safer behaviour visible.
+        "outputClampEnabled":   g(shape + ".outputClampEnabled",   True),
+        "outputClampInflation": g(shape + ".outputClampInflation", 0.0),
         # M_P0_CREATE_NODE_REGULARIZATION (2026-05-10): UI fallback
         # default mirrors the new create-time write — 1e-4 is more
         # rigging-friendly than the historical 1e-8 (Chad Vernon
