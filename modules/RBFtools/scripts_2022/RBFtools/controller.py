@@ -2153,6 +2153,92 @@ class MainController(QtCore.QObject):
 
         self.statusMessage.emit("RBF data applied.")
 
+    def apply_poses_routed(self, driver_targets, driven_targets):
+        """M_P0_DRIVER_CONNECT_UX_REVAMP Part F.3 (2026-05-12) --
+        multi-driver-aware Apply that preserves input[] / output[]
+        wiring across the call.
+
+        Mirrors :meth:`apply_poses` for the duplicate-pose pre-check
+        and node-creation lifecycle, but routes through
+        :func:`core.apply_poses_routed` which calls
+        :func:`core._clear_poses_only` instead of
+        :func:`core.clear_node_data` -- the user's multi-driver
+        ``add_driver_source`` wiring survives the Apply storm.
+
+        Use this for any multi-driver scenario (>1 driver source OR
+        any source with >1 attr). Single-driver legacy Apply keeps
+        routing through :meth:`apply_poses` so its behaviour is
+        bit-identical to the pre-Phase-13 path.
+        """
+        if not self._validate_apply_args_routed(
+                driver_targets, driven_targets):
+            return
+
+        node = self._current_node
+        if not node or not cmds.objExists(node):
+            core.ensure_plugin()
+            node = core.create_node()
+            core.set_node_attr(node, "type", 1)
+
+        poses = self._pose_model.all_poses()
+
+        # M_P0_DUPLICATE_POSE_DETECT mirror -- routed Apply must
+        # surface the same pre-check so MQB / IMQB kernel singular
+        # failures are explained to the user, not buried.
+        duplicates = core._detect_duplicate_pose_inputs(poses)
+        if duplicates:
+            from RBFtools.ui.i18n import tr
+            pair_lines = [
+                "  Pose {} = Pose {} (inputs identical)".format(a, b)
+                for a, b in duplicates]
+            summary = "\n".join(
+                [tr("duplicate_pose_warning_header"), ""]
+                + pair_lines
+                + ["", tr("duplicate_pose_warning_action")])
+            proceed = self.ask_confirm(
+                title=tr("title_duplicate_poses"),
+                summary=summary,
+                preview_text="",
+                action_id="apply_with_duplicate_poses")
+            if not proceed:
+                cmds.warning(
+                    "apply_poses_routed: aborted by user -- fix "
+                    "duplicate poses first.")
+                return
+            cmds.warning(
+                "apply_poses_routed: continuing with duplicates -- "
+                "MQB / IMQB kernels may fail RBF decomposition.")
+
+        core.apply_poses_routed(
+            node, driver_targets, driven_targets, poses)
+
+        self._current_node = core.get_transform(core.get_shape(node))
+        self.refresh_nodes()
+        self._load_settings()
+
+        self.statusMessage.emit("RBF data applied (multi-driver).")
+
+    def _validate_apply_args_routed(self, driver_targets,
+                                    driven_targets):
+        """Common validation for the routed Apply path. Mirrors
+        :meth:`_validate_apply_args` but operates on the multi-source
+        ``[(node, [attrs]), ...]`` shape."""
+        if not driver_targets or not driven_targets:
+            cmds.warning(
+                "apply_poses_routed: empty driver/driven targets.")
+            return False
+        # At least one driver node + one driver attr required.
+        any_drv_attr = any(
+            attrs for _node, attrs in driver_targets)
+        any_dvn_attr = any(
+            attrs for _node, attrs in driven_targets)
+        if not any_drv_attr or not any_dvn_attr:
+            cmds.warning(
+                "apply_poses_routed: no driver / driven attrs in any "
+                "target.")
+            return False
+        return True
+
     def connect_poses(self, driver_node, driven_node,
                       driver_attrs, driven_attrs):
         u"""Connect button \u2014 wire driver inputs and driven outputs."""
