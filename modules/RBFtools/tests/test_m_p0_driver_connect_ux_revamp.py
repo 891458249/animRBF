@@ -2,30 +2,40 @@
 """M_P0_DRIVER_CONNECT_UX_REVAMP (2026-05-12) -- Phase 13 driver
 connect UX revamp test surface.
 
-Covers all three user directives (brief sec.0):
+Covers all four user directives (brief sec.0):
   1. Per-tab connection status indicator (red/yellow/green dot)
   2. Single-tab "Connect" only affects current tab; switching
      tabs does not overwrite previous wires (atomic Step 2+4 +
      rollback in set_driver_source_attrs)
   3. Multi-tab cumulative "Connect" is idempotent -- per-tab
      indicator-guided dispatch skips already-green tabs
+  4. "Apply" button preserves multi-driver wiring -- Apply must
+     not collapse green dots to just the last active tab
+     (apply_poses_routed + _clear_poses_only)
 
-Eleven test cases (brief sec.2 Part D.1):
+Fourteen + extras test cases (brief sec.2 Part D.1):
   PERMANENT GUARDS (source introspection):
     1.  Part A: metadata write moved after Step 2 + Step 4
     2.  Part A: pre_wires snapshot for rollback restore
     3.  Part A: rollback connectAttr + restore loop present
     4.  Part A: driver_source_connection_state helper present
     5.  Part A: controller.driver_source_connection_state method
-    6.  Part E.1: _on_driver_source_attrs_apply idempotent skip
-    7.  Part E.2: _on_connect batch filter
-    8.  Part E.3: _on_connect_clicked attr dedupe
-    9.  Part B: status icon factory + refresh_tab_indicators
+    6.  Part B: status icon factory + refresh_tab_indicators
+    7.  Part C: count-change dialog in apply slot
+    8.  Part E.1: _on_driver_source_attrs_apply idempotent skip
+    9.  Part E.2: _on_connect batch filter
+    10. Part E.3: _on_connect_clicked attr dedupe
+    11. Part F.1: core.apply_poses_routed signature + _clear_
+        poses_only Step 1 call
+    12. Part F.2: _clear_poses_only skips "input" and "output"
+    13. Part F.3: controller.apply_poses_routed method present
+    14. Part F.4: main_window._on_apply dispatch by topology
   RUNTIME BEHAVIOUR (mocked cmds):
-    10. driver_source_connection_state -> "connected"/"partial"/
-        "disconnected" returns
-    11. attr dedupe preserves order regardless of selection
-        repetition pattern
+    R1-R4. driver_source_connection_state -> "connected"/"partial"/
+           "disconnected" returns + index OOR
+  ATTR DEDUPE PURE LOGIC:
+    D1-D3. order preserved for [X,Y,X,Z], no-dupes no-op,
+           all-dupes collapse
 """
 
 from __future__ import absolute_import
@@ -281,6 +291,110 @@ class T_M_P0_DRIVER_CONNECT_UX_REVAMP_Source(unittest.TestCase):
             "selection")
         self.assertIn("if a not in seen:", body,
             "Part E.3: _on_connect_clicked MUST skip duplicates")
+
+    # --- Part F ---------------------------------------------------------
+
+    def test_PERMANENT_11_apply_poses_routed_signature(self):
+        """Part F.1: core.apply_poses_routed MUST exist with the
+        (node, driver_targets, driven_targets, poses) signature AND
+        call _clear_poses_only (NOT clear_node_data) for Step 1.
+        This is the user-reported invariant for directive #4 --
+        Apply MUST preserve multi-driver input[]/output[] wiring."""
+        self.assertIn(
+            "def apply_poses_routed(node, driver_targets, "
+            "driven_targets, poses):",
+            self._core,
+            "core MUST expose apply_poses_routed with the documented "
+            "multi-driver signature (Part F.1)")
+        body = _slice_def(
+            self._core,
+            "def apply_poses_routed(node, driver_targets, "
+            "driven_targets, poses):")
+        # Step 1 MUST be _clear_poses_only -- NOT clear_node_data.
+        self.assertIn("_clear_poses_only(node)", body,
+            "Part F.1: Step 1 MUST call _clear_poses_only so "
+            "input[]/output[] connections survive Apply. Calling "
+            "clear_node_data here would re-introduce the user's "
+            "directive-4 regression.")
+        # The legacy clear_node_data MUST NOT appear in this routed
+        # path -- that's the entire point of the fix.
+        self.assertNotIn("clear_node_data(node)", body,
+            "Part F.1: apply_poses_routed MUST NOT call "
+            "clear_node_data (that wipes input[]/output[]).")
+        # Post-apply metadata audit MUST emit warnings on drift.
+        self.assertIn("apply_poses_routed: driverSource[]", body,
+            "Part F.1: post-apply audit MUST surface driverSource[] "
+            "drift via cmds.warning")
+
+    def test_PERMANENT_12_clear_poses_only_skips_input_output(self):
+        """Part F.2: _clear_poses_only MUST iterate only the
+        pose-related multi attrs (poses, baseValue, outputIsScale)
+        and MUST NOT touch input[] or output[]. The whole point of
+        the helper is to leave the multi-driver wiring alive across
+        Apply."""
+        self.assertIn("def _clear_poses_only(node):", self._core,
+            "core MUST expose _clear_poses_only (Part F.2)")
+        body = _slice_def(self._core, "def _clear_poses_only(node):")
+        # The attr tuple MUST list exactly poses/baseValue/
+        # outputIsScale. Verifying the literal string keeps the test
+        # tied to the canonical helper layout.
+        self.assertIn(
+            '("poses", "baseValue", "outputIsScale")', body,
+            "Part F.2: _clear_poses_only MUST iterate exactly "
+            'the tuple ("poses", "baseValue", "outputIsScale")')
+        # And it MUST NOT mention "input" or "output" as attrs to
+        # clear -- those are precisely the connections to preserve.
+        # Defensive: check the iteration tuple doesn't contain
+        # "input" / "output" (i.e. no clear_node_data-style 5-tuple).
+        self.assertNotIn('"input"', body,
+            "Part F.2: _clear_poses_only MUST NOT include "
+            '"input" in the clear loop')
+        self.assertNotIn('"output"', body,
+            "Part F.2: _clear_poses_only MUST NOT include "
+            '"output" in the clear loop')
+
+    def test_PERMANENT_13_controller_apply_poses_routed(self):
+        """Part F.3: controller.apply_poses_routed MUST exist and
+        forward to core.apply_poses_routed after the duplicate-pose
+        pre-check (parity with the legacy apply_poses)."""
+        self.assertIn(
+            "def apply_poses_routed(self, driver_targets, "
+            "driven_targets):",
+            self._ctrl,
+            "controller MUST expose apply_poses_routed (Part F.3)")
+        body = _slice_def(self._ctrl,
+            "def apply_poses_routed(self, driver_targets, "
+            "driven_targets):")
+        self.assertIn(
+            "core.apply_poses_routed(", body,
+            "controller.apply_poses_routed MUST forward to "
+            "core.apply_poses_routed")
+        # Duplicate-pose pre-check parity with apply_poses.
+        self.assertIn("_detect_duplicate_pose_inputs", body,
+            "Part F.3: controller.apply_poses_routed MUST run the "
+            "duplicate-pose pre-check before invoking core")
+
+    def test_PERMANENT_14_on_apply_dispatch_by_topology(self):
+        """Part F.4: main_window._on_apply MUST dispatch by
+        driverSource topology -- multi-driver routes through
+        apply_poses_routed, single-driver keeps the legacy
+        apply_poses. Also MUST refresh tab indicators post-Apply
+        so the user sees the green dots survive (the whole point
+        of Part F)."""
+        body = _slice_def(self._main, "def _on_apply(self):")
+        self.assertIn("is_multi", body,
+            "Part F.4: _on_apply MUST compute an is_multi flag for "
+            "topology-aware dispatch")
+        self.assertIn("apply_poses_routed(", body,
+            "Part F.4: _on_apply MUST call apply_poses_routed in "
+            "the multi-driver branch")
+        self.assertIn("self._ctrl.apply_poses(", body,
+            "Part F.4: _on_apply MUST still call legacy apply_poses "
+            "in the single-driver branch (0 regression)")
+        self.assertIn("refresh_tab_indicators(self._ctrl)", body,
+            "Part F.4: _on_apply MUST refresh tab indicators "
+            "post-Apply so the user sees whether multi-driver "
+            "wiring survived (Part B / directive #4)")
 
 
 # ----------------------------------------------------------------------
