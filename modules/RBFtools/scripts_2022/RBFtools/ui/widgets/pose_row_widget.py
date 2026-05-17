@@ -238,6 +238,38 @@ class PoseRowWidget(QtWidgets.QWidget):
                 self._show_row_menu)
         drv_l.addWidget(self._lbl_pose)
 
+        # M_P0_RBF_HIERARCHICAL_UI_LEFT_PLACEMENT (2026-05-18) --
+        # Phase 16 hierarchy editors (Parent QComboBox + Driver Mask
+        # popup) relocated here from the tail container. These are
+        # pose-level metadata (which base layer this pose belongs to +
+        # which drivers it responds to), so they belong adjacent to
+        # the pose label, NOT in the right-hand action zone where
+        # Update / Delete buttons were already getting text-truncated.
+        # Hidden on BasePose sentinel rows (no hierarchy semantics).
+        # Explicit minimumWidth set: previous tail-side placement had
+        # no width hint, so QComboBox auto-fit to the narrow "0 v"
+        # baseline (caused user-reported cramming).
+        HIERARCHY_PARENT_W = 80
+        HIERARCHY_MASK_W   = 60
+        if not self._is_base_pose:
+            from RBFtools.ui.i18n import tr as _tr
+            self._cmb_parent = QtWidgets.QComboBox()
+            self._cmb_parent.setMinimumWidth(HIERARCHY_PARENT_W)
+            self._cmb_parent.setToolTip(_tr("pose_col_parent_tip"))
+            self._rebuild_parent_combo()
+            self._cmb_parent.currentIndexChanged.connect(
+                self._on_parent_changed)
+            drv_l.addWidget(self._cmb_parent)
+
+            self._btn_mask = QtWidgets.QPushButton(
+                _tr("pose_col_driver_mask"))
+            self._btn_mask.setMinimumWidth(HIERARCHY_MASK_W)
+            self._btn_mask.setToolTip(
+                _tr("pose_col_driver_mask_tip"))
+            self._btn_mask.clicked.connect(
+                self._on_driver_mask_clicked)
+            drv_l.addWidget(self._btn_mask)
+
         for src_idx, src in enumerate(self._driver_sources):
             attrs = list(src.attrs)
             attr_offset = sum(
@@ -346,30 +378,12 @@ class PoseRowWidget(QtWidgets.QWidget):
             self._btn_edit.setVisible(False)
             self._btn_del.setVisible(False)
 
-        # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- two
-        # new tail-container controls: Parent QComboBox + Driver Mask
-        # popup QPushButton. Lives in the tail row so the existing
-        # PoseHeaderWidget splitter/sync logic remains untouched
-        # (sweeping the header is out of scope for this commit;
-        # users see the new columns in the right-hand action zone).
-        # Hidden on the BasePose sentinel row -- it has no hierarchy.
-        if not self._is_base_pose:
-            from RBFtools.ui.i18n import tr as _tr
-            self._cmb_parent = QtWidgets.QComboBox()
-            self._cmb_parent.setToolTip(_tr("pose_col_parent_tip"))
-            self._rebuild_parent_combo()
-            self._cmb_parent.currentIndexChanged.connect(
-                self._on_parent_changed)
-            tail_l.addWidget(self._cmb_parent)
-
-            self._btn_mask = QtWidgets.QPushButton(
-                _tr("pose_col_driver_mask"))
-            self._btn_mask.setToolTip(
-                _tr("pose_col_driver_mask_tip"))
-            self._btn_mask.clicked.connect(
-                self._on_driver_mask_clicked)
-            tail_l.addWidget(self._btn_mask)
-
+        # M_P0_RBF_HIERARCHICAL_UI_LEFT_PLACEMENT (2026-05-18) --
+        # Parent + Driver Mask controls relocated to driver container
+        # (left of driver clusters, after pose label). See driver-side
+        # construction above for the actual widget instantiation. Tail
+        # reverts to Phase 14-15 layout (Radius + Update + Delete only),
+        # eliminating the cramming reported on the original ship.
         tail_l.addStretch(1)
         outer.addWidget(self._tail_container)
 
