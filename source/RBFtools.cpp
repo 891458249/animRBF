@@ -2665,6 +2665,45 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         wMat.show(thisName, "Weight matrix");
                 }
 
+                // -------------------------------------------------
+                // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (Schema
+                // commit 3 stub) -- populate baseNet from the freshly
+                // trained wMat / polyMat. This is the legacy single-
+                // layer passthrough: deltaNets stays empty, baseNet
+                // covers all poses + all drivers. Phase 16.2 will
+                // replace this stub with the true two-level training
+                // (per-net subset training + RHS Delta = Actual -
+                // Predicted_Base + sibling mask union). Until then
+                // the schema is live (poseParentIndex /
+                // poseDriverMask edits trip evalInput via the prev-
+                // state cache compare in commit 2) but the math is
+                // unchanged from Phase 15 + Output Clamp + Shepard
+                // for Scale. Hard rails preserved:
+                //   * baseNet / deltaNets are instance members (hard
+                //     rail #12); written here, read by inference.
+                //   * polyMat travels with baseNet so the next phase
+                //     can extend without dropping anchor 4.
+                //   * isActiveLinear defaults true -- C lite (anchor
+                //     3) will be threaded per-net in Phase 16.2.
+                {
+                    baseNet.wMat = wMat;
+                    baseNet.polyMat = polyMat;
+                    baseNet.poseIndices.clear();
+                    baseNet.poseIndices.reserve(poseCount);
+                    for (unsigned p = 0; p < poseCount; ++p)
+                        baseNet.poseIndices.push_back((int)p);
+                    const unsigned driverDimCache =
+                        matPoses.getColSize();
+                    baseNet.activeDrivers.clear();
+                    baseNet.activeDrivers.reserve(driverDimCache);
+                    for (unsigned d = 0; d < driverDimCache; ++d)
+                        baseNet.activeDrivers.push_back((int)d);
+                    baseNet.isActiveLinear.assign(
+                        driverDimCache, true);
+                    deltaNets.clear();
+                    subnetCacheDirty = false;
+                }
+
                 // -----------------------------------------------
                 // final weight calculation
                 // -----------------------------------------------
