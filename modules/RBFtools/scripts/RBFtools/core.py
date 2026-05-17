@@ -3299,6 +3299,309 @@ def _write_pose_to_node(shape, sequential_idx, pose):
                 sequential_idx, exc))
 
 
+def write_pose_inputs_to_node(shape, sequential_idx, inputs):
+    """M_P0_POSE_DITHER_AND_UPDATE_FIX Part C (2026-05-12) -- write
+    only the ``poseInput[]`` slice of one packed pose row.
+
+    Granular counterpart of :func:`_write_pose_to_node` so the Update
+    button path can refresh driver values without re-touching driven
+    or radius slots. Skips connection-purge (callers that re-apply
+    the same Update on a live-driven pose row are expected to have
+    cleared the driver wires upstream).
+    """
+    for i, v in enumerate(inputs):
+        try:
+            cmds.setAttr(
+                "{}.poses[{}].poseInput[{}]".format(
+                    shape, int(sequential_idx), i),
+                float(v))
+        except Exception as exc:
+            cmds.warning(
+                "write_pose_inputs_to_node: poseInput[{}][{}] "
+                "failed: {}".format(sequential_idx, i, exc))
+
+
+def write_pose_values_to_node(shape, sequential_idx, values):
+    """M_P0_POSE_DITHER_AND_UPDATE_FIX Part C (2026-05-12) -- write
+    only the ``poseValue[]`` slice of one packed pose row. Driven-
+    side sibling of :func:`write_pose_inputs_to_node`.
+    """
+    for i, v in enumerate(values):
+        try:
+            cmds.setAttr(
+                "{}.poses[{}].poseValue[{}]".format(
+                    shape, int(sequential_idx), i),
+                float(v))
+        except Exception as exc:
+            cmds.warning(
+                "write_pose_values_to_node: poseValue[{}][{}] "
+                "failed: {}".format(sequential_idx, i, exc))
+
+
+# =====================================================================
+#  11c. Pose dither + global radius -- Phase 14 UI helpers
+# =====================================================================
+#
+# M_P0_POSE_DITHER_AND_UPDATE_FIX (2026-05-12) -- pose-data
+# preprocessing helpers that the UI exposes as buttons in the pose
+# panel. Dither adds a small uniform random perturbation to channels
+# whose values cluster across poses, breaking the augmented matrix's
+# rank deficiency for MQB / IMQB / TPS / Linear kernels without
+# disturbing the user's overall pose intent (magnitude defaults to
+# 0.005 ~= 0.29 degrees on a rotation channel; visually imperceptible).
+#
+# Math basis (Stabilized RBF Interpolation, J. Comp. Appl. Math. 432,
+# 2023): augmented condition number scales like 1/lambda + 1/epsilon
+# where epsilon is the inter-pose channel spread. Adding ~epsilon=5e-3
+# noise to clustered channels keeps cond ~10^5 in double precision.
+#
+# Dither is NEVER auto-applied -- the user clicks the button when the
+# kFailure surface shows up. See PATCH_BRIEF_M_P0_POSE_DITHER_AND_
+# UPDATE_FIX.md sec.1 for the full derivation.
+
+
+def dither_driver_poses(node, base_pose_index=0,
+                        magnitude=0.005, seed=42):
+    """M_P0_POSE_DITHER_AND_UPDATE_FIX Part A (2026-05-12) -- add a
+    small uniform random perturbation to clustered driver-pose
+    channels on *node*'s shape.
+
+    Two non-base poses are considered to share a *cluster* in input
+    slot ``i`` when ``abs(v_p - v_q) < 1e-6``. Every such (pose, slot)
+    pair is dithered with ``random.uniform(-magnitude, +magnitude)``.
+
+    The base pose (``base_pose_index``, default 0 = rest pose) is
+    NEVER touched -- it anchors the rig's identity transform.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of the RBFtools node.
+    base_pose_index : int
+        Pose subscript to leave untouched. Default 0.
+    magnitude : float
+        Half-width of the uniform perturbation. Default 0.005.
+    seed : int or None
+        Seed for the perturbation RNG. ``None`` -> system entropy.
+        Default 42 (deterministic for tests).
+
+    Returns
+    -------
+    int
+        Count of ``(pose, slot)`` plugs that were perturbed.
+    """
+    import random as _random
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+
+    rng = _random.Random(seed)
+    pose_indices = cmds.getAttr(
+        shape + ".poses", multiIndices=True) or []
+
+    # 1. Collect driver values for every non-base pose.
+    pose_data = {}
+    for p in pose_indices:
+        if int(p) == int(base_pose_index):
+            continue
+        try:
+            input_indices = cmds.getAttr(
+                "{}.poses[{}].poseInput".format(shape, p),
+                multiIndices=True) or []
+        except Exception:
+            input_indices = []
+        row = []
+        for ii in input_indices:
+            try:
+                v = cmds.getAttr(
+                    "{}.poses[{}].poseInput[{}]".format(
+                        shape, p, ii))
+                row.append((int(ii), float(v)))
+            except Exception:
+                continue
+        pose_data[int(p)] = row
+
+    # 2. Detect clusters across non-base poses (pairwise).
+    EPS = 1e-6
+    to_perturb = set()
+    pose_list = sorted(pose_data.keys())
+    for a in range(len(pose_list)):
+        for b in range(a + 1, len(pose_list)):
+            p1, p2 = pose_list[a], pose_list[b]
+            for (slot, v1) in pose_data[p1]:
+                v2 = next(
+                    (vv for ss, vv in pose_data[p2] if ss == slot),
+                    None)
+                if v2 is None:
+                    continue
+                if abs(v1 - v2) < EPS:
+                    to_perturb.add((p1, slot))
+                    to_perturb.add((p2, slot))
+
+    # 3. Apply the perturbation. Driver inputs are usually live-
+    # connected from a rig control, so disconnect the upstream
+    # source first or the setAttr is silently overwritten on the
+    # next DG cycle.
+    perturbed = 0
+    with undo_chunk("RBFtools: dither driver poses"):
+        for (pose_idx, slot) in sorted(to_perturb):
+            plug = "{}.poses[{}].poseInput[{}]".format(
+                shape, pose_idx, slot)
+            try:
+                old_v = float(cmds.getAttr(plug))
+            except Exception:
+                continue
+            delta = rng.uniform(-magnitude, +magnitude)
+            new_v = old_v + delta
+            incoming = []
+            try:
+                incoming = cmds.listConnections(
+                    plug, source=True, destination=False,
+                    plugs=True) or []
+            except Exception:
+                incoming = []
+            for src in incoming:
+                try:
+                    cmds.disconnectAttr(src, plug)
+                except Exception:
+                    pass
+            try:
+                cmds.setAttr(plug, new_v)
+                perturbed += 1
+            except Exception as exc:
+                cmds.warning(
+                    "dither_driver_poses: setAttr {} = {} failed: "
+                    "{}".format(plug, new_v, exc))
+    return perturbed
+
+
+def dither_driven_poses(node, base_pose_index=0,
+                        magnitude=0.005, seed=42):
+    """M_P0_POSE_DITHER_AND_UPDATE_FIX Part B (2026-05-12) -- mirror
+    of :func:`dither_driver_poses` but operates on ``poseValue[]``
+    (the driven / output channel) instead of ``poseInput[]``.
+
+    The UI button MUST surface a confirmation dialog before invoking
+    this helper -- dithering the training target is mathematically
+    less benign than driver-side dither (it injects noise into the
+    label set, which the trained weights then learn). Use only when
+    driver-side dither alone cannot resolve the rank deficiency.
+    """
+    import random as _random
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+
+    rng = _random.Random(seed)
+    pose_indices = cmds.getAttr(
+        shape + ".poses", multiIndices=True) or []
+
+    pose_data = {}
+    for p in pose_indices:
+        if int(p) == int(base_pose_index):
+            continue
+        try:
+            value_indices = cmds.getAttr(
+                "{}.poses[{}].poseValue".format(shape, p),
+                multiIndices=True) or []
+        except Exception:
+            value_indices = []
+        row = []
+        for ii in value_indices:
+            try:
+                v = cmds.getAttr(
+                    "{}.poses[{}].poseValue[{}]".format(
+                        shape, p, ii))
+                row.append((int(ii), float(v)))
+            except Exception:
+                continue
+        pose_data[int(p)] = row
+
+    EPS = 1e-6
+    to_perturb = set()
+    pose_list = sorted(pose_data.keys())
+    for a in range(len(pose_list)):
+        for b in range(a + 1, len(pose_list)):
+            p1, p2 = pose_list[a], pose_list[b]
+            for (slot, v1) in pose_data[p1]:
+                v2 = next(
+                    (vv for ss, vv in pose_data[p2] if ss == slot),
+                    None)
+                if v2 is None:
+                    continue
+                if abs(v1 - v2) < EPS:
+                    to_perturb.add((p1, slot))
+                    to_perturb.add((p2, slot))
+
+    perturbed = 0
+    with undo_chunk("RBFtools: dither driven poses"):
+        for (pose_idx, slot) in sorted(to_perturb):
+            plug = "{}.poses[{}].poseValue[{}]".format(
+                shape, pose_idx, slot)
+            try:
+                old_v = float(cmds.getAttr(plug))
+            except Exception:
+                continue
+            delta = rng.uniform(-magnitude, +magnitude)
+            new_v = old_v + delta
+            incoming = []
+            try:
+                incoming = cmds.listConnections(
+                    plug, source=True, destination=False,
+                    plugs=True) or []
+            except Exception:
+                incoming = []
+            for src in incoming:
+                try:
+                    cmds.disconnectAttr(src, plug)
+                except Exception:
+                    pass
+            try:
+                cmds.setAttr(plug, new_v)
+                perturbed += 1
+            except Exception as exc:
+                cmds.warning(
+                    "dither_driven_poses: setAttr {} = {} failed: "
+                    "{}".format(plug, new_v, exc))
+    return perturbed
+
+
+def set_all_poses_radius(node, radius):
+    """M_P0_POSE_DITHER_AND_UPDATE_FIX Part C-bis (2026-05-12) -- bulk
+    set the ``shape.poseRadius[i]`` plug across every pose of *node*.
+
+    UI calls this from the "Apply Radius to All" button beside the
+    dither controls. Values <= 0 are clamped to
+    :data:`DEFAULT_POSE_RADIUS` so a stray spinbox value cannot break
+    the kernel's sigma vector.
+
+    Returns
+    -------
+    int
+        Count of pose subscripts whose poseRadius plug was written.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+    r = float(radius)
+    if r <= 0.0:
+        r = DEFAULT_POSE_RADIUS
+    pose_indices = cmds.getAttr(
+        shape + ".poses", multiIndices=True) or []
+    written = 0
+    with undo_chunk("RBFtools: set all poses radius"):
+        for p in pose_indices:
+            plug = "{}.poseRadius[{}]".format(shape, int(p))
+            try:
+                cmds.setAttr(plug, r)
+                written += 1
+            except Exception as exc:
+                cmds.warning(
+                    "set_all_poses_radius: setAttr {} = {} failed: "
+                    "{}".format(plug, r, exc))
+    return written
+
+
 # =====================================================================
 #  11b. Output baselines — Milestone 1.2 (v5 PART C.2.4 / 铁律 B6)
 # =====================================================================
