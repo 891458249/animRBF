@@ -164,6 +164,41 @@ class RBFSection(CollapsibleFrame):
         row_cli.addWidget(HelpButton("clamp_inflation"))
         lay.addLayout(row_cli)
 
+        # M_P0_RBF_ANTI_OVERSHOOT Part A UI (2026-05-17) -- mirror of
+        # the input clamp pair above, but for the OUTPUT side. Default
+        # ON aligns with Houdini rig::RBFInterpolation.clamp=True.
+        row_oce = QtWidgets.QHBoxLayout()
+        self._cb_output_clamp = QtWidgets.QCheckBox(
+            tr("output_clamp_enabled"))
+        self._cb_output_clamp.setToolTip(
+            tr("output_clamp_enabled_tip"))
+        self._cb_output_clamp.setChecked(True)
+        self._cb_output_clamp.toggled.connect(
+            self._on_output_clamp_toggled)
+        row_oce.addWidget(self._cb_output_clamp)
+        row_oce.addStretch()
+        row_oce.addWidget(HelpButton("output_clamp_enabled"))
+        lay.addLayout(row_oce)
+
+        row_oci = QtWidgets.QHBoxLayout()
+        self._lbl_output_clinf = QtWidgets.QLabel(
+            tr("output_clamp_inflation"))
+        self._spn_output_clamp_inflation = QtWidgets.QDoubleSpinBox()
+        self._spn_output_clamp_inflation.setRange(0.0, 1.0)
+        self._spn_output_clamp_inflation.setDecimals(4)
+        self._spn_output_clamp_inflation.setSingleStep(0.01)
+        self._spn_output_clamp_inflation.setValue(0.0)
+        self._spn_output_clamp_inflation.setEnabled(True)
+        self._spn_output_clamp_inflation.setToolTip(
+            tr("output_clamp_inflation_tip"))
+        self._spn_output_clamp_inflation.valueChanged.connect(
+            lambda v: self.attributeChanged.emit(
+                "outputClampInflation", v))
+        row_oci.addWidget(self._lbl_output_clinf)
+        row_oci.addWidget(self._spn_output_clamp_inflation, 1)
+        row_oci.addWidget(HelpButton("output_clamp_inflation"))
+        lay.addLayout(row_oci)
+
         # Scale
         row_s = QtWidgets.QHBoxLayout()
         self._lbl_scale = QtWidgets.QLabel(tr("scale"))
@@ -431,6 +466,13 @@ class RBFSection(CollapsibleFrame):
         self._cb_clamp.setChecked(clamp_on)
         self._spn_clamp_inflation.setValue(data.get("clampInflation", 0.0))
         self._spn_clamp_inflation.setEnabled(clamp_on)
+        # M_P0_RBF_ANTI_OVERSHOOT Part A: output clamp UI state.
+        # Default ON (matches plugin default + Houdini industry).
+        output_clamp_on = data.get("outputClampEnabled", True)
+        self._cb_output_clamp.setChecked(output_clamp_on)
+        self._spn_output_clamp_inflation.setValue(
+            data.get("outputClampInflation", 0.0))
+        self._spn_output_clamp_inflation.setEnabled(output_clamp_on)
         ienc = data.get("inputEncoding", 0)
         self._cmb_ienc.setCurrentIndex(ienc)
         # M2.4b: rotateOrder + quat-group multi editors. set_values()
@@ -640,6 +682,12 @@ class RBFSection(CollapsibleFrame):
         self.attributeChanged.emit("clampEnabled", checked)
         # Visual cue: inflation has no effect when clamp is off.
         self._spn_clamp_inflation.setEnabled(checked)
+
+    def _on_output_clamp_toggled(self, checked):
+        """M_P0_RBF_ANTI_OVERSHOOT Part A: mirror of _on_clamp_toggled
+        but for the OUTPUT side."""
+        self.attributeChanged.emit("outputClampEnabled", checked)
+        self._spn_output_clamp_inflation.setEnabled(checked)
 
     def _update_mode_visibility(self, idx):
         """Show Generic sub-section for mode 0, Matrix sub-section for mode 1."""
