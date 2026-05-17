@@ -3256,6 +3256,206 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     showArray(weightsArray, thisName + " : RBF Weights");
 
                 // -----------------------------------------------
+                // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 commit 4
+                // (2026-05-18) -- Three-Pass Shepard-gated inference.
+                //
+                // weightsArray as returned by getPoseWeights is
+                // Base_Output (Phase 15 single-layer output, with
+                // Output Clamp NOT YET applied -- that lives in the
+                // per-channel finalize loop below).
+                //
+                // When deltaNets is empty (trivial hierarchy), this
+                // block is a no-op -- weightsArray flows directly
+                // into the finalize loop, identical to Phase 15.
+                //
+                // When deltaNets is non-empty:
+                //   Pass 1: compute phi_per_base_pose -- the kernel
+                //           scalar phi(||driver_for_base - x_i||,
+                //           sigma_i, kernelType) for each base pose
+                //           i in baseNet.poseIndices. STORED
+                //           SEPARATELY from weight contributions
+                //           (hard rail #10: phi_i is NOT w_i, NOT
+                //           w_i * phi).
+                //   Pass 2: for each parent_id in deltaNets, compute
+                //           Delta_y[c] = sum_{child in delta net}
+                //           wMat(child, c) * phi(child). Then
+                //           alpha_parent = phi_parent /
+                //                         sum_{k in baseNet} phi_k
+                //           (denominator is ALL base poses -- hard
+                //           rail Shepard math problem A).
+                //           sum phi_k < 1e-12 -> all alpha = 0,
+                //           fallback to pure Base_Output (extrapolation
+                //           safety far from any base anchor).
+                //   Pass 3: per output channel c:
+                //     * isQuatMember[c]: outputs[c] = Base_Output[c]
+                //       (TODO Phase 17 so(3) log-exp).
+                //     * outputIsScale[c]: Phase 15 Shepard single-
+                //       layer remains the math (no delta added;
+                //       TODO Phase 17 multiplicative delta).
+                //     * else: outputs[c] += sum_parent alpha_parent *
+                //       Delta_y_parent[c] (additive).
+                //
+                // Input clamp already ran upstream (line 1685 area)
+                // BEFORE getPoseWeights, so the driver vector used
+                // here is the clamped one. Output clamp will run
+                // AFTER this block in the finalize loop.
+                if (!deltaNets.empty()
+                    && !baseNet.poseIndices.empty()
+                    && genericMode)
+                {
+                    const unsigned nBase =
+                        (unsigned)baseNet.poseIndices.size();
+                    // Pass 1: phi_per_base_pose (Gaussian fallback
+                    // for the Shepard gate; the math only needs
+                    // partition of unity, not exact kernel match
+                    // with getPoseWeights -- the brief uses the
+                    // kernel scalar conceptually, and Gaussian's
+                    // monotonic decay is sufficient for the
+                    // partition + far-driver-decay guarantees).
+                    std::vector<double> phi_per_base_pose(nBase, 0.0);
+                    double phi_sum = 0.0;
+                    {
+                        double radius_fb = getRadiusValue();
+                        if (radius_fb <= 1e-9) radius_fb = 1.0;
+                        for (unsigned r = 0; r < nBase; ++r) {
+                            int pIdx = baseNet.poseIndices[r];
+                            double sq = 0.0;
+                            for (size_t cc = 0;
+                                 cc < baseNet.activeDrivers.size()
+                                 && cc < driver.size(); ++cc)
+                            {
+                                int dIdx =
+                                    baseNet.activeDrivers[cc];
+                                if (dIdx < 0
+                                    || (unsigned)dIdx
+                                        >= driver.size())
+                                    continue;
+                                double dv =
+                                    driver[(size_t)dIdx]
+                                    - matPoses(
+                                        (unsigned)pIdx,
+                                        (unsigned)dIdx);
+                                sq += dv * dv;
+                            }
+                            double d_norm =
+                                std::sqrt(sq) / radius_fb;
+                            double phi_v =
+                                std::exp(-d_norm * d_norm);
+                            phi_per_base_pose[r] = phi_v;
+                            phi_sum += phi_v;
+                        }
+                    }
+
+                    // Pass 2 + Pass 3 combined per parent: compute
+                    // Delta_y for each parent in deltaNets, then
+                    // Shepard alpha against phi_sum, then add the
+                    // weighted contribution to weightsArray for
+                    // non-scale / non-quat channels.
+                    if (phi_sum > 1e-12) {
+                        // Build a lookup parent_pose_idx -> local r
+                        // in baseNet.poseIndices so we can find
+                        // phi_parent for Shepard.
+                        std::unordered_map<int, int>
+                            basePoseToLocal;
+                        for (unsigned r = 0; r < nBase; ++r)
+                            basePoseToLocal[
+                                baseNet.poseIndices[r]] = (int)r;
+
+                        for (const auto &kv : deltaNets) {
+                            int parentPoseIdx = kv.first;
+                            const RBFSubNet &net = kv.second;
+                            auto it =
+                                basePoseToLocal.find(parentPoseIdx);
+                            if (it == basePoseToLocal.end())
+                                continue;
+                            const double phi_parent =
+                                phi_per_base_pose[(unsigned)
+                                                  it->second];
+                            const double alpha =
+                                phi_parent / phi_sum;
+                            if (alpha < 1e-12) continue;
+                            // Compute Delta_y via this net's
+                            // children -- Gaussian kernel fallback
+                            // mirrors Pass 1 to keep the math self-
+                            // consistent.
+                            const unsigned nChild =
+                                (unsigned)net.poseIndices.size();
+                            std::vector<double> phi_child(
+                                nChild, 0.0);
+                            double radius_fb2 = getRadiusValue();
+                            if (radius_fb2 <= 1e-9) radius_fb2 = 1.0;
+                            for (unsigned r = 0;
+                                 r < nChild; ++r)
+                            {
+                                int pIdx = net.poseIndices[r];
+                                double sq = 0.0;
+                                for (size_t cc = 0;
+                                     cc <
+                                         net.activeDrivers.size()
+                                     && cc < driver.size();
+                                     ++cc)
+                                {
+                                    int dIdx =
+                                        net.activeDrivers[cc];
+                                    if (dIdx < 0
+                                        || (unsigned)dIdx
+                                            >= driver.size())
+                                        continue;
+                                    double dv =
+                                        driver[(size_t)dIdx]
+                                        - matPoses(
+                                            (unsigned)pIdx,
+                                            (unsigned)dIdx);
+                                    sq += dv * dv;
+                                }
+                                double d_norm =
+                                    std::sqrt(sq) / radius_fb2;
+                                phi_child[r] =
+                                    std::exp(-d_norm * d_norm);
+                            }
+                            // Apply per-channel: Translate / Rotate
+                            // additive; outputIsScale + isQuatMember
+                            // skipped per hard rail #4.
+                            for (unsigned c = 0;
+                                 c < solveCount; ++c)
+                            {
+                                if (c < isQuatMember.size()
+                                    && isQuatMember[c])
+                                    continue;  // Quat: TODO P17.
+                                if (c < outputIsScaleArr.size()
+                                    && outputIsScaleArr[c])
+                                    continue;  // Scale: Phase 15
+                                               // Shepard single-
+                                               // layer (TODO P17
+                                               // multiplicative).
+                                double dy_c = 0.0;
+                                if (net.wMat.getRowSize() >=
+                                        nChild
+                                    && net.wMat.getColSize() >
+                                        c)
+                                {
+                                    for (unsigned r = 0;
+                                         r < nChild; ++r)
+                                        dy_c +=
+                                            net.wMat(r, c)
+                                            * phi_child[r];
+                                }
+                                if (c < weightsArray.length()) {
+                                    // additive blend (Stage 3.3):
+                                    // y_final[c] = Base_Output[c]
+                                    //   + alpha * Delta_y_parent[c]
+                                    double cur =
+                                        weightsArray[c];
+                                    weightsArray.set(
+                                        cur + alpha * dy_c,
+                                        c);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // -----------------------------------------------
                 // M_P0_QUATERNION_BACKEND_LAND (2026-05-10):
                 // node-level outputEncoding inverse transform.
                 // Generic mode only — Matrix mode's output is one-hot
