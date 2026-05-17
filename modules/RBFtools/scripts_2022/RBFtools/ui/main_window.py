@@ -261,6 +261,13 @@ class _PoseEditorPanel(CollapsibleFrame):
             self.ditherDrivensRequested)
         self._pose_grid.globalRadiusRequested.connect(
             self.globalRadiusRequested)
+        # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
+        # per-row hierarchy editor signals wired through to the
+        # controller writers landed in commit 6 (8a8d32b).
+        self._pose_grid.poseParentChanged.connect(
+            self._on_pose_grid_parent_changed)
+        self._pose_grid.poseDriverMaskChanged.connect(
+            self._on_pose_grid_driver_mask_changed)
 
         # Commit 3 (M_BASE_POSE): BaseDrivenPose tab. Inserted at
         # index 1 BETWEEN DriverDriven (0) and Pose (2) per the user's
@@ -1982,6 +1989,29 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         the loop with the C++ Commit 0/0b vectorised \u03c3 math."""
         try:
             self._ctrl.set_pose_radius(int(pose_idx), float(new_radius))
+        except (AttributeError, Exception):
+            pass
+
+    def _on_pose_grid_parent_changed(self, pose_idx, parent_idx):
+        """M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
+        per-row Parent QComboBox change. Writes shape.poseParentIndex
+        [row] via the controller; the plugin's prev-state cache
+        compare (commit 2 56bd96b) trips evalInput=true on the next
+        compute, retraining baseNet / deltaNets."""
+        try:
+            self._ctrl.set_pose_parent_index(
+                int(pose_idx), int(parent_idx))
+        except (AttributeError, Exception):
+            pass
+
+    def _on_pose_grid_driver_mask_changed(self, pose_idx, mask):
+        """M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
+        per-row Driver Mask popup change. Writes shape.poseDriverMask
+        [row] via the controller; empty list = "all drivers" (legacy
+        behaviour)."""
+        try:
+            self._ctrl.set_pose_driver_mask(
+                int(pose_idx), list(mask or []))
         except (AttributeError, Exception):
             pass
 

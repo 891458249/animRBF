@@ -588,6 +588,24 @@ _EN = {
     "connect_all_already_connected":
         "All driver tabs are already fully connected with the "
         "selected attrs (idempotent skip).",
+    # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- per-row
+    # hierarchy editors in the pose grid tail container.
+    "pose_col_parent":                 "Parent",
+    "pose_col_parent_tip":
+        "Set this pose as a delta of another pose (= its parent). "
+        "'None' makes the pose a base. Hard-cap-2 enforced: delta "
+        "of delta is auto-demoted to base.",
+    "pose_col_driver_mask":            "Mask...",
+    "pose_col_driver_mask_tip":
+        "Restrict this pose's training to a subset of the driver "
+        "attributes. Empty selection = all drivers (legacy "
+        "behaviour).",
+    "pose_driver_mask_popup_title":    "Driver Mask",
+    "pose_parent_none_label":          "None (-1)",
+    "pose_layering_warning_inconsistent_mask":
+        "Sibling deltas under the same parent have inconsistent "
+        "driver masks. Union is used; check the Script Editor for "
+        "the displayWarning.",
     # M_P0_POSE_DITHER_AND_UPDATE_FIX (2026-05-12) -- pose-panel
     # dither + global-radius UX.
     "btn_dither_drivers":              "Dither Drivers",
@@ -1151,6 +1169,20 @@ _ZH = {
     "connect_all_already_connected":
         u"\u6240\u6709 driver tab \u90fd\u5df2\u7528\u5f53\u524d\u6240\u9009\u5c5e\u6027"
         u"\u5b8c\u6574\u8fde\u63a5\uff0c\u65e0\u9700\u91cd\u8fde (\u5e42\u7b49).",
+    # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18)
+    "pose_col_parent":                 u"\u7236\u59ff\u52bf",
+    "pose_col_parent_tip":
+        u"\u628a\u5f53\u524d pose \u8bbe\u4e3a\u53e6\u4e00\u4e2a pose \u7684 delta\uff08\u5176 parent\uff09\u3002"
+        u"None \u8868\u793a base\u3002\u4e24\u5c42\u786c\u4e0a\u9650\uff1adelta-of-delta \u4f1a\u81ea\u52a8\u964d\u7ea7\u4e3a base\u3002",
+    "pose_col_driver_mask":            u"\u9a71\u52a8\u63a9\u7801\u2026",
+    "pose_col_driver_mask_tip":
+        u"\u9650\u5236\u672c pose \u4ec5\u7528\u90e8\u5206 driver \u5c5e\u6027\u8bad\u7ec3\u3002"
+        u"\u5168\u52fe\u6216\u7a7a\u9009 = \u5168 driver\uff08\u517c\u5bb9\u65e7\u884c\u4e3a\uff09\u3002",
+    "pose_driver_mask_popup_title":    u"\u9a71\u52a8\u63a9\u7801",
+    "pose_parent_none_label":          u"\u65e0 (-1)",
+    "pose_layering_warning_inconsistent_mask":
+        u"\u540c parent \u4e0b\u7684\u5144\u5f1f delta \u9a71\u52a8\u63a9\u7801\u4e0d\u4e00\u81f4\uff0c"
+        u"\u53d6\u5e76\u96c6\uff1b\u8be6\u89c1 Script Editor warning\u3002",
     # M_P0_POSE_DITHER_AND_UPDATE_FIX (2026-05-12)
     "btn_dither_drivers":              u"\u9a71\u52a8\u5668\u53bb\u91cd",
     "btn_dither_drivers_tip":

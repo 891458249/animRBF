@@ -72,6 +72,10 @@ class PoseGridEditor(QtWidgets.QWidget):
     ditherDriversRequested  = QtCore.Signal()
     ditherDrivensRequested  = QtCore.Signal()
     globalRadiusRequested   = QtCore.Signal(float)
+    # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) signals --
+    # per-row hierarchy editors (Parent QComboBox + Driver Mask popup).
+    poseParentChanged       = QtCore.Signal(int, int)        # row, parent
+    poseDriverMaskChanged   = QtCore.Signal(int, list)       # row, mask
 
     def __init__(self, parent=None):
         super(PoseGridEditor, self).__init__(parent)
@@ -274,20 +278,42 @@ class PoseGridEditor(QtWidgets.QWidget):
         # One PoseRowWidget per pose. Signals re-emitted at the
         # editor level so main_window can keep its existing slot
         # connections.
+        # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
+        # Pre-compute the "known base pose indices" list (the set
+        # the Parent QComboBox surfaces). Default: every pose
+        # whose parent_index == -1 (PoseData carries this in
+        # Phase 16.2; for legacy PoseData objects without the
+        # attr we treat every pose as a base candidate).
+        known_base_indices = []
+        for j, p in enumerate(self._poses):
+            pidx_j = int(getattr(p, "parent_index", -1) or -1)
+            if pidx_j < 0:
+                known_base_indices.append(j)
+
         for i, pose in enumerate(self._poses):
             inputs = list(getattr(pose, "inputs", []) or [])
             values = list(getattr(pose, "values", []) or [])
             radius = float(getattr(pose, "radius", 5.0))
+            parent_idx = int(
+                getattr(pose, "parent_index", -1) or -1)
+            driver_mask = list(
+                getattr(pose, "driver_mask", []) or [])
             row = PoseRowWidget(
                 pose_index=i,
                 driver_sources=self._driver_sources,
                 driven_sources=self._driven_sources,
-                inputs=inputs, values=values, radius=radius)
+                inputs=inputs, values=values, radius=radius,
+                parent_index=parent_idx,
+                driver_mask=driver_mask,
+                known_base_pose_indices=known_base_indices)
             row.poseValueChangedV2.connect(self.poseValueChangedV2)
             row.poseRadiusChanged.connect(self.poseRadiusChanged)
             row.poseRecallRequested.connect(self.poseRecallRequested)
             row.poseUpdateRequested.connect(self.poseUpdateRequested)
             row.poseDeleteRequested.connect(self.poseDeleteRequested)
+            row.poseParentChanged.connect(self.poseParentChanged)
+            row.poseDriverMaskChanged.connect(
+                self.poseDriverMaskChanged)
             self._row_widgets.append(row)
             self._inner_layout.insertWidget(
                 self._inner_layout.count() - 1,  # before stretch

@@ -188,17 +188,30 @@ class PoseRowWidget(QtWidgets.QWidget):
     poseRecallRequested = QtCore.Signal(int)
     poseUpdateRequested = QtCore.Signal(int)
     poseDeleteRequested = QtCore.Signal(int)
+    # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- per-row
+    # hierarchy editors. The Parent QComboBox surfaces "None (-1)" +
+    # all currently-known base pose indices; the Driver Mask popup
+    # opens a checkable QListWidget over the flat driver-attr space.
+    poseParentChanged     = QtCore.Signal(int, int)         # row, parent
+    poseDriverMaskChanged = QtCore.Signal(int, list)        # row, mask
 
     BASE_POSE_SENTINEL = -1
 
     def __init__(self, pose_index, driver_sources, driven_sources,
                  inputs, values, radius=5.0, parent=None,
-                 is_base_pose=False):
+                 is_base_pose=False,
+                 parent_index=-1, driver_mask=None,
+                 known_base_pose_indices=None):
         super(PoseRowWidget, self).__init__(parent)
         self._pose_index   = int(pose_index)
         self._is_base_pose = bool(is_base_pose)
         self._driver_sources = list(driver_sources or [])
         self._driven_sources = list(driven_sources or [])
+        # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) cache.
+        self._parent_index = int(parent_index)
+        self._driver_mask = list(driver_mask or [])
+        self._known_base_pose_indices = list(
+            known_base_pose_indices or [])
 
         outer = QtWidgets.QHBoxLayout(self)
         outer.setContentsMargins(COL_MARGIN, COL_SPACING,
@@ -332,6 +345,31 @@ class PoseRowWidget(QtWidgets.QWidget):
         if self._is_base_pose:
             self._btn_edit.setVisible(False)
             self._btn_del.setVisible(False)
+
+        # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- two
+        # new tail-container controls: Parent QComboBox + Driver Mask
+        # popup QPushButton. Lives in the tail row so the existing
+        # PoseHeaderWidget splitter/sync logic remains untouched
+        # (sweeping the header is out of scope for this commit;
+        # users see the new columns in the right-hand action zone).
+        # Hidden on the BasePose sentinel row -- it has no hierarchy.
+        if not self._is_base_pose:
+            from RBFtools.ui.i18n import tr as _tr
+            self._cmb_parent = QtWidgets.QComboBox()
+            self._cmb_parent.setToolTip(_tr("pose_col_parent_tip"))
+            self._rebuild_parent_combo()
+            self._cmb_parent.currentIndexChanged.connect(
+                self._on_parent_changed)
+            tail_l.addWidget(self._cmb_parent)
+
+            self._btn_mask = QtWidgets.QPushButton(
+                _tr("pose_col_driver_mask"))
+            self._btn_mask.setToolTip(
+                _tr("pose_col_driver_mask_tip"))
+            self._btn_mask.clicked.connect(
+                self._on_driver_mask_clicked)
+            tail_l.addWidget(self._btn_mask)
+
         tail_l.addStretch(1)
         outer.addWidget(self._tail_container)
 
@@ -352,6 +390,139 @@ class PoseRowWidget(QtWidgets.QWidget):
             c.setMaximumWidth(wi)
 
     # -- internal --
+
+    # -- M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 hierarchy editors --
+
+    def _rebuild_parent_combo(self):
+        """Populate the Parent QComboBox with 'None (-1)' + every
+        known base pose logical index, then select the current
+        parent_index. Called once at construction; the host editor
+        can rebuild by passing fresh known_base_pose_indices and
+        invoking :meth:`set_hierarchy_state`.
+        """
+        from RBFtools.ui.i18n import tr as _tr
+        if not hasattr(self, "_cmb_parent"):
+            return
+        blocked = self._cmb_parent.blockSignals(True)
+        self._cmb_parent.clear()
+        self._cmb_parent.addItem(
+            _tr("pose_parent_none_label"), -1)
+        for bp in self._known_base_pose_indices:
+            try:
+                if int(bp) == self._pose_index:
+                    continue
+                self._cmb_parent.addItem(
+                    "{}".format(int(bp)), int(bp))
+            except (TypeError, ValueError):
+                continue
+        # Select current.
+        sel_row = 0
+        for i in range(self._cmb_parent.count()):
+            if int(self._cmb_parent.itemData(i)) == \
+                    int(self._parent_index):
+                sel_row = i
+                break
+        self._cmb_parent.setCurrentIndex(sel_row)
+        self._cmb_parent.blockSignals(blocked)
+
+    def _on_parent_changed(self, _idx):
+        if not hasattr(self, "_cmb_parent"):
+            return
+        try:
+            new_parent = int(
+                self._cmb_parent.currentData())
+        except (TypeError, ValueError):
+            new_parent = -1
+        if new_parent == self._parent_index:
+            return
+        self._parent_index = new_parent
+        self.poseParentChanged.emit(
+            self._pose_index, int(new_parent))
+
+    def _on_driver_mask_clicked(self):
+        """Open a checkable QListWidget popup over the flat driver
+        attr space so the user can toggle each driver dimension.
+        Empty selection = 'all drivers' (backward-compat default).
+        """
+        from RBFtools.ui.i18n import tr as _tr
+        # Build flat (source_label, attr_name) list parallel to the
+        # input vector.
+        items = []  # (label, global_flat_index)
+        flat_idx = 0
+        for src in self._driver_sources:
+            node_name = getattr(src, "node", "?") or "?"
+            for attr in src.attrs:
+                items.append((
+                    "[{}] {}.{}".format(
+                        flat_idx, node_name, attr),
+                    flat_idx))
+                flat_idx += 1
+        if not items:
+            QtWidgets.QMessageBox.information(
+                self,
+                _tr("pose_col_driver_mask"),
+                _tr("pose_driver_mask_popup_title"))
+            return
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(_tr("pose_driver_mask_popup_title"))
+        lay = QtWidgets.QVBoxLayout(dlg)
+        listw = QtWidgets.QListWidget()
+        listw.setSelectionMode(
+            QtWidgets.QAbstractItemView.NoSelection)
+        current_mask = set(int(v) for v in self._driver_mask)
+        empty_means_all = (len(current_mask) == 0)
+        for (label, idx) in items:
+            li = QtWidgets.QListWidgetItem(label)
+            li.setFlags(
+                li.flags() | QtCore.Qt.ItemIsUserCheckable)
+            checked = (idx in current_mask) or empty_means_all
+            li.setCheckState(
+                QtCore.Qt.Checked
+                if checked else QtCore.Qt.Unchecked)
+            li.setData(QtCore.Qt.UserRole, idx)
+            listw.addItem(li)
+        lay.addWidget(listw, 1)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_ok = QtWidgets.QPushButton("OK")
+        btn_cancel = QtWidgets.QPushButton(
+            _tr("cancel_dither_driven_label"))
+        btn_row.addStretch(1)
+        btn_row.addWidget(btn_ok)
+        btn_row.addWidget(btn_cancel)
+        lay.addLayout(btn_row)
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+        if dlg.exec_() != QtWidgets.QDialog.Accepted:
+            return
+        new_mask = []
+        for i in range(listw.count()):
+            li = listw.item(i)
+            if li.checkState() == QtCore.Qt.Checked:
+                new_mask.append(
+                    int(li.data(QtCore.Qt.UserRole)))
+        # If user checked ALL, treat as "all drivers" (empty mask)
+        # so the storage stays backward-compat.
+        if len(new_mask) == len(items):
+            new_mask = []
+        if new_mask == self._driver_mask:
+            return
+        self._driver_mask = new_mask
+        self.poseDriverMaskChanged.emit(
+            self._pose_index, list(new_mask))
+
+    def set_hierarchy_state(self, parent_index, driver_mask,
+                            known_base_pose_indices):
+        """Refresh the hierarchy controls without reconstructing
+        the row. Called by the host editor when the active node
+        changes or after a `cmds.setAttr` write fires the
+        controller's poseParentIndexChanged / poseDriverMaskChanged
+        signal cascade.
+        """
+        self._parent_index = int(parent_index)
+        self._driver_mask = list(driver_mask or [])
+        self._known_base_pose_indices = list(
+            known_base_pose_indices or [])
+        self._rebuild_parent_combo()
 
     def _show_row_menu(self, _pos):
         menu = QtWidgets.QMenu(self)
