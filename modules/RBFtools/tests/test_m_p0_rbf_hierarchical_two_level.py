@@ -42,9 +42,23 @@ Source-introspection (cpp):
 
 Source-introspection (controller):
   12. set_pose_parent_index method present + writes
-      shape.poseParentIndex[row]
+      shape.poses[row].poseParentIndex (SUBATTR_REFACTOR 2026-05-28:
+      child of poses[], superseding the top-level multi) + read-back
+      getters get_pose_parent_index / get_pose_driver_mask present
   13. set_pose_driver_mask method present + writes
-      shape.poseDriverMask[row] as Int32Array
+      shape.poses[row].poseDriverMask as Int32Array
+
+M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28) note
+-------------------------------------------------------
+poseParentIndex / poseDriverMask were originally shipped as top-level
+multis parallel to poses[]. That design caused phantom-slot reads and
+broke the set-parent -> Apply -> reload round-trip (the parent was
+written to poseParentIndex[row] but never read back). The refactor
+moved both into children of the poses[] compound so they travel with
+the pose element. Tests 08 / 09 / 12 / 13 below assert the NEW
+sub-attribute schema; the dedicated round-trip + PoseData-field
+fidelity guards live in
+test_m_p0_rbf_hierarchical_subattr_refactor.py.
 
 Cross-binary:
   14. Both .mll contain "poseParentIndex" + "poseDriverMask" ASCII
@@ -202,29 +216,47 @@ class T_M_P0_RBF_HIERARCHICAL_TWO_LEVEL_Cpp(unittest.TestCase):
         self.assertIn(
             "subnetCacheDirty(true)", self._cpp)
 
-    def test_PERMANENT_08_poseparentindex_default_neg1(self):
+    def test_PERMANENT_08_poseparentindex_default_neg1_child(self):
+        """SUBATTR_REFACTOR (2026-05-28): poseParentIndex is now a
+        SCALAR CHILD of the poses[] compound (poses[p].poseParentIndex),
+        not a top-level multi parallel to poses[]. It MUST still default
+        to -1 (= base pose) so legacy nodes keep Phase 15 single-layer
+        behaviour, but MUST NOT setArray (the poses[] compound supplies
+        the per-pose multiplicity) and MUST be addChild'd to poses."""
         body_idx = self._cpp.find(
             'poseParentIndex = nAttr.create(')
         self.assertGreater(body_idx, 0,
             "poseParentIndex create call missing")
-        slice_ = self._cpp[body_idx:body_idx + 600]
+        slice_ = self._cpp[body_idx:body_idx + 400]
         self.assertIn('nAttr.setDefault(-1);', slice_,
             "poseParentIndex MUST default to -1 (= base pose) so "
             "legacy nodes silently keep Phase 15 single-layer "
             "behaviour")
-        self.assertIn('nAttr.setArray(true);', slice_)
-        self.assertIn('nAttr.setUsesArrayDataBuilder(true);', slice_)
+        self.assertNotIn('nAttr.setArray(true);', slice_,
+            "SUBATTR_REFACTOR: poseParentIndex MUST be a scalar child "
+            "of poses[], NOT a top-level multi -- the parallel-multi "
+            "design caused phantom-slot reads + parent-loss-on-reload")
+        self.assertIn('cAttr.addChild(poseParentIndex);', self._cpp,
+            "poseParentIndex MUST be addChild'd to the poses[] "
+            "compound so it travels with the pose element")
 
-    def test_PERMANENT_09_posedrivermask_intarray_multi(self):
+    def test_PERMANENT_09_posedrivermask_intarray_child(self):
+        """SUBATTR_REFACTOR (2026-05-28): poseDriverMask is now a
+        kIntArray CHILD of poses[] (poses[p].poseDriverMask) -- one
+        mask value per pose element -- NOT a top-level multi."""
         body_idx = self._cpp.find(
             'poseDriverMask = tAttr.create(')
         self.assertGreater(body_idx, 0,
             "poseDriverMask MUST be created via "
             "MFnTypedAttribute")
-        slice_ = self._cpp[body_idx:body_idx + 400]
+        slice_ = self._cpp[body_idx:body_idx + 300]
         self.assertIn('MFnData::kIntArray', slice_,
             "poseDriverMask MUST be a kIntArray (one mask per pose)")
-        self.assertIn('tAttr.setArray(true);', slice_)
+        self.assertNotIn('tAttr.setArray(true);', slice_,
+            "SUBATTR_REFACTOR: poseDriverMask MUST be a kIntArray "
+            "child of poses[], NOT a top-level multi")
+        self.assertIn('cAttr.addChild(poseDriverMask);', self._cpp,
+            "poseDriverMask MUST be addChild'd to the poses[] compound")
 
     def test_PERMANENT_10_prev_state_cache_compare(self):
         """compute() MUST read currentPoseParentArr +
@@ -281,15 +313,30 @@ class T_M_P0_RBF_HIERARCHICAL_TWO_LEVEL_Controller(
             "def set_pose_parent_index(self, row, parent_index):",
             self._ctrl,
             "Controller MUST expose set_pose_parent_index")
-        # The format-string concatenation may straddle a newline
-        # after `shape` for readability; assert on the stable
-        # fragment that survives any line wrap.
+        # SUBATTR_REFACTOR (2026-05-28): the plug is now a child of
+        # poses[] (poses[row].poseParentIndex), not a parallel top-
+        # level multi. The format-string concatenation may straddle a
+        # newline after `shape`; assert on the stable fragment.
         self.assertIn(
+            '"{}.poses[{}].poseParentIndex"', self._ctrl,
+            "Controller MUST write to shape.poses[row].poseParentIndex "
+            "(SUBATTR_REFACTOR -- child of poses[], not top-level)")
+        self.assertNotIn(
             '"{}.poseParentIndex[{}]"', self._ctrl,
-            "Controller MUST write to shape.poseParentIndex[row]")
+            "Top-level poseParentIndex[row] plug MUST be gone -- the "
+            "parallel-multi write was the root of the round-trip break")
         self.assertIn(
             "poseParentIndexChanged = QtCore.Signal", self._ctrl,
             "Controller MUST emit poseParentIndexChanged signal")
+        # Read-back getters added by the refactor (UI refresh path).
+        self.assertIn(
+            "def get_pose_parent_index(self, row):", self._ctrl,
+            "Controller MUST expose get_pose_parent_index for "
+            "UI read-back")
+        self.assertIn(
+            "def get_pose_driver_mask(self, row):", self._ctrl,
+            "Controller MUST expose get_pose_driver_mask for "
+            "UI read-back")
 
     def test_PERMANENT_13_set_pose_driver_mask_method(self):
         self.assertIn(
@@ -299,6 +346,10 @@ class T_M_P0_RBF_HIERARCHICAL_TWO_LEVEL_Controller(
         self.assertIn(
             'type="Int32Array"', self._ctrl,
             "Mask write MUST use the Int32Array attribute type")
+        # SUBATTR_REFACTOR: plug is now a child of poses[].
+        self.assertIn(
+            '"{}.poses[{}].poseDriverMask"', self._ctrl,
+            "Mask write MUST target shape.poses[row].poseDriverMask")
         # Signal declaration uses double-space alignment with the
         # parent-index sibling; assert on the import-stable
         # substring instead of an exact whitespace match.
