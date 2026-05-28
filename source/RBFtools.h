@@ -514,16 +514,19 @@ public:
     // M1.4 stays valid); at inference, query-vs-center j uses σ_j.
     static MObject poseRadius;
     // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- per-pose
-    // schema additions:
-    //   * poseParentIndex: int multi parallel to poses[]. Default -1
-    //     means "base pose" (legacy single-layer behaviour). >= 0
-    //     means "delta of poseParentIndex". Hard-cap-2 layers: any
+    // schema additions. M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR
+    // (2026-05-28) moved both from top-level multis parallel to poses[]
+    // into *children of the poses[] compound* so they travel with the
+    // pose element through add / remove / .ma round-trip:
+    //   * poseParentIndex: int child (poses[p].poseParentIndex).
+    //     Default -1 means "base pose" (legacy single-layer behaviour).
+    //     >= 0 means "delta of poseParentIndex". Hard-cap-2 layers: any
     //     value pointing at another delta is demoted to base at
     //     training time + warned.
-    //   * poseDriverMask: intArray multi parallel to poses[]. Each
-    //     element lists the flat-driver-vector indices this pose
-    //     cares about. Empty array (default / legacy node) means
-    //     "all drivers" (numerically equivalent to Phase 15).
+    //   * poseDriverMask: kIntArray child (poses[p].poseDriverMask).
+    //     Lists the flat-driver-vector indices this pose cares about.
+    //     Empty array (default / legacy node) means "all drivers"
+    //     (numerically equivalent to Phase 15).
     static MObject poseParentIndex;
     static MObject poseDriverMask;
     // Commit 0 (M_BASE_POSE): per-output-channel additive baseline

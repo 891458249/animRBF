@@ -382,12 +382,17 @@ MStatus RBFtools::initialize()
     // parent index. -1 (default) = "this pose is a base pose";
     // >= 0 = "this pose is a delta of pose <value>". Hard-cap-2:
     // delta-of-delta is auto-demoted to base + warn in training
-    // (see Stage 2.1). Parallel-indexed to poses[].
+    // (see Stage 2.1).
+    // M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): this is now
+    // a *child of the poses[] compound* (poses[p].poseParentIndex),
+    // NOT a top-level multi parallel to poses[]. As a scalar child it
+    // travels with its pose element through add / remove / .ma round-
+    // trip -- killing the phantom-slot reads + persistence drift that
+    // the parallel-multi design suffered. So: no setArray here; the
+    // poses[] compound is the multi, this is one int per element.
     poseParentIndex = nAttr.create(
         "poseParentIndex", "ppi", MFnNumericData::kInt);
     nAttr.setKeyable(true);
-    nAttr.setArray(true);
-    nAttr.setUsesArrayDataBuilder(true);
     nAttr.setDefault(-1);
     nAttr.setStorable(true);
 
@@ -804,15 +809,16 @@ MStatus RBFtools::initialize()
     poseValues = tAttr.create("controlPoseValues", "cpv", MFnData::kDoubleArray);
 
     // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18): per-pose
-    // driver mask. Each element is a kIntArray listing the flat-
-    // driver-vector indices this pose cares about. Default empty
-    // array (legacy node / fresh pose) means "all drivers" --
-    // backward-compatible with Phase 15. The multi is parallel to
-    // poses[] (one mask per pose).
+    // driver mask. A kIntArray listing the flat-driver-vector indices
+    // this pose cares about. Default empty array (legacy node / fresh
+    // pose) means "all drivers" -- backward-compatible with Phase 15.
+    // M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): now a
+    // *child of the poses[] compound* (poses[p].poseDriverMask), NOT
+    // a top-level multi. One kIntArray value per pose element; the
+    // poses[] compound supplies the per-pose multiplicity, so no
+    // setArray on the child itself.
     poseDriverMask = tAttr.create(
         "poseDriverMask", "pdm", MFnData::kIntArray);
-    tAttr.setArray(true);
-    tAttr.setUsesArrayDataBuilder(true);
     tAttr.setStorable(true);
 
     //
@@ -935,6 +941,16 @@ MStatus RBFtools::initialize()
     cAttr.addChild(poseValue);
     cAttr.addChild(poseLocalTransform);    // M2.3
     cAttr.addChild(poseSwingTwistCache);   // M2.5
+    // M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): hierarchy
+    // sub-attributes are children of poses[] (poses[p].poseParentIndex
+    // / poses[p].poseDriverMask) instead of parallel top-level multis.
+    // The parent / mask now travel with the pose element through
+    // add / remove / .ma round-trip -- the structural fix for the
+    // phantom-slot reads + parent-loss-on-reload the top-level design
+    // suffered. removeMultiInstance(poses[i]) reclaims the children
+    // automatically, so _clear_poses_only needs no separate sweep.
+    cAttr.addChild(poseParentIndex);
+    cAttr.addChild(poseDriverMask);
 
     //
     // MRampAttribute
@@ -987,13 +1003,15 @@ MStatus RBFtools::initialize()
     addAttribute(restInput);
     // Commit 0 (M_PER_POSE_SIGMA / M_BASE_POSE)
     addAttribute(poseRadius);
-    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16.
-    addAttribute(poseParentIndex);
-    addAttribute(poseDriverMask);
     addAttribute(basePoseValue);
     addAttribute(poses);
     addAttribute(poseInput);
     addAttribute(poseValue);
+    // M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): poseParent
+    // Index / poseDriverMask are children of poses[] -- registered
+    // after the parent compound, same ordering as poseInput/poseValue.
+    addAttribute(poseParentIndex);
+    addAttribute(poseDriverMask);
     // M2.3: local-Transform compound + children. No attributeAffects
     // because this is a pure data channel (compute() never reads it).
     addAttribute(poseLocalTranslate);
@@ -1869,55 +1887,48 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                 // slot index) and indexed currentPoseParentArr by k,
                 // which is wrong for sparse multis AND triggered
                 // phantom-value reads even when Python never wrote
-                // any setAttr on poseParentIndex (Maya internally
-                // pre-allocates slots for storable+usesArrayDataBuilder
-                // multis once they are touched in compute(), and
-                // those phantom slots can contain non-default values).
-                // Symptom: every legacy node's compute() reported "pose
-                // N parent (P) is itself a delta -- demoting" for
-                // every pose, then ran hierarchical training paths the
-                // user never asked for.
+                // any setAttr on poseParentIndex.
                 //
-                // Fix: mirror the working poseRadius read pattern
-                // (cpp:2018-2035) -- pre-fill the local cache with
-                // the schema default (-1 / empty mask), then walk
-                // the multi via elementIndex() + next() so logical
-                // indices line up with poseCount-keyed arrays.
+                // M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28) --
+                // poseParentIndex / poseDriverMask are now children of
+                // the poses[] compound (poses[p].poseParentIndex /
+                // poses[p].poseDriverMask), not parallel top-level
+                // multis. Walk poses[] via elementIndex() and read each
+                // element's two children. This kills the phantom-slot
+                // class of bug structurally: a child of an unwritten
+                // poses[] element simply does not exist, so it reads its
+                // schema default (-1 / empty mask) -- the very value
+                // that means "base pose / all drivers". The bb3cf21
+                // read-defence spirit is preserved by (a) pre-filling
+                // the local cache with the defaults, (b) keying by the
+                // logical element index, and (c) the self-parent /
+                // OOB guards downstream in the topology resolver.
                 std::vector<int> currentPoseParentArr;
                 std::vector<std::vector<int>> currentPoseDriverMaskArr;
                 currentPoseParentArr.assign(poseCount, -1);
                 currentPoseDriverMaskArr.assign(
                     poseCount, std::vector<int>());
                 {
-                    MArrayDataHandle ppHandle =
-                        data.inputArrayValue(poseParentIndex, &status);
+                    MArrayDataHandle posesHandle =
+                        data.inputArrayValue(poses, &status);
                     if (status == MStatus::kSuccess)
                     {
-                        const unsigned cnt = ppHandle.elementCount();
+                        const unsigned cnt = posesHandle.elementCount();
                         for (unsigned k = 0; k < cnt; ++k)
                         {
-                            unsigned idx = ppHandle.elementIndex();
+                            unsigned idx = posesHandle.elementIndex();
                             if (idx < poseCount)
                             {
-                                int v = ppHandle.inputValue().asInt();
-                                currentPoseParentArr[idx] = v;
-                            }
-                            if (k + 1 < cnt) ppHandle.next();
-                        }
-                    }
-                    MArrayDataHandle pdmHandle =
-                        data.inputArrayValue(poseDriverMask, &status);
-                    if (status == MStatus::kSuccess)
-                    {
-                        const unsigned cnt = pdmHandle.elementCount();
-                        for (unsigned k = 0; k < cnt; ++k)
-                        {
-                            unsigned idx = pdmHandle.elementIndex();
-                            if (idx < poseCount)
-                            {
+                                MDataHandle poseElem =
+                                    posesHandle.inputValue();
+                                // parent index child (scalar int, -1).
+                                currentPoseParentArr[idx] =
+                                    poseElem.child(
+                                        poseParentIndex).asInt();
+                                // driver mask child (kIntArray, empty).
                                 std::vector<int> maskRow;
                                 MObject maskData =
-                                    pdmHandle.inputValue().data();
+                                    poseElem.child(poseDriverMask).data();
                                 if (!maskData.isNull())
                                 {
                                     MFnIntArrayData iadFn(maskData);
@@ -1929,7 +1940,7 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                 }
                                 currentPoseDriverMaskArr[idx] = maskRow;
                             }
-                            if (k + 1 < cnt) pdmHandle.next();
+                            if (k + 1 < cnt) posesHandle.next();
                         }
                     }
                 }
