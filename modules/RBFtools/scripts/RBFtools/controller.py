@@ -2105,8 +2105,12 @@ class MainController(QtCore.QObject):
             return False
         try:
             shape = core.get_shape(self._current_node)
+            # M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): the
+            # plug is now a child of the poses[] compound
+            # (poses[row].poseParentIndex), not a parallel top-level
+            # multi. Same row -> logical pose index mapping as before.
             cmds.setAttr(
-                "{}.poseParentIndex[{}]".format(
+                "{}.poses[{}].poseParentIndex".format(
                     shape, int(row)),
                 int(parent_index))
         except Exception as exc:
@@ -2145,7 +2149,9 @@ class MainController(QtCore.QObject):
                 continue
         try:
             shape = core.get_shape(self._current_node)
-            plug = "{}.poseDriverMask[{}]".format(shape, int(row))
+            # SUBATTR_REFACTOR (2026-05-28): poseDriverMask is now a
+            # child of poses[] (poses[row].poseDriverMask).
+            plug = "{}.poses[{}].poseDriverMask".format(shape, int(row))
             if sanitized:
                 cmds.setAttr(
                     plug, len(sanitized), *sanitized,
@@ -2164,6 +2170,43 @@ class MainController(QtCore.QObject):
         except Exception:
             pass
         return True
+
+    def get_pose_parent_index(self, row):
+        """M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28) -- read
+        back ``poses[row].poseParentIndex``. Returns -1 (base pose) for
+        a legacy node, an unset element, or no active node, so callers
+        can treat the result as "this is a base pose" without special-
+        casing the failure path."""
+        if not self._current_node:
+            return -1
+        try:
+            shape = core.get_shape(self._current_node)
+            return int(cmds.getAttr(
+                "{}.poses[{}].poseParentIndex".format(
+                    shape, int(row))))
+        except Exception:
+            return -1
+
+    def get_pose_driver_mask(self, row):
+        """M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28) -- read
+        back ``poses[row].poseDriverMask`` as a flat list[int]. Empty
+        list = all drivers (the backward-compatible default). Tolerates
+        the flat / singly-nested shapes ``cmds.getAttr`` returns for a
+        kIntArray across Maya versions."""
+        if not self._current_node:
+            return []
+        try:
+            shape = core.get_shape(self._current_node)
+            raw = cmds.getAttr(
+                "{}.poses[{}].poseDriverMask".format(
+                    shape, int(row)))
+        except Exception:
+            return []
+        if not raw:
+            return []
+        if isinstance(raw[0], (list, tuple)):
+            return [int(x) for x in raw[0]]
+        return [int(x) for x in raw]
 
     def set_base_pose_value(self, channel_idx, new_value):
         """Commit 3 (M_BASE_POSE): per-output baseline live-edit. Reads
