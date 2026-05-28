@@ -2997,6 +2997,16 @@ class PoseData(object):
         nodes (no ``poseRadius[]`` plug populated) round-trip through
         the same default. Constructors taking only ``(index, inputs,
         values)`` remain valid — radius is keyword-only with default.
+    parent_index : int
+        M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): -1
+        (default) = this is a *base* pose; >= 0 = this is a *delta*
+        pose layered on the base pose at that logical index. Persisted
+        to ``poses[p].poseParentIndex`` (a child of the poses[]
+        compound, not a parallel top-level multi).
+    driver_mask : list[int]
+        Subset of flat-driver-vector indices this pose responds to.
+        Empty list (default) = all drivers (backward compat with
+        Phase 15). Persisted to ``poses[p].poseDriverMask``.
 
     Design note
     -----------
@@ -3006,9 +3016,11 @@ class PoseData(object):
     rather than silent ``KeyError`` / ``None`` bugs.
     """
 
-    __slots__ = ("index", "inputs", "values", "radius")
+    __slots__ = ("index", "inputs", "values", "radius",
+                 "parent_index", "driver_mask")
 
-    def __init__(self, index, inputs, values, radius=None):
+    def __init__(self, index, inputs, values, radius=None,
+                 parent_index=-1, driver_mask=None):
         self.index  = int(index)
         self.inputs = list(inputs)
         self.values = list(values)
@@ -3017,24 +3029,37 @@ class PoseData(object):
         self.radius = (DEFAULT_POSE_RADIUS
                        if radius is None
                        else float(radius))
+        # M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR: hierarchy fields are
+        # keyword-only with backward-compatible defaults (-1 / []), so
+        # every legacy PoseData(idx, in, val[, radius]) callsite keeps
+        # producing a plain base pose with no driver subset.
+        self.parent_index = int(parent_index)
+        self.driver_mask = ([] if not driver_mask
+                            else [int(x) for x in driver_mask])
 
     def __repr__(self):
         return ("PoseData(index={}, inputs={}, values={}, "
-                "radius={})").format(
-                    self.index, self.inputs, self.values, self.radius)
+                "radius={}, parent_index={}, driver_mask={})").format(
+                    self.index, self.inputs, self.values, self.radius,
+                    self.parent_index, self.driver_mask)
 
     def __eq__(self, other):
         """Tolerance-based equality (see :func:`float_eq`).
 
         Commit 1: radius participates in equality but uses
         :func:`float_eq` so legacy poses (radius == DEFAULT) compare
-        bit-equal to JSON-deserialised ones."""
+        bit-equal to JSON-deserialised ones. SUBATTR_REFACTOR: the
+        hierarchy fields use exact int / list equality (they are
+        discrete indices, not floats); two legacy poses both default
+        to (-1, []) so they still compare equal."""
         if not isinstance(other, PoseData):
             return NotImplemented
         return (self.index == other.index
                 and vector_eq(self.inputs, other.inputs)
                 and vector_eq(self.values, other.values)
-                and float_eq(self.radius, other.radius))
+                and float_eq(self.radius, other.radius)
+                and self.parent_index == other.parent_index
+                and list(self.driver_mask) == list(other.driver_mask))
 
     def __ne__(self, other):
         result = self.__eq__(other)
@@ -3185,9 +3210,41 @@ def read_all_poses(node):
                           DEFAULT_POSE_RADIUS)
         if not radius or radius <= 0.0:
             radius = DEFAULT_POSE_RADIUS
-        poses.append(PoseData(pid, inputs, values, radius=radius))
+        # M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): read the
+        # per-pose hierarchy sub-attributes from the poses[] compound.
+        # Legacy nodes (no sub-attr at this element) fall back to the
+        # base-pose / all-drivers default via the guards below, so old
+        # scenes round-trip unchanged. This read-back is the missing
+        # half of the round-trip the user reported broken: the writer
+        # set poses[p].poseParentIndex but read_all_poses never read it
+        # back into PoseData, so the UI always showed -1 after reload.
+        parent_index = int(safe_get(
+            "{}.poses[{}].poseParentIndex".format(shape, pid), -1))
+        driver_mask = _read_pose_driver_mask(shape, pid)
+        poses.append(PoseData(pid, inputs, values, radius=radius,
+                              parent_index=parent_index,
+                              driver_mask=driver_mask))
 
     return poses
+
+
+def _read_pose_driver_mask(shape, pid):
+    """Read ``shape.poses[pid].poseDriverMask`` as a flat list[int].
+
+    The plug is a kIntArray child of poses[]; ``cmds.getAttr`` returns
+    it either flat (``[0, 2]``) or singly-nested (``[[0, 2]]``)
+    depending on Maya version. Empty / missing / legacy nodes yield
+    ``[]`` (= all drivers, backward compat)."""
+    try:
+        raw = cmds.getAttr(
+            "{}.poses[{}].poseDriverMask".format(shape, pid))
+    except Exception:
+        return []
+    if not raw:
+        return []
+    if isinstance(raw[0], (list, tuple)):
+        return [int(x) for x in raw[0]]
+    return [int(x) for x in raw]
 
 
 # =====================================================================
@@ -3303,6 +3360,34 @@ def _write_pose_to_node(shape, sequential_idx, pose):
         cmds.warning(
             "_write_pose_to_node: poseRadius[{}] failed (legacy "
             "plugin without per-pose σ?): {}".format(
+                sequential_idx, exc))
+    # M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): write the
+    # per-pose hierarchy sub-attributes. These are children of the
+    # poses[] compound now (poses[p].poseParentIndex /
+    # poses[p].poseDriverMask), so they share the same packed slot as
+    # poseInput / poseValue and round-trip cleanly. Each write is
+    # independently guarded + non-fatal: a legacy .mll without the
+    # sub-attrs just warns, and the caller falls back to Phase 15
+    # single-layer behaviour (parent=-1 / all-drivers).
+    try:
+        parent = int(getattr(pose, "parent_index", -1))
+        cmds.setAttr(
+            "{}.poses[{}].poseParentIndex".format(shape, sequential_idx),
+            parent)
+    except Exception as exc:
+        cmds.warning(
+            "_write_pose_to_node: poses[{}].poseParentIndex failed "
+            "(legacy plugin without hierarchy sub-attr?): {}".format(
+                sequential_idx, exc))
+    try:
+        mask = [int(x) for x in (getattr(pose, "driver_mask", []) or [])]
+        cmds.setAttr(
+            "{}.poses[{}].poseDriverMask".format(shape, sequential_idx),
+            len(mask), *mask, type="Int32Array")
+    except Exception as exc:
+        cmds.warning(
+            "_write_pose_to_node: poses[{}].poseDriverMask failed "
+            "(legacy plugin without hierarchy sub-attr?): {}".format(
                 sequential_idx, exc))
 
 

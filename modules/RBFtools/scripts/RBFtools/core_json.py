@@ -421,6 +421,14 @@ def node_to_dict(node):
             # round-trip through old exporter is loss-tolerant.
             "radius": float(getattr(pose, "radius",
                                     core.DEFAULT_POSE_RADIUS)),
+            # M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28):
+            # persist the two-level hierarchy fields so export/import
+            # does not silently drop parent / mask. Loss-tolerant the
+            # same way as radius -- legacy JSON without these keys
+            # imports as a plain base pose (parent=-1 / all drivers).
+            "parent_index": int(getattr(pose, "parent_index", -1)),
+            "driver_mask": [int(x) for x in
+                            (getattr(pose, "driver_mask", []) or [])],
             "local_transform": {
                 "translate": [float(x) for x in lx["translate"]],
                 "quat":      [float(x) for x in lx["quat"]],
@@ -864,12 +872,16 @@ def dict_to_node(ndata, mode="add", will_overwrite=False):
         for pose in ndata.get("poses", []):
             # Commit 1 (M_PER_POSE_SIGMA): legacy JSON (no "radius" key)
             # falls back to DEFAULT_POSE_RADIUS via PoseData ctor.
+            # SUBATTR_REFACTOR: hierarchy fields default to base-pose /
+            # all-drivers when absent (legacy JSON).
             core._write_pose_to_node(
                 shape, int(pose["index"]),
                 core.PoseData(int(pose["index"]),
                               list(pose["inputs"]),
                               list(pose["values"]),
-                              radius=pose.get("radius")))
+                              radius=pose.get("radius"),
+                              parent_index=pose.get("parent_index", -1),
+                              driver_mask=pose.get("driver_mask")))
 
         # Commit 1 (M_BASE_POSE): restore per-output additive baseline.
         # Missing key (legacy JSON) leaves the plug untouched, which
@@ -1055,6 +1067,12 @@ def export_poses_to_path(node, path):
                 "values": [float(x) for x in p.values],
                 "radius": float(getattr(p, "radius",
                                          core.DEFAULT_POSE_RADIUS)),
+                # M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28):
+                # persist hierarchy fields (loss-tolerant — legacy
+                # importers ignore unknown keys, PoseData defaults).
+                "parent_index": int(getattr(p, "parent_index", -1)),
+                "driver_mask": [int(x) for x in
+                                (getattr(p, "driver_mask", []) or [])],
             })
         except Exception as exc:
             cmds.warning(
@@ -1285,10 +1303,15 @@ def import_poses_from_path(node, path, mode="replace"):
             radius = float(pdict.get("radius", core.DEFAULT_POSE_RADIUS))
             inputs = [float(x) for x in pdict["inputs"]]
             values = [float(x) for x in pdict["values"]]
+            # SUBATTR_REFACTOR (2026-05-28): carry hierarchy fields
+            # through import; absent keys default to base / all-drivers.
+            parent_index = int(pdict.get("parent_index", -1))
+            driver_mask = pdict.get("driver_mask")
             try:
                 pose = core.PoseData(
                     index=seq_idx, inputs=inputs, values=values,
-                    radius=radius)
+                    radius=radius, parent_index=parent_index,
+                    driver_mask=driver_mask)
                 core._write_pose_to_node(shape, seq_idx, pose)
                 n_imported += 1
             except Exception as exc:
