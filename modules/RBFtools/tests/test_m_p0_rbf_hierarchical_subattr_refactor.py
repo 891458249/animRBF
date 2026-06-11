@@ -74,15 +74,28 @@ def _read(path):
 class _FakeScene(object):
     """Minimal in-memory cmds stand-in: setAttr stores by plug string,
     getAttr returns the stored value (raising for unknown plugs so the
-    real safe_get fallback path is exercised)."""
+    real safe_get fallback path is exercised).
+
+    M_P0_INT32ARRAY_SETATTR_FIX (2026-05-28): mirrors REAL mayapy
+    semantics, verified live on 2022 + 2025:
+      * one list payload  -> stores that list (correct production form)
+      * empty list        -> stores empty; getAttr returns None
+      * MEL-style count-prefixed scalars (plug, n, v0, v1...) -> Maya
+        silently stores [n]; the fake reproduces that so a regression
+        to the broken form FAILS the round-trip tests here instead of
+        passing on an idealized fake."""
 
     def __init__(self):
         self.store = {}
 
     def setAttr(self, plug, *args, **kwargs):
         if kwargs.get("type") == "Int32Array":
-            n = int(args[0]) if args else 0
-            self.store[plug] = [int(x) for x in args[1:1 + n]]
+            if args and isinstance(args[0], (list, tuple)):
+                vals = [int(x) for x in args[0]]
+                self.store[plug] = (vals if vals else None)
+            else:
+                # Real-Maya behaviour for the broken count-prefix form.
+                self.store[plug] = [int(args[0])] if args else None
         elif args:
             self.store[plug] = args[0]
 
@@ -178,6 +191,11 @@ class TestWriteReadRoundTrip(unittest.TestCase):
                       c.args[0] == "RBFShape.poses[0].poseDriverMask"]
         self.assertTrue(mask_calls, "mask MUST target poses[] child plug")
         self.assertEqual(mask_calls[0].kwargs.get("type"), "Int32Array")
+        # M_P0_INT32ARRAY_SETATTR_FIX: payload MUST be ONE list arg --
+        # the count-prefixed scalar form silently stores [len] in real
+        # Maya (verified live on mayapy 2022 + 2025).
+        self.assertEqual(list(mask_calls[0].args[1]), [0, 2],
+            "Int32Array payload MUST be the mask as one list argument")
 
     def test_05_06_round_trip_fidelity(self):
         """The brief's headline guard: PoseData(parent_index=1,
@@ -286,6 +304,30 @@ class TestSourceGuards(unittest.TestCase):
         self.assertIn("parent_index", core.PoseData.__slots__)
         self.assertIn("driver_mask", core.PoseData.__slots__)
 
+    def test_10b_no_count_prefixed_int32array_writes(self):
+        """M_P0_INT32ARRAY_SETATTR_FIX (2026-05-28) permanent guard.
+
+        Maya's Python setAttr expects the Int32Array payload as ONE
+        list argument. The MEL-style count-prefixed scalar form
+        (plug, len(mask), *mask) silently stores [len(mask)] -- verified
+        live on mayapy 2022 + 2025 (write (2, 0, 2) reads back [2];
+        write (0,) reads back [0], which flips the semantics from
+        "all drivers" to "driver 0 only"). This guard greps the broken
+        pattern out of existence in core.py + controller.py."""
+        ctrl = _read(os.path.join(
+            _REPO_ROOT, "modules", "RBFtools", "scripts", "RBFtools",
+            "controller.py"))
+        for src_name, src in (("core.py", self._core),
+                              ("controller.py", ctrl)):
+            self.assertNotIn(
+                "len(mask), *mask", src,
+                "{}: count-prefixed Int32Array write MUST NOT come "
+                "back (silently stores [len])".format(src_name))
+            self.assertNotIn(
+                "len(sanitized), *sanitized", src,
+                "{}: count-prefixed Int32Array write MUST NOT come "
+                "back".format(src_name))
+
 
 # ----------------------------------------------------------------------
 # 11. Live mayapy round-trip (only under real Maya)
@@ -311,7 +353,7 @@ class TestLiveRoundTrip(unittest.TestCase):
         mc.setAttr(node + ".poses[0].poseInput[0]", 0.5)
         mc.setAttr(node + ".poses[0].poseValue[0]", 1.0)
         mc.setAttr(node + ".poses[0].poseParentIndex", 1)
-        mc.setAttr(node + ".poses[0].poseDriverMask", 2, 0, 2,
+        mc.setAttr(node + ".poses[0].poseDriverMask", [0, 2],
                    type="Int32Array")
         self.assertEqual(
             mc.getAttr(node + ".poses[0].poseParentIndex"), 1)

@@ -2151,14 +2151,13 @@ class MainController(QtCore.QObject):
             shape = core.get_shape(self._current_node)
             # SUBATTR_REFACTOR (2026-05-28): poseDriverMask is now a
             # child of poses[] (poses[row].poseDriverMask).
-            plug = "{}.poses[{}].poseDriverMask".format(shape, int(row))
-            if sanitized:
-                cmds.setAttr(
-                    plug, len(sanitized), *sanitized,
-                    type="Int32Array")
-            else:
-                cmds.setAttr(
-                    plug, 0, type="Int32Array")
+            # M_P0_INT32ARRAY_SETATTR_FIX (2026-05-28): the payload MUST
+            # be one list argument -- the MEL-style count-prefixed form
+            # (plug, len, *values) silently stores [len] instead
+            # (verified live on mayapy 2022 + 2025). Empty list writes
+            # an empty array = "all drivers" (backward compat).
+            cmds.setAttr(
+                plug, sanitized, type="Int32Array")
         except Exception as exc:
             cmds.warning(
                 "set_pose_driver_mask: plug write failed at row "

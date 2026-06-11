@@ -3390,9 +3390,16 @@ def _write_pose_to_node(shape, sequential_idx, pose):
                 sequential_idx, exc))
     try:
         mask = [int(x) for x in (getattr(pose, "driver_mask", []) or [])]
+        # M_P0_INT32ARRAY_SETATTR_FIX (2026-05-28): Maya's Python
+        # setAttr expects the Int32Array payload as ONE list argument
+        # (cmds.setAttr(plug, [0, 2], type="Int32Array")). The MEL-style
+        # count-prefixed form (plug, len, *values) silently stores
+        # [len] instead -- verified live on mayapy 2022 + 2025. The
+        # empty list writes an empty array (getAttr returns None,
+        # normalized to [] by _read_pose_driver_mask).
         cmds.setAttr(
             "{}.poses[{}].poseDriverMask".format(shape, sequential_idx),
-            len(mask), *mask, type="Int32Array")
+            mask, type="Int32Array")
     except Exception as exc:
         cmds.warning(
             "_write_pose_to_node: poses[{}].poseDriverMask failed "
