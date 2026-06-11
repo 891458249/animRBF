@@ -29,8 +29,49 @@ and forwards to the controller.
 
 from __future__ import absolute_import
 
-from RBFtools.ui.compat import QtCore, QtWidgets
+from RBFtools.ui.compat import QtCore, QtGui, QtWidgets
 from RBFtools.ui.i18n import tr
+
+
+# ----------------------------------------------------------------------
+# M_P0_DRIVER_CONNECT_UX_REVAMP Part B (2026-05-12) -- per-tab
+# connection status indicator. _STATUS_ICON_CACHE caches one QIcon per
+# state so repeated refresh_tab_indicators calls are cheap.
+# ----------------------------------------------------------------------
+
+_STATUS_ICON_CACHE = {}
+
+_STATUS_COLORS = {
+    "connected":    "#4CAF50",  # green   -- every metadata attr wired
+    "partial":      "#FFC107",  # amber   -- some attrs unwired (broken)
+    "disconnected": "#F44336",  # red     -- 0 wired or empty source
+}
+
+
+def _make_status_icon(state):
+    """Return a 12x12 QIcon with a coloured dot for *state*.
+
+    Uses low-level QPixmap + QPainter so PySide2 and PySide6 render
+    identically (the Qt enum locations changed between Qt5 and Qt6
+    but the QPainter primitives are stable).
+    """
+    cached = _STATUS_ICON_CACHE.get(state)
+    if cached is not None:
+        return cached
+    color_name = _STATUS_COLORS.get(state, "#888888")
+    pm = QtGui.QPixmap(12, 12)
+    pm.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(pm)
+    try:
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        painter.setBrush(QtGui.QColor(color_name))
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.drawEllipse(1, 1, 10, 10)
+    finally:
+        painter.end()
+    icon = QtGui.QIcon(pm)
+    _STATUS_ICON_CACHE[state] = icon
+    return icon
 
 
 # ----------------------------------------------------------------------
@@ -116,7 +157,10 @@ class _SourceTabContent(QtWidgets.QWidget):
     def set_node_name(self, name):
         # Python cache + LineEdit display kept in lockstep. The
         # cache is the source of truth read by _tab_node().
-        self._node_name = str(name or "")
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): plain ``(name or "")``
+        # instead of ``str(name or "")``. Under py2, ``str(u"...")``
+        # of a non-ASCII unicode raises UnicodeEncodeError.
+        self._node_name = name or ""
         self._field_node.setText(self._node_name)
 
     def node_name(self):
@@ -209,6 +253,13 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
     _add_button_key       = "btn_add_driver"
     _empty_hint_key       = "driver_source_list_empty_hint"
     _batch_checkbox_key   = "batch_all_driver_tabs"
+    # M_HELPBUBBLE_BATCH: per-button HelpButton lookup keys. Subclasses
+    # override _add_help_key + _batch_help_key for the driver/driven
+    # variants since those buttons describe role-specific semantics.
+    _connect_help_key     = "source_tab_connect"
+    _disconnect_help_key  = "source_tab_disconnect"
+    _add_help_key         = "source_tab_add_driver"
+    _batch_help_key       = "source_tab_batch_driver"
 
     def __init__(self, parent=None):
         super(_TabbedSourceEditorBase, self).__init__(
@@ -237,6 +288,11 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
 
         # Connect / Disconnect row (panel-level - operates on the
         # currently-active tab).
+        # M_HELPBUBBLE_BATCH: each interactive widget pairs with a
+        # HelpButton — the setToolTip text remains for hover-only
+        # one-liners; HelpButton carries the long-form 3-5-line
+        # description with usage + edge cases per spec (E.1).
+        from RBFtools.ui.widgets.help_button import HelpButton
         row_cd = QtWidgets.QHBoxLayout()
         self._btn_connect = QtWidgets.QPushButton(tr("connect"))
         self._btn_connect.setToolTip(tr("source_tab_connect_tip"))
@@ -245,25 +301,45 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         self._btn_disconnect.setToolTip(tr("source_tab_disconnect_tip"))
         self._btn_disconnect.clicked.connect(self._on_disconnect_clicked)
         row_cd.addWidget(self._btn_connect, 1)
+        row_cd.addWidget(HelpButton(self._connect_help_key))
         row_cd.addWidget(self._btn_disconnect, 1)
+        row_cd.addWidget(HelpButton(self._disconnect_help_key))
         lay.addLayout(row_cd)
 
         # Full-width Add Driver / Add Driven button.
+        row_add = QtWidgets.QHBoxLayout()
         self._btn_add = QtWidgets.QPushButton(tr(self._add_button_key))
         self._btn_add.setToolTip(tr("source_tab_add_tip"))
         self._btn_add.clicked.connect(self.addRequested)
-        lay.addWidget(self._btn_add)
+        row_add.addWidget(self._btn_add, 1)
+        row_add.addWidget(HelpButton(self._add_help_key))
+        lay.addLayout(row_add)
 
         # 2026-04-28 (M_BATCH_ROUTING): Batch toggle. When unchecked
         # the panel-level Connect / Disconnect operate on ONLY the
         # currently-active tab; when checked they sweep every tab.
         # The actual scope decision lives in main_window's
         # _gather_routed_targets — this is just the pickup point.
+        #
+        # M_P0_BATCH_DEFAULT_TRUE (2026-05-11): default flipped from
+        # False → True. The False default was a holdover from the
+        # single-tab weightDriver-era UX. Current RBFtools supports
+        # multi-driver / multi-driven via the B24 schema; under the
+        # old default, a multi-tab rig (e.g. 3 driver tabs × 10 driven
+        # tabs) would silently route only the active tab on Connect,
+        # leaving the other 9 driven * 2 driver = 27 (driver,driven)
+        # combinations disconnected. Symptom: "all drivers ineffective
+        # except the front-facing one" after a Connect cycle.
+        # Single-tab users keep their original behaviour (1 active tab
+        # × batch = 1 tab swept, identical to 1 active tab × no-batch).
+        row_batch = QtWidgets.QHBoxLayout()
         self._chk_batch = QtWidgets.QCheckBox(
             tr(self._batch_checkbox_key))
         self._chk_batch.setToolTip(tr("source_tab_batch_tip"))
-        self._chk_batch.setChecked(False)
-        lay.addWidget(self._chk_batch)
+        self._chk_batch.setChecked(True)
+        row_batch.addWidget(self._chk_batch, 1)
+        row_batch.addWidget(HelpButton(self._batch_help_key))
+        lay.addLayout(row_batch)
 
         self._update_empty_hint()
 
@@ -276,17 +352,29 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         # M_BATCH_PATH_A_WIRE (2026-04-28): consult the batch
         # checkbox to decide single-tab vs cross-tab broadcast.
         # The legacy path simply emitted attrsApplyRequested for
-        # the active tab — Bug repro: prior behaviour ignored
+        # the active tab -- Bug repro: prior behaviour ignored
         # _chk_batch entirely so checking it had zero effect on
-        # path-A button clicks (vs the path-B pose-editor flow
-        # which DID consult it via _gather_routed_targets).
+        # path-A button clicks.
+        #
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part E.3 (2026-05-12):
+        # dedupe attr selection preserving order before emitting.
+        # selected_attrs() comes from QListWidget.selectedItems()
+        # and is typically already unique, but defensive dedupe
+        # shields against any future re-implementation that might
+        # emit duplicates (which would double-wire input[]).
         idx = self._tabs.currentIndex()
         if idx < 0:
             return
         content = self._tabs.widget(idx)
         if content is None:
             return
-        attrs = list(content.selected_attrs())
+        attrs_raw = list(content.selected_attrs())
+        seen = set()
+        attrs = []
+        for a in attrs_raw:
+            if a not in seen:
+                seen.add(a)
+                attrs.append(a)
         if self.is_batch_mode():
             self.attrsApplyBatchRequested.emit(attrs)
         else:
@@ -360,11 +448,13 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
         content = self._tabs.widget(idx)
         if content is None:
             return ""
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): plain ``(... or "")``
+        # without ``str()`` — see set_node_name.
         try:
-            return str(content.node_name() or "")
+            return content.node_name() or ""
         except AttributeError:
             try:
-                return str(getattr(content, "_node_name", "") or "")
+                return getattr(content, "_node_name", "") or ""
             except Exception:
                 return ""
 
@@ -443,6 +533,39 @@ class _TabbedSourceEditorBase(QtWidgets.QGroupBox):
             node = self._tab_node(i)
             out.append((node, list(blueprint)))
         return out
+
+    def refresh_tab_indicators(self, controller):
+        """M_P0_DRIVER_CONNECT_UX_REVAMP Part B (2026-05-12) -- walk
+        every tab and stamp a connection-status dot on its title bar.
+
+        Called by main_window in response to:
+          * driverSourcesChanged signal (post add/remove/set)
+          * currentNodeChanged signal (node switch)
+          * connect_routed post-storm callback
+          * manual Reload click
+
+        Driver panels query ``controller.driver_source_connection_state``;
+        driven panels (which do not yet have a state helper) get a
+        neutral grey dot. Subclasses override ``_query_state(controller,
+        index)`` to plug in driven-side support later without touching
+        this loop.
+        """
+        if controller is None:
+            return
+        for i in range(self._tabs.count()):
+            state = self._query_state(controller, i)
+            try:
+                self._tabs.setTabIcon(i, _make_status_icon(state))
+            except Exception:
+                # PySide rendering glitches must not crash the panel.
+                pass
+
+    def _query_state(self, controller, index):
+        """Default: panel role is unknown -> grey dot. The driver
+        subclass overrides to call
+        ``controller.driver_source_connection_state(index)``.
+        """
+        return "unknown"
 
     def set_sources(self, sources, available_attrs_per_source=None):
         """Programmatic rebuild from list[DriverSource | DrivenSource].
@@ -545,6 +668,16 @@ class TabbedDriverSourceEditor(_TabbedSourceEditorBase):
     _add_button_key   = "btn_add_driver"
     _empty_hint_key   = "driver_source_list_empty_hint"
 
+    def _query_state(self, controller, index):
+        """M_P0_DRIVER_CONNECT_UX_REVAMP Part B: query connection
+        state for tab *index* via the controller. Returns one of
+        "connected" / "partial" / "disconnected".
+        """
+        try:
+            return controller.driver_source_connection_state(index)
+        except Exception:
+            return "disconnected"
+
 
 class TabbedDrivenSourceEditor(_TabbedSourceEditorBase):
     """Driven-side tabbed editor (M_TABBED_EDITOR_REWRITE)."""
@@ -555,3 +688,5 @@ class TabbedDrivenSourceEditor(_TabbedSourceEditorBase):
     _add_button_key   = "btn_add_driven"
     _empty_hint_key   = "driven_source_list_empty_hint"
     _batch_checkbox_key = "batch_all_driven_tabs"
+    _add_help_key     = "source_tab_add_driven"
+    _batch_help_key   = "source_tab_batch_driven"

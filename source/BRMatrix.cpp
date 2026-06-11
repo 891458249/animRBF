@@ -16,6 +16,11 @@ BRMatrix::BRMatrix()
     mat.resize(0);
     rows = 0;
     cols = 0;
+    // M_P0_RBF_ANTI_OVERSHOOT Part C.4: default singular threshold
+    // matches the legacy hardcoded fabs(pivot) < 0.0001 -- existing
+    // call sites that never call setSingularThreshold see no
+    // behaviour change.
+    singularThreshold = 0.0001;
 }
 
 
@@ -24,6 +29,22 @@ BRMatrix::BRMatrix(const BRMatrix &inMat)
     mat = inMat.mat;
     rows = inMat.getRowSize();
     cols = inMat.getColSize();
+    singularThreshold = inMat.singularThreshold;
+}
+
+
+void BRMatrix::setSingularThreshold(double threshold)
+{
+    // M_P0_RBF_ANTI_OVERSHOOT Part C.4: floor at 1e-12 so callers
+    // cannot accidentally disable the singularity check with a
+    // negative or zero value (every pivot is >= 0 in magnitude).
+    singularThreshold = (threshold > 1e-12) ? threshold : 1e-12;
+}
+
+
+double BRMatrix::getSingularThreshold() const
+{
+    return singularThreshold;
 }
 
 
@@ -327,7 +348,12 @@ bool BRMatrix::solve(std::vector<double> y, double w[], int &singularIndex)
         }
 
         // Check if the matrix is singular.
-        if (fabs(this->mat[i][i]) < 0.0001)
+        // M_P0_RBF_ANTI_OVERSHOOT Part C.4 (2026-05-17): threshold
+        // is now configurable via setSingularThreshold(). Default
+        // remains 1e-4 (set in the constructor) so legacy callers
+        // observe identical behaviour; RBFtools::compute() now
+        // auto-tunes based on lambda before invoking solve().
+        if (fabs(this->mat[i][i]) < this->singularThreshold)
         {
             singularIndex = int(i);
             return false;

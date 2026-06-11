@@ -265,6 +265,8 @@ class TestM_DRIVEN_MULTI_ControllerSignals(unittest.TestCase):
         ctrl = MainController.__new__(MainController)
         ctrl._current_node = "RBF1"
         ctrl.drivenSourcesChanged = mock.MagicMock()
+        # M_P0_TAB_REMOVE_SPARSE_FIX passthrough.
+        ctrl._list_idx_to_sparse = lambda role, idx: int(idx)
         return ctrl
 
     def test_add_emits(self):

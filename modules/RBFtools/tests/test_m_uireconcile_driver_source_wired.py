@@ -208,6 +208,9 @@ class TestM_UIRECONCILE_ControllerSignalEmits(unittest.TestCase):
         ctrl = MainController.__new__(MainController)
         ctrl._current_node = "RBF1"
         ctrl.driverSourcesChanged = mock.MagicMock()
+        # M_P0_TAB_REMOVE_SPARSE_FIX passthrough — pre-existing tests
+        # assume dense-equals-sparse; identity stub keeps them green.
+        ctrl._list_idx_to_sparse = lambda role, idx: int(idx)
         return ctrl
 
     def test_add_driver_source_emits_signal(self):

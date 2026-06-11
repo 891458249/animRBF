@@ -4111,7 +4111,76 @@ in M4.1（处理 pre-M_B24 节点同时承受 driver schema + solverType schema
 | **B1** | 六类 Solver | ❌ 致命 | **❌ 仅 RBF + Vector-Angle 二类** (`type` + `rbfMode` 双 enum 切 2 路径) | —— | **M4** (a/b/c/d) |
 | **B2** | 多源驱动异构 | ⚠️ 高 | **✅ complete (Generic + Matrix + UI + downstream + Generic-mode multi-source mirror)** *(Matrix-mode multi-source mirror DEFERRED to M_B24c2)* | M_B24a1 `d73d6b9` + a2-1 `a43f0de` + a2-2 `1719056` + b1 `2da2059` + b2 `000d127` + d `62fa87c` + d_matrix_followup `c7fd289` + c (this commit, Generic-mode multi-source mirror) | M_B24 (a1+a2+b+d+d_matrix_followup+c) |
 | B3 | 输入编码枚举 5 档 | ❌ 致命 | **✅ 完整** | M2.1a (`8541d4d`-pre) / M2.1b | 已完成 |
-| **B4** | 输入 Quat / 输出 Euler 分离 | ❌ 高 | **✅ complete (full)** | M_B24a1 `d73d6b9` (schema) + a2-2 `1719056` (JSON versioned) + b1 `2da2059` (UI combo) + b2 (this commit, T_V5_PARITY_B4_LIVE #30) | M_B24 (a1+a2-2+b1+b2) |
+| **B4** | 输入 Quat / 输出 Euler 分离 | ❌ 高 | **✅ complete** (Quat + ExpMap; BendRoll / SwingTwist not registered on output side -- inputEncoding-only) | M_B24a1 `d73d6b9` (schema) + a2-2 `1719056` (JSON versioned) + b1 `2da2059` (UI combo) + b2 `000d127` (T_V5_PARITY_B4_LIVE #30) + M_P0_QUATERNION_BACKEND_LAND (Quat + ExpMap inverse transform) + M_P0_OUTPUT_EXPMAP_FIX (dispatch numbering + dead-warning + UI honest disclosure) | M_B24 + M_P0_QUATERNION_BACKEND_LAND + M_P0_OUTPUT_EXPMAP_FIX |
+
+> **Audit history (B4)**:
+>
+> 1. `M_B24b2` (2026-04-26) marked B4 "✅ complete (full)" but only
+>    landed schema + UI + JSON; the C++ inverse transform was never
+>    implemented. The consumption path at `RBFtools.cpp:4063-4071`
+>    was a `thread_local` sink placeholder with no math.
+> 2. `M_P0_QUATERNION_HONEST_DISCLOSURE` (2026-05-10) downgraded
+>    the row to ⚠️ partial, disabled the per-source UI combo (which
+>    was a silent no-op because compute() reads node-level
+>    `inputEncoding` only), and rewrote the tooltip to flag
+>    Quat / ExpMap as forward-compat.
+> 4. `M_P0_OUTPUT_EXPMAP_FIX` (2026-05-10, *follow-up to ce136dd*)
+>    found two paired bugs that ce136dd had silently shipped:
+>    - **Bug 1 (numbering)** -- the
+>      `applyOutputEncodingBlend` dispatch was written as
+>      `if (outputEncoding != 1 && outputEncoding != 3) return;`,
+>      borrowing inputEncoding's `ExpMap=3` enum value. But the
+>      outputEncoding schema (`cpp:295-298`) registers only
+>      `{0=Euler, 1=Quaternion, 2=ExpMap}` -- three slots only.
+>      Selecting ExpMap in the UI sent value=2 to the dispatch,
+>      hit the early return, and silently degenerated to the
+>      legacy Raw weighted-sum path -- exactly the "no effect"
+>      symptom the disclosure phase had warned about. Renumbered
+>      the dispatch + the `else if` branch to schema-correct
+>      `{1, 2}`.
+>    - **Bug 2 (dead BendRoll/SwingTwist warning)** -- ce136dd
+>      guarded a once-per-rig `cmds.warning` proudly naming
+>      "outputEncoding=BendRoll(2)/SwingTwist(4)" behind
+>      `outputEncodingDeferredWarningIssued`. Both flag and warning
+>      text were unreachable -- outputEncoding's enum has no
+>      BendRoll or SwingTwist slot. Removed the dead branch + the
+>      flag declaration + the ctor initialisation.
+>    - **Bug 3 (UI honest disclosure for distanceType=Angle)** --
+>      `getPoseDelta` (`cpp:3084-3088`) only routes through the
+>      Angle path when `encoding == 0` (Raw) and `n == 3`; every
+>      non-Raw inputEncoding (Quaternion / BendRoll / ExpMap /
+>      SwingTwist) uses a per-block distance function with a
+>      hard-coded Euclidean-style metric, so picking
+>      `distanceType=Angle` while encoded silently has no effect.
+>      The Angle item in the distanceType combo is now disabled
+>      when the user picks any non-Raw encoding (and snaps back to
+>      Euclidean if Angle was the previous selection). Pattern
+>      mirrors the per-source `driverSource_encoding` combo that
+>      `M_P0_QUATERNION_HONEST_DISCLOSURE` disabled.
+>
+>    Net effect of M_P0_OUTPUT_EXPMAP_FIX: outputEncoding=ExpMap
+>    actually takes effect; the Script Editor no longer sees a
+>    schema-contradicting deferred-warning; and the distance-type
+>    UI honestly discloses the Raw-only constraint instead of
+>    silently dropping the user's setting.
+>
+> 3. `M_P0_QUATERNION_BACKEND_LAND` (2026-05-10) lands
+>    the Quat / ExpMap halves of the inverse transform:
+>    `decodeQuaternionToEuler` (via `MEulerRotation::reorderIt`),
+>    `decodeExpMapToEuler` (Taylor branch at θ → 0), and
+>    `nlerpQuaternions` with antipodal short-arc correction. The
+>    dispatch lives in `compute()` immediately after
+>    `getPoseWeights` so per-pose phi values can be re-collected via
+>    `computePerPosePhi` before the per-channel weighted sum is
+>    final. BendRoll (2) / SwingTwist (4) remain deferred to v5.x
+>    post-final — each requires bespoke decomposition + composition
+>    math distinct from the Quat / ExpMap pair, and the once-per-rig
+>    warning at the dispatch site tells users which encodings are
+>    not yet supported. Per-driven-source rotateOrder schema
+>    (`drivenInputRotateOrder`) does not yet exist; the dispatch
+>    uses XYZ as the node-level default and is forward-compat for
+>    a future schema extension.
+>
 | B5 | Driver Clamp | ❌ 致命 | **✅ 完整** (`clampEnabled` + `clampInflation` + `poseMinVec/MaxVec`) | M1.3 | 已完成 |
 | B6 | Output Base Value + Scale | ❌ 致命 | **✅ 完整** (`baseValue[]` + `outputIsScale[]`) | M1.2 | 已完成 |
 | **B7** | 按补助骨拆分工具 | ❌ 中 | **⚠️ 仅 `core_profile.py:358` split 建议字符串; ❌ 无实际拆分** | (M3.5 part) | **M_B7** |

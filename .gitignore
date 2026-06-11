@@ -40,6 +40,7 @@ incrementalSave/
 source/build/
 build/
 dist/
+installer/
 *.o
 *.obj
 *.pdb
@@ -55,6 +56,12 @@ Makefile
 # NOTE: Compiled Maya plug-ins (.mll/.so/.bundle) under modules/RBFtools/plug-ins/
 # are INTENTIONALLY tracked — this repo distributes built binaries.
 # Do not add *.mll / *.so / *.bundle / *.dylib / *.dll to ignore list.
+
+# ---------- PyInstaller (M_P0_INSTALLER_EXE_GUI) ----------
+# dist/ and build/ are already covered above. The .spec file is
+# source-tracked (build_installer.spec); a *.spec~ backup must
+# not enter history.
+*.spec~
 
 # ---------- IDE / Editors ----------
 .vscode/

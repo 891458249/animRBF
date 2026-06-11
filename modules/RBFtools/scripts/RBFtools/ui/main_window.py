@@ -62,7 +62,7 @@ from RBFtools.ui.widgets.vector_angle_section import VectorAngleSection
 from RBFtools.ui.widgets.rbf_section import RBFSection
 from RBFtools.ui.widgets.collapsible import CollapsibleFrame
 from RBFtools.ui.widgets.attribute_list import AttributeList
-from RBFtools.ui.widgets.help_button import HelpButton
+from RBFtools.ui.widgets.help_button import HelpButton, ComboHelpButton
 
 
 # =====================================================================
@@ -91,12 +91,27 @@ class _PoseEditorPanel(CollapsibleFrame):
     # more flat_attr_idx). poseRadiusChanged + BasePose triplet
     # added for the M_PER_POSE_SIGMA + M_BASE_POSE wires.
     poseRecallRequested      = QtCore.Signal(int)
+    # M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): per-row Update button
+    # forwards through the panel as a distinct channel — pre-fix
+    # the click was misrouted through poseRecallRequested.
+    poseUpdateRequested      = QtCore.Signal(int)
     poseDeleteRequested      = QtCore.Signal(int)
     poseDeleteAllRequested   = QtCore.Signal()
     poseValueChangedV2       = QtCore.Signal(int, str, int, str, float)
     poseRadiusChanged        = QtCore.Signal(int, float)
     baseValueChangedV2       = QtCore.Signal(int, str, int, str, float)
     basePoseRecallRequested  = QtCore.Signal()
+    # M_P0_POSE_DITHER_AND_UPDATE_FIX Phase 14 -- panel-level re-emits
+    # from PoseGridEditor for the dither + global-radius buttons.
+    ditherDriversRequested   = QtCore.Signal()
+    ditherDrivensRequested   = QtCore.Signal()
+    globalRadiusRequested    = QtCore.Signal(float)
+    # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- panel-
+    # level re-emits from PoseGridEditor for the per-row Parent combo
+    # + Driver Mask popup. RBFToolsWindow connects pe.poseParentChanged
+    # / pe.poseDriverMaskChanged to its controller-writer handlers.
+    poseParentChanged        = QtCore.Signal(int, int)        # row, parent
+    poseDriverMaskChanged    = QtCore.Signal(int, list)       # row, mask
 
     def __init__(self, parent=None):
         super(_PoseEditorPanel, self).__init__(
@@ -120,6 +135,13 @@ class _PoseEditorPanel(CollapsibleFrame):
         # the pose table + the Add/Apply/Connect/Disconnect/Reload
         # action buttons.
         self._outer_tabs = QtWidgets.QTabWidget()
+        # M_HELPBUBBLE_BATCH: top-right corner HelpButton describing
+        # the three outer tabs together (DriverDriven / BaseDrivenPose
+        # / Pose). One bubble covers the navigation overview; the
+        # per-button HelpButtons inside each tab cover the widgets.
+        self._outer_tabs.setCornerWidget(
+            HelpButton("outer_tabs_overview"),
+            QtCore.Qt.TopRightCorner)
         lay.addWidget(self._outer_tabs, 1)
 
         # ---- Tab 1: DriverDriven ---------------------------------
@@ -229,12 +251,34 @@ class _PoseEditorPanel(CollapsibleFrame):
             self._on_grid_delete_all_poses)
         self._pose_grid.poseRecallRequested.connect(
             self._on_grid_recall_pose)
+        self._pose_grid.poseUpdateRequested.connect(
+            self._on_grid_update_pose)
         self._pose_grid.poseDeleteRequested.connect(
             self._on_grid_delete_pose)
         self._pose_grid.poseValueChangedV2.connect(
             self._on_grid_pose_value_changed_v2)
         self._pose_grid.poseRadiusChanged.connect(
             self.poseRadiusChanged)
+        # M_P0_POSE_DITHER_AND_UPDATE_FIX Phase 14: re-emit dither
+        # + global-radius signals at the panel level.
+        self._pose_grid.ditherDriversRequested.connect(
+            self.ditherDriversRequested)
+        self._pose_grid.ditherDrivensRequested.connect(
+            self.ditherDrivensRequested)
+        self._pose_grid.globalRadiusRequested.connect(
+            self.globalRadiusRequested)
+        # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
+        # per-row hierarchy editor signals forwarded panel-level
+        # (mirrors dither/globalRadius pattern at lines 258-263).
+        # RBFToolsWindow wires pe.poseParentChanged + pe.poseDriverMask
+        # Changed to the controller writers landed in commit 6
+        # (8a8d32b). Hot-fix 2026-05-18: previous code connected to a
+        # non-existent _PoseEditorPanel._on_pose_grid_parent_changed
+        # which crashed plugin open with AttributeError.
+        self._pose_grid.poseParentChanged.connect(
+            self.poseParentChanged)
+        self._pose_grid.poseDriverMaskChanged.connect(
+            self.poseDriverMaskChanged)
 
         # Commit 3 (M_BASE_POSE): BaseDrivenPose tab. Inserted at
         # index 1 BETWEEN DriverDriven (0) and Pose (2) per the user's
@@ -264,6 +308,13 @@ class _PoseEditorPanel(CollapsibleFrame):
 
     def _on_grid_recall_pose(self, pose_index):
         self.poseRecallRequested.emit(int(pose_index))
+
+    def _on_grid_update_pose(self, pose_index):
+        # M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): re-emit the
+        # per-row Update button click at the panel level so
+        # main_window can dispatch ctrl.update_pose. Distinct
+        # channel from poseRecallRequested.
+        self.poseUpdateRequested.emit(int(pose_index))
 
     def _on_grid_delete_pose(self, pose_index):
         self.poseDeleteRequested.emit(int(pose_index))
@@ -669,6 +720,22 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         _oe_row = QtWidgets.QHBoxLayout()
         _oe_row.addWidget(QtWidgets.QLabel(tr("output_encoding_label")))
         _oe_row.addWidget(self._output_encoding_combo, 1)
+        # M_P1_ENC_COMBO_FIX (2026-04-29): per-encoding ComboHelpButton
+        # so the bubble describes ONLY the currently-selected output
+        # encoding (Euler / Quaternion / ExpMap) instead of the merged
+        # 3-section blob. Mirrors the input-encoding combo paradigm
+        # (rbf_section.py:237 + M_HELPTEXT_ENC_PER_KEY). The plain
+        # HelpButton("output_encoding") added in M_HELPBUBBLE_BATCH
+        # (enc-2 / 6528211) is replaced because the ComboHelpButton
+        # constructor must receive the combo directly to subscribe
+        # to its currentIndexChanged + highlighted signals — this is
+        # only reachable as a sibling widget in the parent layout.
+        _oe_row.addWidget(ComboHelpButton(
+            self._output_encoding_combo, [
+                "output_enc_euler",
+                "output_enc_quaternion",
+                "output_enc_expmap",
+            ], fallback_key="output_encoding"))
         self._output_encoding_section.add_layout(_oe_row)
 
         # Phase 3 (Utility section 2026-04-27): below the pose
@@ -677,12 +744,20 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # Connectionless Input/Output, Remove Redundant Pose).
         self._utility_section = CollapsibleFrame(
             tr("section_utility"), collapsed=True)
+        # M_HELPBUBBLE_BATCH: HelpButton next to Split RBFSolver.
+        _split_row = QtWidgets.QHBoxLayout()
         self._btn_split_solver = QtWidgets.QPushButton(
             tr("btn_split_solver_per_joint"))
         self._btn_split_solver.setToolTip(
             tr("btn_split_solver_per_joint_tip"))
-        self._utility_section.add_widget(self._btn_split_solver)
+        _split_row.addWidget(self._btn_split_solver, 1)
+        _split_row.addWidget(HelpButton("btn_split_solver_per_joint"))
+        self._utility_section.add_layout(_split_row)
         # Cleanup mode radio group + execute button.
+        # M_HELPBUBBLE_BATCH: ONE HelpButton at the end of the radio
+        # row covers all 3 cleanup modes + the Run button (the
+        # bubble walks through input / output / redundant-pose
+        # semantics together — they share the same execute path).
         cleanup_row = QtWidgets.QHBoxLayout()
         self._rb_cleanup_in = QtWidgets.QRadioButton(
             tr("rb_remove_connectionless_input"))
@@ -698,10 +773,14 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         cleanup_row.addWidget(self._rb_cleanup_in)
         cleanup_row.addWidget(self._rb_cleanup_out)
         cleanup_row.addWidget(self._rb_cleanup_pose)
+        cleanup_row.addWidget(HelpButton("cleanup_modes_overview"))
         self._utility_section.add_layout(cleanup_row)
+        _run_row = QtWidgets.QHBoxLayout()
         self._btn_run_cleanup = QtWidgets.QPushButton(
             tr("btn_remove_unnecessary_datas"))
-        self._utility_section.add_widget(self._btn_run_cleanup)
+        _run_row.addWidget(self._btn_run_cleanup, 1)
+        _run_row.addWidget(HelpButton("btn_remove_unnecessary_datas"))
+        self._utility_section.add_layout(_run_row)
 
         self._sections.addWidget(self._general)
         self._sections.addWidget(self._va_section)
@@ -757,6 +836,14 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self.add_file_action(
             "menu_export_selected", self._on_export_selected)
         self.add_file_action("menu_export_all", self._on_export_all)
+        # ---- M_P0_POSES_IO (2026-05-10): focused poses-only I/O ----
+        # Separate from the full-node export/import so the test-
+        # iteration workflow ("save just my pose set, reload later
+        # into the same rig") doesn't churn through the full schema.
+        self.add_file_action("menu_export_poses",
+                              self._on_export_poses)
+        self.add_file_action("menu_import_poses",
+                              self._on_import_poses)
 
         # ---- M3.6: Add Neutral Sample entry ----
         self.add_tools_action(
@@ -1013,6 +1100,109 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             return
         self._ctrl.export_current_to_path(paths[0])
 
+    def _on_export_poses(self):
+        """File -> Export Poses Only... (M_P0_POSES_IO)
+
+        M_P0_POSES_IO_DIALOG_CTD_FIX2 (2026-05-11): the previous
+        fix used cmds.evalDeferred(callable, lowestPriority=True)
+        but `lowestPriority` is NOT a valid kwarg (it's
+        `lowPriority`), AND cmds.evalDeferred with a Python
+        callable on Maya 2025 can drop the callable silently or
+        execute it in a wrong context. The user reports the export
+        still crashes Maya on "Save" click.
+
+        Hardened fix:
+          1. Use ``maya.utils.executeDeferred`` (the documented
+             Python-callable deferral API) instead of evalDeferred.
+          2. Add ``dialogStyle=2`` to fileDialog2 → OS-native
+             dialog on Windows, more stable than the in-app one.
+          3. Print explicit step markers so the user can see in
+             Script Editor exactly where Maya dies if it still
+             crashes.
+        """
+        from maya import cmds as _cmds
+        from maya import utils as _mutils
+        if not self._ctrl.current_node:
+            _cmds.warning(tr("msg_export_poses_no_node"))
+            return
+        print("[RBFtools] export_poses: opening fileDialog2...")
+        try:
+            paths = _cmds.fileDialog2(
+                fileMode=0,
+                fileFilter="JSON (*.json)",
+                dialogStyle=2,
+                caption=tr("menu_export_poses"))
+        except Exception as exc:
+            _cmds.warning("export_poses: fileDialog2 failed: {}".format(exc))
+            paths = None
+        if not paths:
+            print("[RBFtools] export_poses: cancelled (no path).")
+            return
+        out_path = paths[0]
+        print("[RBFtools] export_poses: chose path = {!r}".format(out_path))
+        # Defer the controller call via maya.utils.executeDeferred so
+        # the fileDialog2 native window has fully torn down before we
+        # touch any Maya cmds. This is the documented stable Python-
+        # callable deferral API; cmds.evalDeferred with a callable
+        # was the previous attempt and proved unreliable on 2025.
+        _mutils.executeDeferred(
+            lambda p=out_path, ctrl=self._ctrl: ctrl.export_poses_to_path(p))
+        print("[RBFtools] export_poses: deferred controller call queued.")
+
+    def _on_import_poses(self):
+        """File -> Import Poses Only... (M_P0_POSES_IO)
+
+        M_P0_POSES_IO_DIALOG_CTD_FIX2 (2026-05-11): same upgrade as
+        _on_export_poses — switch to ``maya.utils.executeDeferred``
+        + ``dialogStyle=2`` for the fileDialog2.
+        """
+        from maya import cmds as _cmds
+        from maya import utils as _mutils
+        if not self._ctrl.current_node:
+            _cmds.warning(tr("msg_import_poses_no_node"))
+            return
+        print("[RBFtools] import_poses: opening fileDialog2...")
+        try:
+            paths = _cmds.fileDialog2(
+                fileMode=1,
+                fileFilter="JSON (*.json)",
+                dialogStyle=2,
+                caption=tr("menu_import_poses"))
+        except Exception as exc:
+            _cmds.warning("import_poses: fileDialog2 failed: {}".format(exc))
+            paths = None
+        if not paths:
+            print("[RBFtools] import_poses: cancelled (no path).")
+            return
+        path = paths[0]
+        print("[RBFtools] import_poses: chose path = {!r}".format(path))
+
+        # Defer the REPLACE/APPEND picker + controller call so the
+        # fileDialog2 native window has time to fully tear down.
+        def _do_import_with_choice(ctrl=self._ctrl):
+            try:
+                choice = _cmds.confirmDialog(
+                    title=tr("title_import_poses_mode"),
+                    message=tr("msg_import_poses_mode"),
+                    button=[tr("btn_replace"), tr("btn_append"),
+                             tr("btn_cancel")],
+                    defaultButton=tr("btn_replace"),
+                    cancelButton=tr("btn_cancel"),
+                    dismissString=tr("btn_cancel"))
+            except Exception as exc:
+                _cmds.warning(
+                    "import_poses: confirmDialog failed: {}".format(exc))
+                choice = tr("btn_replace")
+            if choice == tr("btn_cancel"):
+                print("[RBFtools] import_poses: user cancelled mode picker.")
+                return
+            mode = "append" if choice == tr("btn_append") else "replace"
+            print("[RBFtools] import_poses: mode = {!r}".format(mode))
+            ctrl.import_poses_from_path(path, mode=mode)
+            print("[RBFtools] import_poses: controller call returned.")
+
+        _mutils.executeDeferred(_do_import_with_choice)
+
     def _on_export_all(self):
         """File -> Export All RBF..."""
         from maya import cmds as _cmds
@@ -1119,6 +1309,20 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._rbf_section.kernelChanged.connect(ctrl.on_kernel_changed)
         self._rbf_section.radiusTypeChanged.connect(ctrl.on_radius_type_changed)
         self._rbf_section.radiusEdited.connect(ctrl.on_radius_edited)
+        # M_ENC_AUTOPIPE: post-write side-effect — auto-derive
+        # driverInputRotateOrder[] from connected drivers when the
+        # user picks BendRoll / ExpMap / SwingTwist.
+        self._rbf_section.inputEncodingChanged.connect(
+            ctrl.on_input_encoding_changed)
+        # M_P1_ENC_COMBO_FIX: narrow rotate-order-editor reload that
+        # replaces the prior _load_settings cascade. The controller
+        # emits this signal AFTER auto_resolve_generic_rotate_orders
+        # with the freshly read values; the rbf_section repopulates
+        # only the OrderedEnumListEditor — combos and other M2.x
+        # widgets stay untouched, eliminating the inputEncoding
+        # combo bounce-back regression.
+        ctrl.rotateOrderEditorReload.connect(
+            self._rbf_section.set_rotate_order_values)
 
         # ---- Pose editor panel → handlers ----
         pe = self._pose_editor
@@ -1132,6 +1336,11 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         pe.autoFillChanged.connect(ctrl.set_auto_fill)
         # Phase 2 PoseGridEditor signals.
         pe.poseRecallRequested.connect(self._on_pose_grid_recall)
+        # M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): per-row Update
+        # button click -> ctrl.update_pose (snapshot viewport ->
+        # pose model). Distinct from poseRecallRequested
+        # (Go-to-Pose; pose -> viewport).
+        pe.poseUpdateRequested.connect(self._on_pose_grid_update)
         pe.poseDeleteRequested.connect(self._on_pose_grid_delete)
         pe.poseDeleteAllRequested.connect(
             self._on_pose_grid_delete_all)
@@ -1146,6 +1355,17 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._on_base_pose_value_changed)
         pe.basePoseRecallRequested.connect(
             self._on_base_pose_recall)
+        # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- per-
+        # row hierarchy editor signals from the panel routed to local
+        # controller-writer handlers defined below (line ~1995/2007).
+        pe.poseParentChanged.connect(
+            self._on_pose_grid_parent_changed)
+        pe.poseDriverMaskChanged.connect(
+            self._on_pose_grid_driver_mask_changed)
+        # M_P0_POSE_DITHER_AND_UPDATE_FIX Phase 14 -- dither + radius.
+        pe.ditherDriversRequested.connect(self._on_dither_drivers)
+        pe.ditherDrivensRequested.connect(self._on_dither_drivens)
+        pe.globalRadiusRequested.connect(self._on_global_radius)
 
         # Row context-menu callback
         pe._row_action_callback = self._on_pose_row_action
@@ -1268,7 +1488,46 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._ctrl.delete_node()
 
     def _on_nodes_refreshed(self, names):
+        """M_P0_REFRESH_KEEPS_CURRENT (2026-04-30): the upstream
+        ``set_nodes`` rebuilds the combo from scratch (clear + re-
+        addItem with ``<None>`` at index 0), defaulting
+        ``currentIndex`` to 0. Without the restore call below, the
+        UI display drifts away from the controller's authoritative
+        ``_current_node`` and the user sees the combo blank-out on
+        every Refresh click — every downstream operation that
+        consults ``node_selector.current_node()`` then misreads
+        the active node as "none".
+
+        Idempotent fail-soft: if the saved node name is no longer
+        in the rebuilt list (e.g. the user deleted the node in the
+        outliner before clicking Refresh), ``set_current_node``'s
+        ``findText`` returns -1 and the call is a no-op. The combo
+        falls back to ``<None>`` cleanly without touching the
+        controller's ``_current_node`` — the controller only
+        learns about the deletion through the next user-initiated
+        node action.
+
+        Signal suppression: ``set_current_node`` calls
+        ``setCurrentIndex`` under the hood which would fire
+        ``currentTextChanged -> ctrl.on_node_changed`` with a name
+        that already equals ``ctrl._current_node`` — a spurious
+        trigger that re-runs ``_load_settings + _load_editor``
+        unnecessarily on every Refresh click. Wrapping the restore
+        in ``_combo.blockSignals`` suppresses the redundant cascade
+        without touching ``node_selector.py`` (the private access
+        is the pragmatic carve-out — adding a ``set_current_node_
+        silent`` public helper would be a wider API change).
+        """
         self._node_sel.set_nodes(names)
+        # Pragmatic private-member access (carve-out): keep
+        # node_selector.py untouched while still suppressing the
+        # currentTextChanged side-effect of the restore call.
+        combo = self._node_sel._combo
+        blocked = combo.blockSignals(True)
+        try:
+            self._node_sel.set_current_node(self._ctrl.current_node)
+        finally:
+            combo.blockSignals(blocked)
 
     # =================================================================
     #  Settings load
@@ -1284,6 +1543,19 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         for w in (self._general, self._va_section, self._rbf_section):
             w.blockSignals(False)
         self._update_type_visibility(self._general.current_type())
+        # M_P0_RBF_MODE_UI_RESYNC (2026-05-10): authoritative resync
+        # of the rbfMode Generic / Matrix frame visibility from the
+        # node-attr value carried in *data*. Defends against UI drift
+        # when blockSignals suppresses the combo currentIndexChanged
+        # cascade that would normally drive _update_mode_visibility
+        # — observed repro: after Apply, _rbf_section visually showed
+        # "矩阵 RBF" while shape.rbfMode was 0, and driver→driven
+        # debugging was misdirected to a non-existent rbfMode flip.
+        # The combo + frame now track shape.rbfMode as single source
+        # of truth.
+        if data is not None:
+            self._rbf_section.force_mode_visibility(
+                int(data.get("rbfMode", 0)))
 
     # =================================================================
     #  Type toggle (VA vs RBF visibility)
@@ -1555,10 +1827,117 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         self._ctrl.recall_pose(
             int(pose_index), drv_node, dvn_node, drv_attrs, dvn_attrs)
 
+    def _on_pose_grid_update(self, pose_index):
+        """M_P0_UPDATE_BUTTON_REVERSED (2026-04-30): per-row Update
+        button click -> ctrl.update_pose (re-capture current
+        viewport driver/driven values into the existing pose row).
+
+        Sibling to :meth:`_on_pose_grid_recall` (the inverse
+        Go-to-Pose path). Pre-fix the per-row Update button was
+        misrouted through poseRecallRequested + this same slot's
+        recall sibling, making the button literally function as a
+        second "Go to Pose" instead of as an Update.
+
+        Pose-index passes straight through to ctrl.update_pose's
+        ``row`` arg — the pose model's row order matches the
+        packed pose_index since :func:`apply_poses` writes
+        sequential indices."""
+        drv_node, dvn_node, drv_attrs, dvn_attrs = (
+            self._gather_role_info())
+        self._ctrl.update_pose(
+            int(pose_index), drv_node, dvn_node, drv_attrs, dvn_attrs)
+        # M_P0_POSE_DITHER_AND_UPDATE_FIX Part C (2026-05-12) -- the
+        # pose_model's dataChanged signal does not propagate into the
+        # PoseGridEditor custom widget tree, so a manual refresh is
+        # required for the updated values to display immediately.
+        # Mirrors the _on_pose_grid_delete pattern below.
+        self._refresh_pose_grid()
+
     def _on_pose_grid_delete(self, pose_index):
         """Phase 2: PoseGridEditor row delete (right-click menu)."""
         self._ctrl.delete_pose(int(pose_index))
         self._refresh_pose_grid()
+
+    # --- M_P0_POSE_DITHER_AND_UPDATE_FIX Phase 14 handlers ----------
+
+    def _on_dither_drivers(self):
+        """Part A handler: dispatch to controller.dither_driver_poses
+        and surface the perturbed-count feedback dialog. Refresh the
+        pose grid so the user sees the new (slightly perturbed)
+        values immediately."""
+        n = self._ctrl.dither_driver_poses(magnitude=0.005)
+        msg_key = ("dither_driver_done" if n > 0
+                   else "dither_driver_no_cluster")
+        try:
+            cmds.confirmDialog(
+                title="RBFtools",
+                message=tr(msg_key).format(n) if n > 0 else tr(msg_key),
+                button=["OK"], defaultButton="OK")
+        except Exception:
+            cmds.warning(
+                tr(msg_key).format(n) if n > 0 else tr(msg_key))
+        self._refresh_pose_grid()
+
+    def _on_dither_drivens(self):
+        """Part B handler: surface the warning dialog FIRST because
+        driven-side dither degrades training accuracy. Proceed only
+        when the user confirms."""
+        try:
+            confirm_label = tr("confirm_dither_driven_label")
+            cancel_label = tr("cancel_dither_driven_label")
+            result = cmds.confirmDialog(
+                title=tr("title_dither_driven_warning"),
+                message=tr("msg_dither_driven_warning"),
+                button=[confirm_label, cancel_label],
+                defaultButton=cancel_label,
+                cancelButton=cancel_label,
+                dismissString=cancel_label)
+            if result != confirm_label:
+                return
+        except Exception as exc:
+            cmds.warning(
+                "_on_dither_drivens: confirm dialog failed: "
+                "{} (aborting for safety)".format(exc))
+            return
+        n = self._ctrl.dither_driven_poses(magnitude=0.005)
+        msg_key = ("dither_driven_done" if n > 0
+                   else "dither_driven_no_cluster")
+        try:
+            cmds.confirmDialog(
+                title="RBFtools",
+                message=tr(msg_key).format(n) if n > 0 else tr(msg_key),
+                button=["OK"], defaultButton="OK")
+        except Exception:
+            cmds.warning(
+                tr(msg_key).format(n) if n > 0 else tr(msg_key))
+        self._refresh_pose_grid()
+
+    def _on_global_radius(self, radius):
+        """Part C-bis handler: bulk-apply spinbox value across every
+        pose. Refresh the grid so the radius column updates, then
+        surface a confirmation dialog with the actual write count."""
+        try:
+            r = float(radius)
+        except (TypeError, ValueError):
+            r = 5.0
+        n = self._ctrl.set_all_poses_radius(r)
+        self._refresh_pose_grid()
+        # Resolve the effective radius (controller clamps <=0 to
+        # DEFAULT_POSE_RADIUS); mirror that here for the user-
+        # visible message so the dialog text matches the kernel.
+        from RBFtools import core as _core_mod
+        effective_radius = (
+            r if r > 0.0 else _core_mod.DEFAULT_POSE_RADIUS)
+        try:
+            cmds.confirmDialog(
+                title="RBFtools",
+                message=tr("global_radius_done").format(
+                    n, effective_radius),
+                button=["OK"], defaultButton="OK")
+        except Exception:
+            cmds.warning(
+                tr("global_radius_done").format(
+                    n, effective_radius))
 
     def _on_pose_grid_delete_all(self):
         """Phase 2: PoseGridEditor 'Delete Poses' button - clears
@@ -1628,6 +2007,29 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         the loop with the C++ Commit 0/0b vectorised σ math."""
         try:
             self._ctrl.set_pose_radius(int(pose_idx), float(new_radius))
+        except (AttributeError, Exception):
+            pass
+
+    def _on_pose_grid_parent_changed(self, pose_idx, parent_idx):
+        """M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
+        per-row Parent QComboBox change. Writes shape.poseParentIndex
+        [row] via the controller; the plugin's prev-state cache
+        compare (commit 2 56bd96b) trips evalInput=true on the next
+        compute, retraining baseNet / deltaNets."""
+        try:
+            self._ctrl.set_pose_parent_index(
+                int(pose_idx), int(parent_idx))
+        except (AttributeError, Exception):
+            pass
+
+    def _on_pose_grid_driver_mask_changed(self, pose_idx, mask):
+        """M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
+        per-row Driver Mask popup change. Writes shape.poseDriverMask
+        [row] via the controller; empty list = "all drivers" (legacy
+        behaviour)."""
+        try:
+            self._ctrl.set_pose_driver_mask(
+                int(pose_idx), list(mask or []))
         except (AttributeError, Exception):
             pass
 
@@ -1737,23 +2139,67 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         return out
 
     def _on_driver_source_attrs_apply(self, index, attrs):
-        """M_CONNECT_DISCONNECT_FIX Bug 1 (2026-04-28): Connect
-        button on a driver tab. Replaces the legacy
-        M_TABBED_CONNECT_GUARD unconditional "already connected
-        -> block" path with the user-spec A.3 / B.1 overlap-aware
-        dispatch:
+        """M_CONNECT_DISCONNECT_FIX Bug 1 (2026-04-28) +
+        M_P0_DRIVER_CONNECT_UX_REVAMP Part C+E (2026-05-12):
+        Connect button on a driver tab.
 
           * empty selection           -> info dialog + abort
-          * any non-empty selection   -> proceed; controller's
-            set_driver_source_attrs handles overlapping (break-then-
-            rebuild via _disconnect_or_purge) AND pure-new (append)
-            uniformly. The plan-dict surfaces overlapping attrs as
-            cmds.warning trace so the TD can see what was reset.
+          * connected + same attrs    -> idempotent skip (Part E.1)
+          * partial state             -> force atomic re-wire to
+                                         recover from broken state
+          * attr count change with
+            subsequent sources        -> Part C confirmation dialog
+          * otherwise                 -> proceed via
+                                         set_driver_source_attrs
         """
         plan = self._guard_attrs_apply(
             "driver", int(index), list(attrs))
         if plan is None:
             return  # blocked: empty selection
+
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part E.1: indicator-guided
+        # idempotent short-circuit. If the tab is fully wired AND
+        # the user's selection matches the existing metadata, the
+        # click is a no-op -- no DG churn, no metadata churn.
+        state = self._ctrl.driver_source_connection_state(int(index))
+        sources = self._ctrl.read_driver_sources()
+        existing_attrs = (
+            list(sources[index].attrs)
+            if 0 <= index < len(sources) else [])
+        new_attrs = list(attrs)
+        if state == "connected" and existing_attrs == new_attrs:
+            try:
+                cmds.warning(
+                    tr("driver_idempotent_skip").format(index))
+            except Exception:
+                pass
+            return
+
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part C: attr count change
+        # confirmation. When the count differs AND there are
+        # downstream sources, surface the re-wiring scope so the
+        # user can cancel before the storm fires.
+        if (0 <= index < len(sources)
+                and len(existing_attrs) != len(new_attrs)
+                and index < len(sources) - 1):
+            n_subsequent = len(sources) - index - 1
+            try:
+                result = QtWidgets.QMessageBox.question(
+                    self,
+                    tr("title_attr_count_change"),
+                    tr("msg_attr_count_change_will_rewire").format(
+                        index, len(existing_attrs),
+                        len(new_attrs), n_subsequent),
+                    QtWidgets.QMessageBox.Yes
+                    | QtWidgets.QMessageBox.No)
+                if result != QtWidgets.QMessageBox.Yes:
+                    return
+            except Exception:
+                # Headless / unavailable QMessageBox: proceed without
+                # blocking (the existing cmds.warning trace still
+                # informs the user).
+                pass
+
         if plan["overlapping"]:
             cmds.warning(
                 "Connect (driver[{}]): overlapping attrs {!r} will "
@@ -1988,9 +2434,23 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         # gone (the legacy AttributeList it warned about no longer
         # exists). The tabbed editor IS the multi-source UI - no
         # additional notice needed.
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part B (2026-05-12): refresh
+        # the per-tab connection indicator dots after every reload
+        # so the dots reflect the post-mutation state.
+        try:
+            self._driver_source_list.refresh_tab_indicators(self._ctrl)
+        except Exception:
+            pass
         # Phase 2: cascade the rebuild into the pose grid so its
         # column structure tracks the new driver source list.
         self._refresh_pose_grid()
+        # M_ROTORDER_UI_REFACTOR (2026-04-29): driver tabs are the
+        # single source of truth for the rotate-order list. Push
+        # the live driver-name list into rbf_section + run a one-
+        # shot self-heal to truncate / pad the persisted multi.
+        self._ctrl._resync_rotate_order_length()
+        self._rbf_section.set_driver_sources_for_rotate_order(
+            [s.node for s in sources])
 
     def _on_filters_changed(self, role, filters):
         """M_TABBED_EDITOR_INTEGRATION: filter UX lived on the
@@ -2022,6 +2482,21 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
         for c in range(model.columnCount()):
             header.setSectionResizeMode(
                 c, QtWidgets.QHeaderView.Stretch)
+        # M_P0_NODE_SWITCH_POSE_GRID (2026-04-30): controller's
+        # _load_editor populates self._ctrl.pose_model from the new
+        # node's poses but the view's PoseGridEditor still needs
+        # an explicit rebuild to repaint rows. Without this call,
+        # switching the active node leaves the pose grid blank
+        # while the underlying model is correct — the user-
+        # reported "切换节点 pose 行不刷新" P0. Empty-node path
+        # (current_node="") is fine: _refresh_pose_grid passes
+        # ([], [], []) through to PoseGridEditor.set_data which
+        # clears the rows cleanly. The driver / driven editor
+        # rebuilds are already wired separately at line 1249 +
+        # 1270 (_reload_driver_sources / _reload_driven_sources);
+        # this completes the third leg of the editorLoaded
+        # cascade.
+        self._refresh_pose_grid()
 
     # =================================================================
     #  Pose CRUD (gather UI state → controller)
@@ -2064,13 +2539,54 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             self._refresh_pose_grid()
 
     def _on_apply(self):
+        """Apply button -- M_P0_DRIVER_CONNECT_UX_REVAMP Part F.4
+        (2026-05-12): dispatch by driverSource topology so multi-
+        driver configurations route through apply_poses_routed (which
+        preserves input[]/output[] wiring) while single-driver legacy
+        rigs keep their bit-identical pre-Phase-13 path.
+
+        Multi-driver detection (any of):
+          * more than one driver source, OR
+          * any driver source with more than one attr, OR
+          * the same conditions on the driven side.
+        """
         self._set_interaction_enabled(False)
         try:
-            drv_node, dvn_node, drv_attrs, dvn_attrs = self._gather_role_info()
-            self._ctrl.apply_poses(
-                drv_node, dvn_node, drv_attrs, dvn_attrs)
+            try:
+                sources_drv = list(self._ctrl.read_driver_sources())
+            except Exception:
+                sources_drv = []
+            try:
+                sources_dvn = list(self._ctrl.read_driven_sources())
+            except Exception:
+                sources_dvn = []
+            is_multi = (
+                len(sources_drv) > 1
+                or any(len(s.attrs) > 1 for s in sources_drv)
+                or len(sources_dvn) > 1
+                or any(len(s.attrs) > 1 for s in sources_dvn))
+            if is_multi:
+                driver_targets = [
+                    (s.node, list(s.attrs)) for s in sources_drv]
+                driven_targets = [
+                    (s.node, list(s.attrs)) for s in sources_dvn]
+                self._ctrl.apply_poses_routed(
+                    driver_targets, driven_targets)
+            else:
+                drv_node, dvn_node, drv_attrs, dvn_attrs = (
+                    self._gather_role_info())
+                self._ctrl.apply_poses(
+                    drv_node, dvn_node, drv_attrs, dvn_attrs)
         finally:
             self._set_interaction_enabled(True)
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part F.4 / Part B: refresh
+        # tab indicators post-Apply so the user sees the green dots
+        # survive the storm (Part F's whole purpose). If Apply
+        # broke wiring this surfaces immediately as yellow / red.
+        try:
+            self._driver_source_list.refresh_tab_indicators(self._ctrl)
+        except Exception:
+            pass
 
     def _gather_routed_targets(self):
         """2026-04-28 (M_BATCH_ROUTING + M_CRASH_FIX defense 1 +
@@ -2095,12 +2611,17 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
             raw_dvn = list(dvn_editor.routed_targets())
         except (AttributeError, Exception):
             raw_dvn = []
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): plain ``(node or "")``
+        # / ``a`` instead of ``str(...)``. Under py2, ``str(u"中文")``
+        # raises UnicodeEncodeError; Maya node names are usually
+        # ASCII but the routing list may carry tr()-translated
+        # placeholders during retranslate.
         driver_targets = [
-            (str(node or ""), [str(a) for a in (attrs or [])])
+            ((node or ""), [a for a in (attrs or [])])
             for node, attrs in raw_drv
         ]
         driven_targets = [
-            (str(node or ""), [str(a) for a in (attrs or [])])
+            ((node or ""), [a for a in (attrs or [])])
             for node, attrs in raw_dvn
         ]
         # M_LIVE_DEBUG: explicit Script-Editor traces so a live
@@ -2111,37 +2632,87 @@ class RBFToolsWindow(QtWidgets.QMainWindow):
 
     def _on_connect(self):
         # M_LIVE_DEBUG (2026-04-28): top-of-slot trace so a live
-        # operator can confirm the new code path is loaded. Goes
-        # to cmds.warning so it appears in Script Editor with the
-        # yellow icon even if 'Print all warnings' is off.
+        # operator can confirm the new code path is loaded.
         try:
             cmds.warning(">>> ON_CONNECT TRIGGERED <<<")
         except Exception:
             print(">>> ON_CONNECT TRIGGERED <<<")
-        # M_CRASH_FIX (2026-04-28) — three-defense protocol:
-        #   1. Pure-string gather BEFORE any cmds.* call. Once
-        #      _gather_routed_targets returns, the UI is no longer
-        #      consulted for the duration of the storm.
-        #   2. core.connect_routed wraps the connectAttr loop in
-        #      _node_state_frozen so partial-wire compute() cannot
-        #      crash the kernel.
-        #   3. _is_updating lock blocks _refresh_pose_grid +
-        #      _refresh_base_pose_panel re-entry from any node-
-        #      change callback that fires mid-storm.
+        # M_CRASH_FIX (2026-04-28) -- three-defense protocol +
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part E.2 (2026-05-12):
+        # indicator-guided per-tab filter applied BEFORE the
+        # connect_routed storm so already-green tabs with the same
+        # attrs are skipped (idempotent batch / pose-panel click).
         # Step 1: pure-string gather.
         driver_targets, driven_targets = (
             self._gather_routed_targets())
+
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part E.2: filter driver
+        # targets whose tab is already fully wired with the same
+        # attrs. Defends against duplicate-wire accumulation when
+        # the user repeats Connect or runs Connect on an already-
+        # consistent rig.
+        try:
+            sources = self._ctrl.read_driver_sources()
+        except Exception:
+            sources = []
+        filtered_drivers = []
+        skipped = []
+        for i, (node, attrs) in enumerate(driver_targets):
+            if i >= len(sources):
+                filtered_drivers.append((node, attrs))
+                continue
+            try:
+                state = self._ctrl.driver_source_connection_state(i)
+            except Exception:
+                state = "disconnected"
+            existing_attrs = list(sources[i].attrs)
+            if state == "connected" and existing_attrs == list(attrs):
+                skipped.append(i)
+                continue
+            filtered_drivers.append((node, attrs))
+        if skipped:
+            try:
+                cmds.warning(
+                    "Connect: {} already-connected driver tab(s) "
+                    "skipped (idempotent): indices {}".format(
+                        len(skipped), skipped))
+            except Exception:
+                pass
+
+        # Part E.2: if EVERY driver tab was filtered AND there are
+        # no driven targets to act on either, surface the dedicated
+        # all-already-connected dialog so the click does not look
+        # like a no-op.
+        if not filtered_drivers and not driven_targets:
+            try:
+                cmds.confirmDialog(
+                    title="RBFtools",
+                    message=tr("connect_all_already_connected"),
+                    button=["OK"], defaultButton="OK")
+            except Exception:
+                try:
+                    cmds.warning(tr("connect_all_already_connected"))
+                except Exception:
+                    pass
+            return
+
         # Step 2: enter critical section.
         self._set_interaction_enabled(False)
         self._is_updating = True
         try:
             self._ctrl.connect_routed(
-                driver_targets, driven_targets)
+                filtered_drivers, driven_targets)
         finally:
             self._is_updating = False
             self._set_interaction_enabled(True)
         # Step 3: ONE consolidated refresh outside the lock.
         self._refresh_pose_grid()
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part B: post-storm
+        # indicator refresh so the dots reflect the new state.
+        try:
+            self._driver_source_list.refresh_tab_indicators(self._ctrl)
+        except Exception:
+            pass
 
     def _on_disconnect(self):
         # M_LIVE_DEBUG: top-of-slot trace. See _on_connect note.

@@ -10,6 +10,9 @@
 #include "RBFtools.h"
 
 #include "math.h"
+#include <algorithm>   // M_P0_RBF_ANTI_OVERSHOOT Part C: std::swap
+#include <cmath>       // M_P0_RBF_ANTI_OVERSHOOT Part C: std::isfinite
+#include <limits>      // M_P0_RBF_ANTI_OVERSHOOT Part A: numeric_limits
 
 #ifdef _WIN64
 #define M_PI 3.1415926535897932384626433832795
@@ -82,6 +85,9 @@ MObject RBFtools::poseValues;
 // math + backcompat contract. Both are top-level multi-double arrays
 // running parallel to poses[] / output[] respectively.
 MObject RBFtools::poseRadius;
+// M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18).
+MObject RBFtools::poseParentIndex;
+MObject RBFtools::poseDriverMask;
 MObject RBFtools::basePoseValue;
 // M2.3: pure-data per-pose local Transform snapshot.
 MObject RBFtools::poseLocalTransform;
@@ -109,6 +115,8 @@ MObject RBFtools::allowNegative;
 MObject RBFtools::baseValue;
 MObject RBFtools::clampEnabled;
 MObject RBFtools::clampInflation;
+MObject RBFtools::outputClampEnabled;
+MObject RBFtools::outputClampInflation;
 MObject RBFtools::outputIsScale;
 MObject RBFtools::regularization;
 MObject RBFtools::solverMethod;
@@ -153,15 +161,106 @@ MObject RBFtools::exposeData;
 // creator
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28) -- so(3) / quaternion
+// helpers for Phase 17b delta blending. Quaternion component order is
+// (x, y, z, w) throughout, matching the QWA output / poseLocalQuat
+// convention (identity = 0,0,0,1).
+// ---------------------------------------------------------------------
+
+namespace {
+
+inline void quatNormalizeXYZW(double q[4])
+{
+    const double n = std::sqrt(q[0]*q[0] + q[1]*q[1]
+                               + q[2]*q[2] + q[3]*q[3]);
+    if (n > 1e-12) {
+        q[0] /= n; q[1] /= n; q[2] /= n; q[3] /= n;
+    } else {
+        q[0] = 0.0; q[1] = 0.0; q[2] = 0.0; q[3] = 1.0;
+    }
+}
+
+// Hamilton product r = a * b (xyzw layout).
+inline void quatMulXYZW(const double a[4], const double b[4],
+                        double r[4])
+{
+    const double ax = a[0], ay = a[1], az = a[2], aw = a[3];
+    const double bx = b[0], by = b[1], bz = b[2], bw = b[3];
+    r[0] = aw*bx + ax*bw + ay*bz - az*by;
+    r[1] = aw*by - ax*bz + ay*bw + az*bx;
+    r[2] = aw*bz + ax*by - ay*bx + az*bw;
+    r[3] = aw*bw - ax*bx - ay*by - az*bz;
+}
+
+// log: unit quaternion -> rotation vector (axis * full angle).
+// Grassia 1998 exponential-map parameterization.
+inline void quatLogSO3(const double q[4], double v[3])
+{
+    double qq[4] = { q[0], q[1], q[2], q[3] };
+    quatNormalizeXYZW(qq);
+    // Hemisphere: log(q) == log(-q) as a rotation; canonicalize w >= 0
+    // so the returned angle is the short way around.
+    if (qq[3] < 0.0) {
+        qq[0] = -qq[0]; qq[1] = -qq[1]; qq[2] = -qq[2]; qq[3] = -qq[3];
+    }
+    const double sinHalf = std::sqrt(qq[0]*qq[0] + qq[1]*qq[1]
+                                     + qq[2]*qq[2]);
+    if (sinHalf < 1e-12) {
+        v[0] = 0.0; v[1] = 0.0; v[2] = 0.0;
+        return;
+    }
+    const double angle = 2.0 * std::atan2(sinHalf, qq[3]);
+    const double k = angle / sinHalf;
+    v[0] = qq[0] * k; v[1] = qq[1] * k; v[2] = qq[2] * k;
+}
+
+// exp: rotation vector (axis * full angle) -> unit quaternion.
+inline void quatExpSO3(const double v[3], double q[4])
+{
+    const double angle = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+    if (angle < 1e-12) {
+        q[0] = 0.0; q[1] = 0.0; q[2] = 0.0; q[3] = 1.0;
+        return;
+    }
+    const double half = 0.5 * angle;
+    const double k = std::sin(half) / angle;
+    q[0] = v[0] * k; q[1] = v[1] * k; q[2] = v[2] * k;
+    q[3] = std::cos(half);
+}
+
+}  // anonymous namespace
+
+
 RBFtools::RBFtools()
     : lastSolveMethod(0),              // M1.4: Cholesky tried first on fresh node.
       prevSolverMethodVal(0),          // M1.4: Auto; matches solverMethod default.
       inputEncodingWarningIssued(false), // M2.1a: fresh warning on first fall-back.
       prevInputEncodingVal(0),         // M2.1a: Raw; matches inputEncoding default.
+      degenerateColumnWarningIssued(false), // M_P0_RBF_COLUMN_RANK_DEFENSE: fresh per rig.
       qwaConfigWarningIssued(false),   // M2.2: fresh warnings on first config / edge hit.
       qwaClippedWarningIssued(false),
       qwaDegenerateWarningIssued(false),
-      prevQuatGroupConfigHash(0)
+      prevQuatGroupConfigHash(0),
+      outputEncodingOverlapWarningIssued(false),  // M_P0_QUAT_RBF_OVERLAP_DISCLOSE
+      // M_P0_TRAINING_AFFECTING_ATTRS (2026-05-10): -1 / NaN-ish
+      // sentinels so the first compute() after node creation reads
+      // the actual plug values, sets prev = current (no spurious
+      // re-train), and the FIRST USER EDIT triggers retrain.
+      prevKernelVal(-1),
+      prevDistanceTypeVal(-1),
+      prevRadiusTypeVal(-1),
+      prevRadiusVal(-1.0),
+      prevRegularizationVal(-1.0),
+      // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18): the
+      // sub-net cache starts dirty so the first compute() always
+      // (re)trains, even when the node was just loaded from a .ma
+      // with cached weights -- the new schema fields could have
+      // been edited externally between save and load.
+      subnetCacheDirty(true),
+      // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28): fast path until
+      // the first training pass proves a hierarchy / mask is present.
+      subnetEngaged(false)
 {}
 
 RBFtools::~RBFtools()
@@ -353,6 +452,24 @@ MStatus RBFtools::initialize()
     nAttr.setMin(0.0);
     nAttr.setSoftMax(50.0);
 
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18): per-pose
+    // parent index. -1 (default) = "this pose is a base pose";
+    // >= 0 = "this pose is a delta of pose <value>". Hard-cap-2:
+    // delta-of-delta is auto-demoted to base + warn in training
+    // (see Stage 2.1).
+    // M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): this is now
+    // a *child of the poses[] compound* (poses[p].poseParentIndex),
+    // NOT a top-level multi parallel to poses[]. As a scalar child it
+    // travels with its pose element through add / remove / .ma round-
+    // trip -- killing the phantom-slot reads + persistence drift that
+    // the parallel-multi design suffered. So: no setArray here; the
+    // poses[] compound is the multi, this is one int per element.
+    poseParentIndex = nAttr.create(
+        "poseParentIndex", "ppi", MFnNumericData::kInt);
+    nAttr.setKeyable(true);
+    nAttr.setDefault(-1);
+    nAttr.setStorable(true);
+
     // Commit 0 (M_BASE_POSE): per-output-channel additive baseline
     // (driven side). multi double, default 0.0 (bit-identical legacy
     // behaviour for empty array). Length should track output[].
@@ -520,15 +637,46 @@ MStatus RBFtools::initialize()
     nAttr.setMin(0.0);
     nAttr.setSoftMax(1.0);
 
+    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): output-side clamp.
+    // Default ON aligns with Houdini rig::RBFInterpolation.clamp=True
+    // industry standard. Inference output is clipped into
+    // [outputMin - infl*r, outputMax + infl*r] where the bounds are
+    // captured from matValues per channel at training time.
+    outputClampEnabled = nAttr.create(
+        "outputClampEnabled", "oce", MFnNumericData::kBoolean);
+    nAttr.setKeyable(true);
+    nAttr.setStorable(true);
+    nAttr.setDefault(true);
+
+    outputClampInflation = nAttr.create(
+        "outputClampInflation", "oci", MFnNumericData::kDouble);
+    nAttr.setKeyable(true);
+    nAttr.setStorable(true);
+    nAttr.setDefault(0.0);
+    nAttr.setMin(0.0);
+    nAttr.setSoftMax(1.0);
+
     // M1.4: Tikhonov regularization strength added directly to the kernel
     // matrix diagonal before solve. Absolute units (not adapted to tr(K)/N)
     // per addendum 2026-04-24 §M1.4 — scale-adaptive forms silently fail
-    // on Linear / Thin Plate kernels where K[i,i] = φ(0) = 0. Default 1e-8
-    // follows v5 PART G.1 Step 2 and Chad Vernon's reference solver.
+    // on Linear / Thin Plate kernels where K[i,i] = φ(0) = 0.
+    //
+    // M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5 (2026-05-11): default bumped
+    // 1e-8 → 1e-5 based on user λ-sweep showing redundant production
+    // rigs (22 poses × 9-dim Raw) need λ ≥ 1e-5 for well-posed K across
+    // ALL 6 kernels. Previous default 1e-8 (v5 PART G.1 Step 2 / Chad
+    // Vernon reference) was tuned for sparse / orthogonal pose sets
+    // and silently kFailure'd on dense production rigs. New default
+    // gives new nodes a well-posed starting point; existing rigs keep
+    // their stored value but get auto-bumped to ≤ 1e-5 by the bounded
+    // retry loop. Training-point bias at λ=1e-5 is ~0.1% (well below
+    // rest-pose tolerance 1e-3). Standard well-conditioned RBF
+    // training (Schaback 1995, Wendland 2004) operates in this λ
+    // range; restoring it isn't "凑数" — it's correct math.
     regularization = nAttr.create("regularization", "reg", MFnNumericData::kDouble);
     nAttr.setKeyable(true);
     nAttr.setStorable(true);
-    nAttr.setDefault(1.0e-8);
+    nAttr.setDefault(1.0e-5);
     nAttr.setMin(0.0);
     nAttr.setSoftMax(1.0e-3);
 
@@ -734,6 +882,19 @@ MStatus RBFtools::initialize()
     poseAttributes = tAttr.create("controlPoseAttributes", "cpa", MFnData::kStringArray);
     poseValues = tAttr.create("controlPoseValues", "cpv", MFnData::kDoubleArray);
 
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18): per-pose
+    // driver mask. A kIntArray listing the flat-driver-vector indices
+    // this pose cares about. Default empty array (legacy node / fresh
+    // pose) means "all drivers" -- backward-compatible with Phase 15.
+    // M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): now a
+    // *child of the poses[] compound* (poses[p].poseDriverMask), NOT
+    // a top-level multi. One kIntArray value per pose element; the
+    // poses[] compound supplies the per-pose multiplicity, so no
+    // setArray on the child itself.
+    poseDriverMask = tAttr.create(
+        "poseDriverMask", "pdm", MFnData::kIntArray);
+    tAttr.setStorable(true);
+
     //
     // MFnCompoundAttribute
     //
@@ -854,6 +1015,16 @@ MStatus RBFtools::initialize()
     cAttr.addChild(poseValue);
     cAttr.addChild(poseLocalTransform);    // M2.3
     cAttr.addChild(poseSwingTwistCache);   // M2.5
+    // M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): hierarchy
+    // sub-attributes are children of poses[] (poses[p].poseParentIndex
+    // / poses[p].poseDriverMask) instead of parallel top-level multis.
+    // The parent / mask now travel with the pose element through
+    // add / remove / .ma round-trip -- the structural fix for the
+    // phantom-slot reads + parent-loss-on-reload the top-level design
+    // suffered. removeMultiInstance(poses[i]) reclaims the children
+    // automatically, so _clear_poses_only needs no separate sweep.
+    cAttr.addChild(poseParentIndex);
+    cAttr.addChild(poseDriverMask);
 
     //
     // MRampAttribute
@@ -910,6 +1081,11 @@ MStatus RBFtools::initialize()
     addAttribute(poses);
     addAttribute(poseInput);
     addAttribute(poseValue);
+    // M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): poseParent
+    // Index / poseDriverMask are children of poses[] -- registered
+    // after the parent compound, same ordering as poseInput/poseValue.
+    addAttribute(poseParentIndex);
+    addAttribute(poseDriverMask);
     // M2.3: local-Transform compound + children. No attributeAffects
     // because this is a pure data channel (compute() never reads it).
     addAttribute(poseLocalTranslate);
@@ -933,6 +1109,9 @@ MStatus RBFtools::initialize()
     addAttribute(outputIsScale);
     addAttribute(clampEnabled);
     addAttribute(clampInflation);
+    // M_P0_RBF_ANTI_OVERSHOOT Part A.
+    addAttribute(outputClampEnabled);
+    addAttribute(outputClampInflation);
     addAttribute(regularization);
     addAttribute(solverMethod);
     addAttribute(inputEncoding);
@@ -981,6 +1160,9 @@ MStatus RBFtools::initialize()
     attributeAffects(RBFtools::outputIsScale, RBFtools::output);
     attributeAffects(RBFtools::clampEnabled, RBFtools::output);
     attributeAffects(RBFtools::clampInflation, RBFtools::output);
+    // M_P0_RBF_ANTI_OVERSHOOT Part A.
+    attributeAffects(RBFtools::outputClampEnabled, RBFtools::output);
+    attributeAffects(RBFtools::outputClampInflation, RBFtools::output);
     attributeAffects(RBFtools::regularization, RBFtools::output);
     attributeAffects(RBFtools::solverMethod, RBFtools::output);
     attributeAffects(RBFtools::inputEncoding, RBFtools::output);
@@ -991,6 +1173,15 @@ MStatus RBFtools::initialize()
     // Commit 0 (M_PER_POSE_SIGMA / M_BASE_POSE) — both feed compute().
     attributeAffects(RBFtools::poseRadius,    RBFtools::output);
     attributeAffects(RBFtools::basePoseValue, RBFtools::output);
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- two
+    // attributeAffects pairs only; promotion to evalInput=true on
+    // schema drift is handled by the prev-state cache compare in
+    // compute() (matches the prevBaseValueArr / prevQuatGroupConfigHash
+    // pattern at cpp:1791-1851). attributeAffects alone would reuse
+    // the cached baseNet / deltaNets and produce stale output after
+    // the user edits parent / mask live.
+    attributeAffects(RBFtools::poseParentIndex, RBFtools::output);
+    attributeAffects(RBFtools::poseDriverMask,  RBFtools::output);
     attributeAffects(RBFtools::centerAngle, RBFtools::output);
     attributeAffects(RBFtools::curveRamp, RBFtools::output);
     attributeAffects(RBFtools::direction, RBFtools::output);
@@ -1167,6 +1358,13 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
     MPlug clampInflationPlug(thisNode, RBFtools::clampInflation);
     bool clampEnabledVal = clampEnabledPlug.asBool();
     double clampInflationVal = clampInflationPlug.asDouble();
+    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): output-side clamp.
+    // Inference-only -- caching happens at training time; the plug
+    // read here is consumed by the per-channel finalize loop.
+    MPlug outputClampEnabledPlug(thisNode, RBFtools::outputClampEnabled);
+    MPlug outputClampInflationPlug(thisNode, RBFtools::outputClampInflation);
+    bool   outputClampEnabledVal   = outputClampEnabledPlug.asBool();
+    double outputClampInflationVal = outputClampInflationPlug.asDouble();
     // M1.4: solver configuration. Both participate in the train path;
     // regularization changes require a re-solve (attributeAffects handles
     // this — λ is folded into linMat, which is a local, not a cache).
@@ -1203,9 +1401,17 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
     // Reset the once-per-rig warning flag whenever the user changes
     // encoding — they should get a fresh warning if the new mode also
     // trips the safety net.
+    //
+    // The retrain trigger for inputEncoding lives in the
+    // M_P0_TRAINING_AFFECTING_ATTRS block below (deliberately AFTER
+    // ``evalInput = evaluatePlug.asBool();`` so the
+    // training-affecting-attr promotion to evalInput=true is not
+    // clobbered by the read).
+    bool inputEncodingChangedThisFrame = false;
     if (inputEncodingVal != prevInputEncodingVal)
     {
         inputEncodingWarningIssued = false;
+        inputEncodingChangedThisFrame = true;
         prevInputEncodingVal = inputEncodingVal;
     }
     angleVal = anglePlug.asDouble();
@@ -1234,6 +1440,73 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
     radiusTypeVal = radiusTypePlug.asShort();
     meanVal = meanPlug.asDouble();
     varianceVal = variancePlug.asDouble();
+
+    // -----------------------------------------------------------------
+    // M_P0_TRAINING_AFFECTING_ATTRS (2026-05-10): force re-train when
+    // any attribute that influences the K matrix or the encoded pose
+    // vectors changes. attributeAffects(<attr>, output) marks output
+    // dirty but evalInput defaults to False; without this guard the
+    // wMat trained under the OLD attribute value gets reused with
+    // the NEW value at inference, producing mathematically inconsistent
+    // results (rest-pose joint drift, distorted interpolation curves).
+    //
+    // Tracked attrs and the math they influence:
+    //   kernel         → φ shape (every K[i,j] activation depends on it)
+    //   distanceType   → d(p_i, p_j) metric (every K[i,j] depends on it)
+    //   inputEncoding  → encoded pose vector dimension and content
+    //   radius         → σ in φ(d, σ) when radiusType=Custom
+    //   radiusType     → which σ source to use (mean / median / custom)
+    //   regularization → λI injection into K diagonal
+    //
+    // Compare to existing prev-trackers in this file:
+    //   prevSolverMethodVal   → only resets lastSolveMethod cache, NOT
+    //                            evalInput (kernel SPD-ness is solver-
+    //                            independent — correct historical
+    //                            behaviour, kept).
+    //   prevQuatGroupConfigHash → DOES set evalInput=true (cpp:1681)
+    //   prevBaseValueArr / prevOutputIsScaleArr → DOES set evalInput
+    //                            (cpp:1628)
+    // -----------------------------------------------------------------
+    bool trainingAttrChanged = false;
+    if (kernelVal != prevKernelVal)
+    {
+        if (prevKernelVal != -1)  // skip first-compute spurious trigger
+            trainingAttrChanged = true;
+        prevKernelVal = kernelVal;
+    }
+    if (distanceTypeVal != prevDistanceTypeVal)
+    {
+        if (prevDistanceTypeVal != -1)
+            trainingAttrChanged = true;
+        prevDistanceTypeVal = distanceTypeVal;
+    }
+    if (radiusTypeVal != prevRadiusTypeVal)
+    {
+        if (prevRadiusTypeVal != -1)
+            trainingAttrChanged = true;
+        prevRadiusTypeVal = radiusTypeVal;
+    }
+    if (radiusVal != prevRadiusVal)
+    {
+        if (prevRadiusVal != -1.0)
+            trainingAttrChanged = true;
+        prevRadiusVal = radiusVal;
+    }
+    if (regularizationVal != prevRegularizationVal)
+    {
+        if (prevRegularizationVal != -1.0)
+            trainingAttrChanged = true;
+        prevRegularizationVal = regularizationVal;
+    }
+    // inputEncoding change — flag was set in the warning-reset block
+    // above (cpp:1207-1220 area), where ``evalInput`` had not yet
+    // been read from the plug. We promote to evalInput=true here so
+    // the read at cpp:1227 does not clobber.
+    if (inputEncodingChangedThisFrame)
+        trainingAttrChanged = true;
+
+    if (trainingAttrChanged)
+        evalInput = true;
 
     curveAttr = MRampAttribute(thisNode, curveRamp, &status);
     CHECK_MSTATUS_AND_RETURN_IT(status);
@@ -1577,14 +1850,49 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     for (size_t j = 0; j < dim; ++j)
                         if (j % 5 == 4) clampSkipMask[j] = true;  // twist slot
                 }
+                // M_P0_RBF_ANTI_OVERSHOOT Part C (2026-05-17) -- input
+                // clamp safety guards. Audit found three silent-failure
+                // modes in this loop that the new Phase 15 design must
+                // close before the symmetric Output Clamp inherits them:
+                //   1. AABB inversion (max < min) silently produces a
+                //      reversed [lo, hi] range; auto-correct + warn.
+                //   2. clampInflation negative (e.g. user typo) inverts
+                //      the inflation direction; floor at 0.0.
+                //   3. NaN / Inf driver value bypasses the < / > checks
+                //      (NaN comparisons are false), letting non-finite
+                //      values reach the K matrix; replace with AABB
+                //      midpoint + warn.
+                const double safeInfl =
+                    (clampInflationVal > 0.0) ? clampInflationVal : 0.0;
                 for (size_t j = 0; j < dim; ++j)
                 {
                     if (clampSkipMask[j]) continue;
-                    const double r = poseMaxVec[j] - poseMinVec[j];
-                    const double lo = poseMinVec[j] - clampInflationVal * r;
-                    const double hi = poseMaxVec[j] + clampInflationVal * r;
-                    if (driver[j] < lo) driver[j] = lo;
-                    else if (driver[j] > hi) driver[j] = hi;
+                    double pmin = poseMinVec[j];
+                    double pmax = poseMaxVec[j];
+                    if (pmax < pmin) {
+                        std::swap(pmin, pmax);
+                        MGlobal::displayWarning(
+                            MString("RBFtools: AABB inverted "
+                                    "(poseMax < poseMin) at driver "
+                                    "channel ") + (unsigned)j +
+                            ", auto-corrected "
+                            "(M_P0_RBF_ANTI_OVERSHOOT Part C.1).");
+                    }
+                    const double r = pmax - pmin;
+                    const double lo = pmin - safeInfl * r;
+                    const double hi = pmax + safeInfl * r;
+                    double dv = driver[j];
+                    if (!std::isfinite(dv)) {
+                        dv = (pmin + pmax) * 0.5;
+                        MGlobal::displayWarning(
+                            MString("RBFtools: non-finite driver[") +
+                            (unsigned)j + "], replaced with AABB "
+                            "midpoint (M_P0_RBF_ANTI_OVERSHOOT "
+                            "Part C.3).");
+                    }
+                    if (dv < lo) dv = lo;
+                    else if (dv > hi) dv = hi;
+                    driver[j] = dv;
                 }
             }
 
@@ -1628,6 +1936,96 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     prevBaseValueArr = baseValueArr;
                     prevOutputIsScaleArr = outputIsScaleArr;
                 }
+
+                // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18)
+                // -- Schema cache invalidation. Same pattern as
+                // prevBaseValueArr above: attributeAffects(poseParentIndex
+                // / poseDriverMask, output) alone is not enough -- Maya
+                // would reuse the cached baseNet / deltaNets after a
+                // parent / mask edit and produce stale output. The
+                // compare here promotes evalInput=true on any drift and
+                // marks subnetCacheDirty so Stage 2 training (commit 3)
+                // knows to rebuild the sub-net pair.
+                //
+                // Reads are sparse-safe: pose count is upper-bounded by
+                // the largest sparse index in poses[]; the array is
+                // packed by sequential logical index so the per-pose
+                // attribute reads use the same jumpToElement protocol
+                // as outputIsScaleArr above. Missing elements fall back
+                // to the schema default (parent=-1 / empty mask), which
+                // is exactly the "no hierarchy / all drivers" backward-
+                // compatible value -- a legacy node mid-upgrade still
+                // sees Phase 15-equivalent behaviour.
+                // M_P0_RBF_HIERARCHICAL_READ_FIX (2026-05-18) -- the
+                // original ship used jumpToArrayElement(k) (physical-
+                // slot index) and indexed currentPoseParentArr by k,
+                // which is wrong for sparse multis AND triggered
+                // phantom-value reads even when Python never wrote
+                // any setAttr on poseParentIndex.
+                //
+                // M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28) --
+                // poseParentIndex / poseDriverMask are now children of
+                // the poses[] compound (poses[p].poseParentIndex /
+                // poses[p].poseDriverMask), not parallel top-level
+                // multis. Walk poses[] via elementIndex() and read each
+                // element's two children. This kills the phantom-slot
+                // class of bug structurally: a child of an unwritten
+                // poses[] element simply does not exist, so it reads its
+                // schema default (-1 / empty mask) -- the very value
+                // that means "base pose / all drivers". The bb3cf21
+                // read-defence spirit is preserved by (a) pre-filling
+                // the local cache with the defaults, (b) keying by the
+                // logical element index, and (c) the self-parent /
+                // OOB guards downstream in the topology resolver.
+                std::vector<int> currentPoseParentArr;
+                std::vector<std::vector<int>> currentPoseDriverMaskArr;
+                currentPoseParentArr.assign(poseCount, -1);
+                currentPoseDriverMaskArr.assign(
+                    poseCount, std::vector<int>());
+                {
+                    MArrayDataHandle posesHandle =
+                        data.inputArrayValue(poses, &status);
+                    if (status == MStatus::kSuccess)
+                    {
+                        const unsigned cnt = posesHandle.elementCount();
+                        for (unsigned k = 0; k < cnt; ++k)
+                        {
+                            unsigned idx = posesHandle.elementIndex();
+                            if (idx < poseCount)
+                            {
+                                MDataHandle poseElem =
+                                    posesHandle.inputValue();
+                                // parent index child (scalar int, -1).
+                                currentPoseParentArr[idx] =
+                                    poseElem.child(
+                                        poseParentIndex).asInt();
+                                // driver mask child (kIntArray, empty).
+                                std::vector<int> maskRow;
+                                MObject maskData =
+                                    poseElem.child(poseDriverMask).data();
+                                if (!maskData.isNull())
+                                {
+                                    MFnIntArrayData iadFn(maskData);
+                                    MIntArray ia = iadFn.array();
+                                    maskRow.reserve(ia.length());
+                                    for (unsigned m = 0;
+                                         m < ia.length(); ++m)
+                                        maskRow.push_back(ia[m]);
+                                }
+                                currentPoseDriverMaskArr[idx] = maskRow;
+                            }
+                            if (k + 1 < cnt) posesHandle.next();
+                        }
+                    }
+                }
+                if (currentPoseParentArr     != prevPoseParentArr ||
+                    currentPoseDriverMaskArr != prevPoseDriverMaskArr)
+                {
+                    evalInput = true;
+                    prevPoseParentArr     = currentPoseParentArr;
+                    prevPoseDriverMaskArr = currentPoseDriverMaskArr;
+                    subnetCacheDirty      = true;
+                }
             }
 
             // M2.2: resolve the quaternion-group schema. Runs only in
@@ -1666,6 +2064,9 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     qwaConfigWarningIssued = false;
                     qwaClippedWarningIssued = false;
                     qwaDegenerateWarningIssued = false;
+                    // M_P0_QUAT_RBF_OVERLAP_DISCLOSE: a fresh quat-
+                    // group config can re-trigger the overlap check.
+                    outputEncodingOverlapWarningIssued = false;
                     prevQuatGroupConfigHash = newHash;
                     // Re-solve wMat: columns that just became quat
                     // members must be zeroed in the solver output,
@@ -1745,8 +2146,49 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
 
                 if (evalInput)
                 {
+                    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17):
+                    // capture per-output-channel min/max BEFORE the
+                    // weight solve. matValues is already filled by
+                    // getPoseData / getPoseVectors at this point; the
+                    // inference path consults outputMinVec /
+                    // outputMaxVec inside the per-channel finalize
+                    // loop to clip y back into [y_min - infl*r,
+                    // y_max + infl*r]. Stored as state so subsequent
+                    // compute() ticks (no evalInput) skip the recompute.
+                    outputMinVec.assign(
+                        solveCount,
+                        std::numeric_limits<double>::infinity());
+                    outputMaxVec.assign(
+                        solveCount,
+                        -std::numeric_limits<double>::infinity());
+                    {
+                        const unsigned mvRows = matValues.getRowSize();
+                        const unsigned mvCols = matValues.getColSize();
+                        const unsigned cClip =
+                            (mvCols < solveCount) ? mvCols : solveCount;
+                        for (unsigned p = 0; p < mvRows; ++p)
+                        {
+                            for (unsigned c = 0; c < cClip; ++c)
+                            {
+                                const double yv = matValues(p, c);
+                                if (!std::isfinite(yv)) continue;
+                                if (yv < outputMinVec[c])
+                                    outputMinVec[c] = yv;
+                                if (yv > outputMaxVec[c])
+                                    outputMaxVec[c] = yv;
+                            }
+                        }
+                        for (unsigned c = 0; c < solveCount; ++c)
+                        {
+                            if (!std::isfinite(outputMinVec[c]))
+                                outputMinVec[c] = 0.0;
+                            if (!std::isfinite(outputMaxVec[c]))
+                                outputMaxVec[c] = 0.0;
+                        }
+                    }
+
                     // MGlobal::displayInfo("Initialize matrices");
-                                        
+
                     // -------------------------------------------------
                     // distances
                     // -------------------------------------------------
@@ -1796,15 +2238,6 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     // scale-adaptive forms silently fail on Linear / TP
                     // kernels where K[i,i] = φ(0) = 0.
                     // -------------------------------------------------
-
-                    if (regularizationVal > 0.0)
-                    {
-                        for (unsigned dd = 0; dd < poseCount; ++dd)
-                            linMat(dd, dd) += regularizationVal;
-                    }
-
-                    if (exposeDataVal > 2 && regularizationVal > 0.0)
-                        linMat.show(thisName, "Activations + λI");
 
                     // -------------------------------------------------
                     // M1.4: reset the solver-tier cache when the user
@@ -1856,76 +2289,1253 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     }
 
                     // -------------------------------------------------
-                    // solve for each dimension (M1.4 tiered dispatch)
+                    // Audit chain at this solver block (newest first):
+                    //   M_P0_RBF_POLYNOMIAL_AUGMENTATION (this commit)
+                    //     supersedes ↑
+                    //   M_P0_LAMBDA_RETRY_TIERED_CEIL (4a3cae4)
+                    //     supersedes ↑
+                    //   M_P0_BOUNDED_LAMBDA_RETRY_FLOOR_1E5 (8e7a6d3)
+                    //     supersedes ↑
+                    //   M_P0_KERNEL_SWITCH_ROLLBACK_2 (91adfc9)
+                    //     supersedes ↑
+                    //   M_P0_AUTO_ADAPTIVE_LAMBDA (156af4c) +
+                    //     M_P0_LAMBDA_CEIL_TIGHTEN (ee6d63f)
+                    //
+                    // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11):
+                    // mathematically-correct CPD-kernel treatment via
+                    // polynomial augmentation. Supersedes the bounded /
+                    // tiered λ retry approach (8e7a6d3 + b16d117 +
+                    // 4a3cae4 + fd5607b) that was a band-aid over a
+                    // fundamental math defect.
+                    //
+                    // Why the previous retry-loop approach was wrong:
+                    //   - Conditionally-positive-definite (CPD) kernels
+                    //     — Linear / Thin Plate / Multi-Quadric /
+                    //     Inverse Multi-Quadric — have a null-space in
+                    //     the RBF interpolation operator K. No amount
+                    //     of Tikhonov regularization (K + λI) eliminates
+                    //     this null-space; raising λ only damps the
+                    //     null-space contribution while distorting the
+                    //     well-defined part. Result: visible joint
+                    //     drift at the training-point invariant even
+                    //     when the solver "succeeds" at the ceil λ.
+                    //   - User λ = 1e-3 + MQB still drifted on the
+                    //     reproducer rig: empirical confirmation that
+                    //     λ ceil is the wrong dial.
+                    //
+                    // Correct math (Wendland 2004 §10, Schaback 1995,
+                    // Wahba 1990): augment the system with a polynomial
+                    // basis P of degree (m - 1) where m is the kernel's
+                    // CPD order. The augmented system
+                    //
+                    //   [ K + λI   P  ] [ w ]   [ y ]
+                    //   [ P^T      0  ] [ a ] = [ 0 ]
+                    //
+                    // is invertible (when P has full column rank, i.e.
+                    // poses span general position) and provides the
+                    // unique reproducing-kernel-Hilbert-space solution.
+                    //
+                    // Inference:
+                    //   ŷ(x) = Σ_j w_j · φ(d(x, p_j); σ) + Σ_k a_k · p_k(x)
+                    //
+                    // Polynomial dim per kernel (getPolynomialDim):
+                    //   Gaussian 1 / Gaussian 2  (strictly PD)     → 0
+                    //   Linear  / MQB / IMQB     (CPD order m = 1) → 1
+                    //   Thin Plate               (CPD order m = 2) → 1 + driverDim
+                    //
+                    // Solver branches on polyDim:
+                    //   polyDim == 0 (Gaussian): K + λI is SPD;
+                    //     try Cholesky tier 1 then GE tier 2 single-pass
+                    //     (matches Oracle's two-tier dispatch).
+                    //   polyDim > 0  (CPD): augmented (N + polyDim) ×
+                    //     (N + polyDim) saddle-point matrix is indefinite
+                    //     by construction (bottom-right 0 block), so
+                    //     Cholesky is mathematically inapplicable; GE
+                    //     only, single-pass per output column. The
+                    //     trial-wMat pattern is preserved so a per-
+                    //     column singularity cannot pollute partial
+                    //     state.
+                    //
+                    // Failure → kFailure + displayError. Honest failure
+                    // is preserved at the augmented system level: if
+                    // (K + λI, P) jointly fail to be invertible, the
+                    // pose set is genuinely degenerate (duplicate poses
+                    // or all poses on a hyperplane → P rank-deficient)
+                    // and the rigger needs to know rather than receive
+                    // numerical garbage.
+                    //
+                    // The retry-loop approach is FULLY REMOVED:
+                    //   - LAMBDA_CEIL_TIERED / MAX_RETRIES_TIERED constants
+                    //     are gone.
+                    //   - kIsStrictlyPDKernel ternary gate gone.
+                    //   - while-loop retry block gone.
+                    //   - Single λ injection at user value; correct
+                    //     CPD math at any λ ≥ 0.
+                    //
+                    // See docs/排查/M_P0_KERNEL_SWITCH_ROLLBACK_index.md
+                    // §0.5 + this commit's message for the full audit
+                    // trail (ROLLBACK_2 → 8e7a6d3 → b16d117 → 4a3cae4 →
+                    // fd5607b → this commit).
                     // -------------------------------------------------
+
+                    // Driver dim is matPoses' column count post-encoding
+                    // (= effectiveInDim for Generic mode; for Matrix
+                    // mode it is 4 * driverCount per cpp:2279).
+                    const int driverDim =
+                        (int)matPoses.getColSize();
+                    const int polyDim =
+                        getPolynomialDim(kernelVal, driverDim);
 
                     wMat = BRMatrix();
                     wMat.setSize(poseCount, solveCount);
+                    polyMat = BRMatrix();
+                    // setSize must be > 0 on both axes; allocate a 1 ×
+                    // solveCount sentinel when polyDim == 0 (Gaussian)
+                    // so the matrix is constructible but never read
+                    // by the inference path (polyDim == 0 branch in
+                    // getPoseWeights skips the polynomial term).
+                    polyMat.setSize(
+                        (unsigned)(polyDim > 0 ? polyDim : 1),
+                        solveCount);
 
-                    bool usedCholesky = false;
-
-                    // Tier 1 — Cholesky. Attempted only in Auto mode and
-                    // when the last successful method was Cholesky (or
-                    // this is the first train since solverMethod flipped).
-                    // One decomposition amortizes over all output dims:
-                    // O(N³/3) + m·O(N²), vs GE's m·O(N³).
-                    if (solverMethodVal == 0 && lastSolveMethod == 0)
+                    const double userLambda = (regularizationVal > 0.0)
+                                              ? regularizationVal : 0.0;
+                    if (userLambda > 0.0)
                     {
-                        BRMatrix chol = linMat;
-                        if (chol.cholesky())
+                        for (unsigned dd = 0; dd < poseCount; ++dd)
+                            linMat(dd, dd) += userLambda;
+                    }
+
+                    if (exposeDataVal > 2 && userLambda > 0.0)
+                        linMat.show(thisName, "Activations + λI");
+
+                    bool solved       = false;
+                    int  lastSingular = -1;
+
+                    if (polyDim == 0)
+                    {
+                        // -------------------------------------------------
+                        // Strictly-PD path (Gaussian). Single-pass
+                        // Cholesky tier 1 / GE tier 2 dispatch — Oracle
+                        // RBFtools cpp:1865-1925 behaviour, no retry.
+                        // -------------------------------------------------
+                        if (solverMethodVal == 0
+                            && lastSolveMethod == 0)
                         {
-                            std::vector<double> x;
+                            BRMatrix chol = linMat;
+                            if (chol.cholesky())
+                            {
+                                std::vector<double> x;
+                                for (c = 0; c < solveCount; c ++)
+                                {
+                                    chol.choleskySolve(yCols[c], x);
+                                    for (i = 0; i < poseCount; i ++)
+                                        wMat(i, c) = x[i];
+                                }
+                                lastSolveMethod = 0;
+                                solved          = true;
+                                if (exposeDataVal > 2)
+                                    MGlobal::displayInfo(
+                                        thisName + MString(
+                                            ": solver = Cholesky"));
+                            }
+                        }
+                        if (!solved)
+                        {
+                            // M_P0_RBF_ANTI_OVERSHOOT Part C.4
+                            // (2026-05-17): auto-tune BRMatrix
+                            // singular-pivot threshold to scale with
+                            // the user's regularization. Stronger
+                            // lambda -> stronger diagonal dominance,
+                            // so smaller pivots remain numerically
+                            // safe. Floor at 1e-9 to keep parity
+                            // with the JS sandbox reference; cap at
+                            // the legacy 1e-4 so unregularised /
+                            // tiny-lambda solves see no change.
+                            const double singTol =
+                                (userLambda > 0.0)
+                                ? ((userLambda * 1e-3 < 1.0e-9)
+                                   ? 1.0e-9
+                                   : (userLambda * 1e-3 < 1.0e-4
+                                      ? userLambda * 1e-3
+                                      : 1.0e-4))
+                                : 1.0e-4;
+                            bool geOk = true;
+                            BRMatrix wMatTrial;
+                            wMatTrial.setSize(poseCount, solveCount);
                             for (c = 0; c < solveCount; c ++)
                             {
-                                chol.choleskySolve(yCols[c], x);
+                                BRMatrix solveMat = linMat;
+                                solveMat.setSingularThreshold(singTol);
+                                std::vector<double> w(poseCount, 0.0);
+                                int singularIndex = -1;
+                                bool ok = solveMat.solve(
+                                    yCols[c], w.data(), singularIndex);
+                                if (!ok)
+                                {
+                                    geOk = false;
+                                    lastSingular = singularIndex;
+                                    break;
+                                }
                                 for (i = 0; i < poseCount; i ++)
-                                    wMat(i, c) = x[i];
+                                    wMatTrial(i, c) = w[i];
                             }
-                            usedCholesky = true;
-                            lastSolveMethod = 0;
+                            if (geOk)
+                            {
+                                wMat            = wMatTrial;
+                                lastSolveMethod = 1;
+                                solved          = true;
+                                if (exposeDataVal > 2)
+                                    MGlobal::displayInfo(
+                                        thisName + MString(
+                                            ": solver = GE (fallback)"));
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // -------------------------------------------------
+                        // CPD path (Linear / TPS / MQB / IMQB).
+                        //
+                        // M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12):
+                        // before building the augmented matrix, scan
+                        // matPoses (post-normalize) for "degenerate"
+                        // driver columns whose variance falls below
+                        // VAR_FLOOR. These columns translate to
+                        // near-constant linear terms in P; leaving
+                        // them in the saddle-point system makes P
+                        // rank-deficient and the augmented matrix
+                        // singular even at non-trivial λ.
+                        //
+                        // Strategy:
+                        //   1. Detect degenerate driver columns →
+                        //      isActiveLinear[j] for j ∈ [0, driverDim).
+                        //   2. Build a REDUCED P (poseCount × activeCount)
+                        //      where activeCount = 1 (constant)
+                        //              + popcount(isActiveLinear).
+                        //   3. Solve the reduced (N + activeCount) ×
+                        //      (N + activeCount) saddle-point system.
+                        //   4. EXPAND polyMat back to full polyDim ×
+                        //      solveCount, with dropped rows zeroed
+                        //      out. Inference (getPoseWeights) still
+                        //      evaluates polyBasis at full polyDim;
+                        //      dropped coefficients multiply to 0 so
+                        //      they contribute nothing to the output
+                        //      sum without any inference-side branch.
+                        //
+                        // This preserves the augmented system's full-
+                        // column-rank precondition while keeping the
+                        // inference path branch-free and the rig data
+                        // unmodified.
+                        // -------------------------------------------------
+
+                        // VAR_FLOOR rationale: after normalizeColumns
+                        // each column has unit L2 norm, so variance
+                        // ≤ 1/N. A column whose values are bit-identical
+                        // across nearly all poses collapses to variance
+                        // ≪ 1/N. 1e-8 separates real-signal columns
+                        // (var typically O(1/N) − 1/N^2) from
+                        // degenerate-rig columns (var typically below
+                        // float64 representable variance among
+                        // bit-identical entries).
+                        const double VAR_FLOOR = 1.0e-8;
+
+                        std::vector<bool> isActiveLinear;
+                        bool anyDegenerate = false;
+                        detectDegeneratePolyCols(
+                            matPoses, VAR_FLOOR,
+                            isActiveLinear, anyDegenerate);
+
+                        // Active poly-column count: constant always +
+                        // active linear terms.
+                        int activeLinearCount = 0;
+                        for (size_t j = 0; j < isActiveLinear.size(); ++j)
+                            if (isActiveLinear[j]) ++activeLinearCount;
+                        const int activePolyDim = 1 + activeLinearCount;
+
+                        // Map P-column index → driver column index
+                        // (-1 sentinel for the constant P column 0).
+                        // Used both at training time to skip dropped
+                        // dims when filling P, and at solution-expand
+                        // time to map the reduced solution back into
+                        // the full polyMat layout.
+                        std::vector<int> activePolyToDriver;
+                        activePolyToDriver.push_back(-1);  // constant
+                        for (size_t j = 0; j < isActiveLinear.size(); ++j)
+                            if (isActiveLinear[j])
+                                activePolyToDriver.push_back((int)j);
+
+                        const unsigned augN =
+                            poseCount + (unsigned)activePolyDim;
+                        BRMatrix A;
+                        A.setSize(augN, augN);
+                        // Top-left N × N block: K + λI (copy from
+                        // linMat which already has the λI injected).
+                        for (unsigned ai = 0; ai < poseCount; ++ai)
+                            for (unsigned aj = 0; aj < poseCount; ++aj)
+                                A(ai, aj) = linMat(ai, aj);
+
+                        // Reduced P block: only active polynomial
+                        // columns. polyBasis(matPoses row i) gives
+                        // [1, x_0, x_1, ..., x_{d-1}]; we pick the
+                        // active subset using activePolyToDriver.
+                        std::vector<double> p_row_full;
+                        for (unsigned ai = 0; ai < poseCount; ++ai)
+                        {
+                            polyBasis(matPoses.getRowVector(ai),
+                                      polyDim, p_row_full);
+                            for (int pkR = 0; pkR < activePolyDim; ++pkR)
+                            {
+                                // pkR = 0 → constant, picks p_row_full[0]
+                                // pkR > 0 → linear term, picks
+                                //          p_row_full[1 + driverIdx]
+                                const int drv = activePolyToDriver[(size_t)pkR];
+                                const double v =
+                                    (drv < 0)
+                                    ? p_row_full[0]
+                                    : p_row_full[1 + (size_t)drv];
+                                A(ai, poseCount + (unsigned)pkR) = v;
+                                A(poseCount + (unsigned)pkR, ai) = v;
+                            }
+                        }
+                        // Bottom-right activePolyDim × activePolyDim 0
+                        // block is already zero from BRMatrix::setSize.
+
+                        if (exposeDataVal > 2)
+                            A.show(thisName,
+                                   "Augmented (K+lambdaI, P_active; "
+                                   "P_active^T, 0)");
+
+                        // Emit once-per-rig disclosure warning if any
+                        // driver column was dropped. Gate behind the
+                        // flag to avoid Script Editor flood during
+                        // interactive timeline scrubs.
+                        if (anyDegenerate
+                            && !degenerateColumnWarningIssued)
+                        {
+                            MString dropMsg = thisName + MString(
+                                ": M_P0_RBF_COLUMN_RANK_DEFENSE — "
+                                "dropping ") + (polyDim - activePolyDim) +
+                                " degenerate driver column(s) "
+                                "[variance < ";
+                            dropMsg += VAR_FLOOR;
+                            dropMsg += MString("] from polynomial "
+                                "augmentation P matrix. Driver index "
+                                "(0-based, post-encoding) dropped: ");
+                            bool first = true;
+                            for (size_t j = 0;
+                                 j < isActiveLinear.size(); ++j)
+                            {
+                                if (!isActiveLinear[j])
+                                {
+                                    if (!first) dropMsg += MString(", ");
+                                    dropMsg += (int)j;
+                                    first = false;
+                                }
+                            }
+                            dropMsg += MString(". These columns carry "
+                                "near-zero signal — RBF still trains "
+                                "fine on the remaining columns; "
+                                "polynomial coefficients for dropped "
+                                "columns will be 0 at inference.");
+                            MGlobal::displayWarning(dropMsg);
+                            degenerateColumnWarningIssued = true;
+                        }
+
+                        // Per-column GE solve with trial-wMat /
+                        // trial-polyMat staging (mirrors the strictly-PD
+                        // path's pollution-safety).
+                        bool geOk = true;
+                        BRMatrix wMatTrial;
+                        wMatTrial.setSize(poseCount, solveCount);
+                        // polyMatTrial sized to FULL polyDim — dropped
+                        // rows are zeroed via setSize and never
+                        // overwritten below, so they stay 0 in the
+                        // committed polyMat. Inference reads polyMat
+                        // at full polyDim and multiplies dropped rows
+                        // by polyBasis values, contributing 0.
+                        BRMatrix polyMatTrial;
+                        polyMatTrial.setSize(
+                            (unsigned)polyDim, solveCount);
+                        std::vector<double> y_aug(augN, 0.0);
+                        std::vector<double> w_aug(augN, 0.0);
+                        for (c = 0; c < solveCount; c ++)
+                        {
+                            BRMatrix solveMat = A;
+                            // M_P0_RBF_ANTI_OVERSHOOT Part C.4
+                            // (2026-05-17): same lambda-scaled
+                            // singular threshold used in the Cholesky-
+                            // fallback GE path above. Applied to the
+                            // augmented [K+lambdaI, P; P^T, 0] solve
+                            // so the augmented system inherits the
+                            // adaptive numerical tolerance.
+                            {
+                                const double singTolAug =
+                                    (userLambda > 0.0)
+                                    ? ((userLambda * 1e-3 < 1.0e-9)
+                                       ? 1.0e-9
+                                       : (userLambda * 1e-3 < 1.0e-4
+                                          ? userLambda * 1e-3
+                                          : 1.0e-4))
+                                    : 1.0e-4;
+                                solveMat.setSingularThreshold(singTolAug);
+                            }
+                            // y_aug[0..N-1] = yCols[c]; y_aug[N..] = 0
+                            for (unsigned ai = 0; ai < poseCount; ++ai)
+                                y_aug[ai] =
+                                    (ai < yCols[c].size())
+                                    ? yCols[c][ai] : 0.0;
+                            for (unsigned k = 0;
+                                 k < (unsigned)activePolyDim; ++k)
+                                y_aug[poseCount + k] = 0.0;
+                            std::fill(w_aug.begin(),
+                                      w_aug.end(), 0.0);
+                            int singularIndex = -1;
+                            bool ok = solveMat.solve(
+                                y_aug, w_aug.data(), singularIndex);
+                            if (!ok)
+                            {
+                                geOk = false;
+                                lastSingular = singularIndex;
+                                break;
+                            }
+                            for (i = 0; i < poseCount; i ++)
+                                wMatTrial(i, c) = w_aug[i];
+                            // Expand reduced solution back to full
+                            // polyDim layout via activePolyToDriver.
+                            // Position 0 (constant) goes to row 0;
+                            // active linear term pkR (≥ 1) goes to
+                            // row 1 + driverIdx in the full layout.
+                            for (int pkR = 0;
+                                 pkR < activePolyDim; ++pkR)
+                            {
+                                const int drv =
+                                    activePolyToDriver[(size_t)pkR];
+                                const unsigned fullRow =
+                                    (drv < 0)
+                                    ? 0u
+                                    : (unsigned)(1 + drv);
+                                polyMatTrial(fullRow, c) =
+                                    w_aug[poseCount + (unsigned)pkR];
+                            }
+                            // Dropped rows in polyMatTrial stay 0 —
+                            // never written, BRMatrix::setSize gives
+                            // zero-initialised storage.
+                        }
+                        if (geOk)
+                        {
+                            wMat            = wMatTrial;
+                            polyMat         = polyMatTrial;
+                            lastSolveMethod = 1;
+                            solved          = true;
                             if (exposeDataVal > 2)
                                 MGlobal::displayInfo(
-                                    thisName + MString(": solver = Cholesky"));
+                                    thisName + MString(
+                                        ": solver = augmented GE "
+                                        "(polyDim ") +
+                                    polyDim + ", activePolyDim " +
+                                    activePolyDim + ")");
                         }
                     }
 
-                    // Tier 2 — GE fallback. Triggered by ForceGE, a failed
-                    // Cholesky probe, or sticky lastSolveMethod == 1 on a
-                    // known non-SPD kernel. Per-dim solve is unavoidable
-                    // here because BRMatrix::solve is destructive.
-                    if (!usedCholesky)
+                    if (!solved)
                     {
-                        for (c = 0; c < solveCount; c ++)
-                        {
-                            BRMatrix solveMat = linMat;
-                            double* w = new double[poseCount];
-                            int singularIndex;
-                            bool solved = solveMat.solve(yCols[c], w, singularIndex);
-                            if (!solved)
-                            {
-                                MGlobal::displayInfo("");
-                                MGlobal::displayInfo(thisName + MString(": RBF Error"));
-                                MGlobal::displayInfo(MString("Value error for pose at index: ") + singularIndex);
-                                MGlobal::displayInfo("The pose has no unique values and matches another pose.");
-                                matDebug.show(thisName, "Pose Input Values (Poses appear in rows)");
-                                MGlobal::displayError("RBF decomposition failed. See script editor for details.");
-                                delete[] w;
-                                return MStatus::kFailure;
-                            }
-
-                            for (i = 0; i < poseCount; i ++)
-                                wMat(i, c) = w[i];
-
-                            delete[] w;
-                        }
-                        lastSolveMethod = 1;
-                        if (exposeDataVal > 2)
+                        MGlobal::displayInfo("");
+                        MGlobal::displayInfo(
+                            thisName + MString(": RBF Error"));
+                        MGlobal::displayInfo(
+                            MString("RBF system singular at user "
+                                    "lambda = ") + userLambda +
+                            ", kernel index = " + kernelVal +
+                            ", polyDim = " + polyDim + ".");
+                        if (lastSingular >= 0)
                             MGlobal::displayInfo(
-                                thisName + MString(": solver = GE (fallback)"));
+                                MString("Last singular pose index: ") +
+                                lastSingular);
+                        MGlobal::displayInfo(
+                            "The pose set is genuinely degenerate: "
+                            "either two or more poses are exact "
+                            "duplicates in the encoded driver space, "
+                            "or (for CPD kernels) the poses lie on a "
+                            "hyperplane making the polynomial basis "
+                            "rank-deficient.");
+                        matDebug.show(thisName,
+                            "Pose Input Values (Poses appear in rows)");
+                        MGlobal::displayError(
+                            MString("RBF decomposition failed at "
+                                    "kernel index ") + kernelVal +
+                            " with polyDim = " + polyDim +
+                            "; remove duplicate poses or move poses "
+                            "off a common hyperplane "
+                            "(M_P0_RBF_POLYNOMIAL_AUGMENTATION).");
+                        return MStatus::kFailure;
                     }
 
                     if (exposeDataVal > 2)
                         wMat.show(thisName, "Weight matrix");
+                }
+
+                // -------------------------------------------------
+                // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 commit 3-real
+                // (2026-05-18) -- supersedes the stub at 501b8e1 with
+                // the true topology-resolved two-level training. NOT
+                // a revert (Policy A) -- the stub's baseNet pass-
+                // through is the trivial-hierarchy fast path inside
+                // this block.
+                //
+                // Behavioural matrix:
+                //   all poses parent=-1 AND all masks empty:
+                //       baseNet = wMat / polyMat passthrough,
+                //       deltaNets empty -- numerically equivalent to
+                //       Phase 15 within machine epsilon (the new code
+                //       below short-circuits on this condition).
+                //   any pose parent != -1 OR any explicit mask:
+                //       topology resolver + per-subnet subset solver
+                //       runs. baseNet is trained on base poses with
+                //       union(mask). deltaNets[parent_id] is trained
+                //       on children with RHS = Actual - Predicted_Base,
+                //       child driver projected onto baseNet.active
+                //       Drivers (hard rail #7).
+                //
+                // 5 honest-failure warn paths (anchor: honest-failure
+                // strengthened):
+                //   * recursive parent (parent of parent != -1) ->
+                //     demote child to base + warn (hard rail #2).
+                //   * OOB driver mask index -> drop + warn (hard
+                //     rail #13 class 2).
+                //   * explicit mask whose every entry is OOB ->
+                //     pose still contributes to union (degraded);
+                //     warn so the user knows (hard rail #13 class 3).
+                //   * sibling delta mask inconsistency -> take union
+                //     + warn (hard rail #8).
+                //   * subset solver returned singular -> displayError
+                //     identifying which net failed + which kernel,
+                //     fall back to legacy wMat (which already ran
+                //     before this block) so inference does not
+                //     completely break.
+                {
+                    const unsigned driverDimAll = matPoses.getColSize();
+
+                    // -- topology resolver (Stage 2.1) ----------------
+                    std::vector<int> basePoseIndices;
+                    std::unordered_map<int, std::vector<int>> childGroups;
+                    bool anyExplicitParent = false;
+                    bool anyExplicitMask = false;
+                    for (unsigned p = 0; p < poseCount; ++p) {
+                        int parent =
+                            ((size_t)p < prevPoseParentArr.size())
+                            ? prevPoseParentArr[p] : -1;
+                        // M_P0_RBF_HIERARCHICAL_READ_FIX (2026-05-18)
+                        // -- treat self-parent (pose i pointing to
+                        // itself) as base. Self-cycle is geometrically
+                        // meaningless and a common shape for phantom
+                        // multi-slot reads (Maya pre-allocates with
+                        // unpredictable values). Hard cap defended by
+                        // both the (parent < 0) below and this guard.
+                        if (parent < 0
+                            || (unsigned)parent >= poseCount
+                            || parent == (int)p) {
+                            basePoseIndices.push_back((int)p);
+                            continue;
+                        }
+                        anyExplicitParent = true;
+                        // Hard-cap-2: parent must itself be base.
+                        int grand =
+                            ((size_t)parent < prevPoseParentArr.size())
+                            ? prevPoseParentArr[parent] : -1;
+                        if (grand >= 0 && (unsigned)grand < poseCount
+                            && grand != parent) {
+                            MGlobal::displayWarning(
+                                MString("M_P0_RBF_HIERARCHICAL_TWO_LEVEL: "
+                                        "pose ") + p +
+                                " parent (" + parent + ") is itself a "
+                                "delta -- demoting to base (hard-cap-2 "
+                                "layers).");
+                            basePoseIndices.push_back((int)p);
+                        } else {
+                            childGroups[parent].push_back((int)p);
+                        }
+                    }
+                    for (unsigned p = 0; p < poseCount; ++p) {
+                        if ((size_t)p < prevPoseDriverMaskArr.size()
+                            && !prevPoseDriverMaskArr[p].empty())
+                        {
+                            anyExplicitMask = true;
+                            break;
+                        }
+                    }
+
+                    // Trivial-hierarchy fast path: byte-equivalent to
+                    // Phase 15. baseNet = wMat passthrough, deltaNets
+                    // empty.
+                    if (!anyExplicitParent && !anyExplicitMask) {
+                        baseNet.wMat = wMat;
+                        baseNet.polyMat = polyMat;
+                        baseNet.poseIndices.clear();
+                        baseNet.poseIndices.reserve(poseCount);
+                        for (unsigned p = 0; p < poseCount; ++p)
+                            baseNet.poseIndices.push_back((int)p);
+                        baseNet.activeDrivers.clear();
+                        baseNet.activeDrivers.reserve(driverDimAll);
+                        for (unsigned d = 0; d < driverDimAll; ++d)
+                            baseNet.activeDrivers.push_back((int)d);
+                        baseNet.isActiveLinear.assign(
+                            driverDimAll, true);
+                        deltaNets.clear();
+                        // M_P0_HIERARCHICAL_ENGINE_EXACT: no explicit
+                        // parent, no explicit mask -- inference takes
+                        // the legacy full-pose path (Phase 15
+                        // numerically equivalent).
+                        subnetEngaged = false;
+                        subnetCacheDirty = false;
+                    }
+                    else {
+                        // M_P0_RBF_HIERARCHICAL_TWO_LEVEL deltaNets
+                        // marker (strings-grep anchor for build
+                        // verification).
+                        static const char *kDeltaNetsMarker =
+                            "RBFtools: training deltaNets per "
+                            "parent_id with Shepard gating.";
+                        (void)kDeltaNetsMarker;
+                        // -- driver mask union helper (Stage 2.2 /
+                        // Stage 2.3 sibling union) ---------------------
+                        auto buildUnion = [&](
+                                const std::vector<int> &poseList,
+                                std::vector<int> &outDrivers,
+                                const char *netLabel)
+                        {
+                            outDrivers.clear();
+                            std::vector<bool> seen(driverDimAll, false);
+                            bool anyPoseHasEmptyMask = false;
+                            bool anyPoseInconsistent = false;
+                            std::vector<std::vector<int>>
+                                normalizedMasks(poseList.size());
+                            for (size_t li = 0;
+                                 li < poseList.size(); ++li)
+                            {
+                                int pi = poseList[li];
+                                if ((size_t)pi
+                                        >= prevPoseDriverMaskArr.size()
+                                    || prevPoseDriverMaskArr[pi]
+                                            .empty())
+                                {
+                                    // Empty mask = all drivers
+                                    // (backward compat). Mark this
+                                    // pose explicitly so the union
+                                    // grows to driverDimAll below.
+                                    anyPoseHasEmptyMask = true;
+                                    normalizedMasks[li].clear();
+                                    continue;
+                                }
+                                bool anyValid = false;
+                                for (int idx :
+                                     prevPoseDriverMaskArr[pi])
+                                {
+                                    if (idx < 0
+                                        || (unsigned)idx
+                                            >= driverDimAll)
+                                    {
+                                        MGlobal::displayWarning(
+                                            MString(
+                                                "M_P0_RBF_HIERARCHICAL"
+                                                "_TWO_LEVEL: OOB "
+                                                "driver mask index ")
+                                            + idx + " on pose " + pi +
+                                            " (max " +
+                                            (int)(driverDimAll - 1)
+                                            + "), dropping.");
+                                        continue;
+                                    }
+                                    if (!seen[(unsigned)idx]) {
+                                        seen[(unsigned)idx] = true;
+                                    }
+                                    normalizedMasks[li].push_back(idx);
+                                    anyValid = true;
+                                }
+                                if (!anyValid) {
+                                    MGlobal::displayWarning(
+                                        MString(
+                                            "M_P0_RBF_HIERARCHICAL_"
+                                            "TWO_LEVEL: explicit "
+                                            "driver mask on pose ")
+                                        + pi + " collapsed to empty "
+                                        "after OOB filter -- pose "
+                                        "kept in net via union "
+                                        "extension.");
+                                }
+                            }
+                            // If any pose had an empty mask, the
+                            // union is "all drivers".
+                            if (anyPoseHasEmptyMask) {
+                                outDrivers.reserve(driverDimAll);
+                                for (unsigned d = 0;
+                                     d < driverDimAll; ++d)
+                                    outDrivers.push_back((int)d);
+                            } else {
+                                for (unsigned d = 0;
+                                     d < driverDimAll; ++d)
+                                    if (seen[d])
+                                        outDrivers.push_back((int)d);
+                            }
+                            // Sibling inconsistency check: if any
+                            // child's normalized mask != union, warn.
+                            for (size_t li = 0;
+                                 li < poseList.size(); ++li)
+                            {
+                                if (normalizedMasks[li].empty()
+                                    && anyPoseHasEmptyMask) continue;
+                                std::vector<int> sorted_local =
+                                    normalizedMasks[li];
+                                std::sort(sorted_local.begin(),
+                                          sorted_local.end());
+                                if (sorted_local != outDrivers
+                                    && !anyPoseHasEmptyMask)
+                                {
+                                    anyPoseInconsistent = true;
+                                    break;
+                                }
+                            }
+                            if (anyPoseInconsistent) {
+                                MGlobal::displayWarning(
+                                    MString(
+                                        "M_P0_RBF_HIERARCHICAL_TWO_"
+                                        "LEVEL: sibling driver mask "
+                                        "inconsistent in net '")
+                                    + netLabel +
+                                    "' -- taking union (Shepard "
+                                    "gating still valid).");
+                            }
+                        };
+
+                        // -- per-subnet trainer ----------------------
+                        // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28):
+                        // exact subset trainer. Mirrors the legacy
+                        // training pipeline 1:1 on the row/column
+                        // subset:
+                        //   getDistances -> getActivations (REAL
+                        //   kernel + per-pose sigma_pair; Bug E fix
+                        //   -- the original ship solved against the
+                        //   raw distance matrix) -> +lambda*I ->
+                        //   polyDim == 0 ? Cholesky/GE
+                        //              : augmented saddle-point GE
+                        //   with C-lite degenerate-column drop
+                        //   (Bug G fix -- polyMat was a zero-filled
+                        //   placeholder; anchors #3/#4 now truly run
+                        //   per subnet).
+                        // RHS (targetValues) is prepared by the
+                        // caller in the ANCHORED space (Bug F fix).
+                        // Returns true on success.
+                        auto trainSubNet = [&](
+                                RBFSubNet &net,
+                                const BRMatrix &targetValues,
+                                const char *netLabel) -> bool
+                        {
+                            const unsigned nP =
+                                (unsigned)net.poseIndices.size();
+                            const unsigned nD =
+                                (unsigned)net.activeDrivers.size();
+                            if (nP == 0 || nD == 0) return false;
+                            // subset matPoses (already normalized
+                            // upstream so cosine/distance call uses
+                            // the same conditioning as the legacy
+                            // wMat path).
+                            BRMatrix subPoses;
+                            subPoses.setSize(nP, nD);
+                            for (unsigned r = 0; r < nP; ++r) {
+                                int pIdx = net.poseIndices[r];
+                                for (unsigned c = 0; c < nD; ++c)
+                                    subPoses(r, c) =
+                                        matPoses(
+                                            (unsigned)pIdx,
+                                            (unsigned)
+                                                net.activeDrivers[c]);
+                            }
+                            // Distances -> kernel activations. The
+                            // per-pose sigma subset keeps K[i,j]'s
+                            // sigma_pair identical to what the
+                            // unified forward (inferSubNetExact /
+                            // getPoseWeights) uses at evaluation.
+                            BRMatrix linMatSub = getDistances(
+                                subPoses, distanceTypeVal,
+                                (int)effectiveEncoding,
+                                !genericMode);
+                            std::vector<double> subWidths;
+                            if (!perPoseWidths.empty()) {
+                                subWidths.reserve(nP);
+                                for (unsigned r = 0; r < nP; ++r) {
+                                    const int pIdx =
+                                        net.poseIndices[r];
+                                    subWidths.push_back(
+                                        ((size_t)pIdx <
+                                         perPoseWidths.size())
+                                        ? perPoseWidths[(size_t)pIdx]
+                                        : getRadiusValue());
+                                }
+                            }
+                            getActivations(linMatSub, subWidths,
+                                           getRadiusValue(),
+                                           kernelVal);
+                            // lambda*I (regularization preserved per
+                            // net).
+                            const double netLambda =
+                                (regularizationVal > 0.0)
+                                ? regularizationVal : 0.0;
+                            if (netLambda > 0.0) {
+                                for (unsigned d = 0; d < nP; ++d)
+                                    linMatSub(d, d) += netLambda;
+                            }
+                            // RHS = targetValues[poseIndices, :]
+                            // (anchored space, quat columns zeroed /
+                            // so(3) tangent -- caller's contract).
+                            std::vector<std::vector<double>> yCols(
+                                solveCount,
+                                std::vector<double>(nP, 0.0));
+                            for (unsigned r = 0; r < nP; ++r) {
+                                int pIdx = net.poseIndices[r];
+                                for (unsigned c = 0; c < solveCount; ++c)
+                                    yCols[c][r] = targetValues(
+                                        (unsigned)pIdx, c);
+                            }
+                            net.wMat = BRMatrix();
+                            net.wMat.setSize(nP, solveCount);
+                            const double singTol =
+                                (netLambda > 0.0)
+                                ? ((netLambda * 1e-3 < 1.0e-9)
+                                   ? 1.0e-9
+                                   : (netLambda * 1e-3 < 1.0e-4
+                                      ? netLambda * 1e-3
+                                      : 1.0e-4))
+                                : 1.0e-4;
+                            bool solved = false;
+                            const int subPolyDim =
+                                getPolynomialDim(kernelVal,
+                                                 (int)nD);
+                            if (subPolyDim == 0) {
+                                // Strictly-PD kernel: Cholesky tier 1,
+                                // GE tier 2 (legacy dispatch).
+                                net.polyMat = BRMatrix();
+                                net.isActiveLinear.assign(nD, true);
+                                {
+                                    BRMatrix chol = linMatSub;
+                                    if (chol.cholesky()) {
+                                        std::vector<double> x;
+                                        for (unsigned c = 0;
+                                             c < solveCount; ++c)
+                                        {
+                                            chol.choleskySolve(
+                                                yCols[c], x);
+                                            for (unsigned i = 0;
+                                                 i < nP; ++i)
+                                                net.wMat(i, c) = x[i];
+                                        }
+                                        solved = true;
+                                    }
+                                }
+                                if (!solved) {
+                                    bool geOk = true;
+                                    for (unsigned c = 0;
+                                         c < solveCount; ++c)
+                                    {
+                                        BRMatrix solveMat = linMatSub;
+                                        solveMat.setSingularThreshold(
+                                            singTol);
+                                        std::vector<double> w(nP, 0.0);
+                                        int singIdx = -1;
+                                        if (!solveMat.solve(
+                                                yCols[c], w.data(),
+                                                singIdx))
+                                        {
+                                            geOk = false;
+                                            break;
+                                        }
+                                        for (unsigned i = 0;
+                                             i < nP; ++i)
+                                            net.wMat(i, c) = w[i];
+                                    }
+                                    if (geOk) solved = true;
+                                }
+                            } else {
+                                // CPD kernel: augmented saddle-point
+                                // system with C-lite reduced P
+                                // (anchors #3 + #4, same construction
+                                // as the legacy full-pose path).
+                                bool anyDeg = false;
+                                detectDegeneratePolyCols(
+                                    subPoses, 1.0e-8,
+                                    net.isActiveLinear, anyDeg);
+                                int activeLin = 0;
+                                for (size_t j = 0;
+                                     j < net.isActiveLinear.size(); ++j)
+                                    if (net.isActiveLinear[j])
+                                        ++activeLin;
+                                const int activePolyDim = 1 + activeLin;
+                                std::vector<int> activeToCol;
+                                activeToCol.push_back(-1);
+                                for (size_t j = 0;
+                                     j < net.isActiveLinear.size(); ++j)
+                                    if (net.isActiveLinear[j])
+                                        activeToCol.push_back((int)j);
+
+                                const unsigned augN =
+                                    nP + (unsigned)activePolyDim;
+                                BRMatrix A;
+                                A.setSize(augN, augN);
+                                for (unsigned ai = 0; ai < nP; ++ai)
+                                    for (unsigned aj = 0; aj < nP; ++aj)
+                                        A(ai, aj) = linMatSub(ai, aj);
+                                std::vector<double> pRow;
+                                for (unsigned ai = 0; ai < nP; ++ai) {
+                                    polyBasis(
+                                        subPoses.getRowVector(ai),
+                                        subPolyDim, pRow);
+                                    for (int pk = 0;
+                                         pk < activePolyDim; ++pk)
+                                    {
+                                        const int col =
+                                            activeToCol[(size_t)pk];
+                                        const double v =
+                                            (col < 0)
+                                            ? pRow[0]
+                                            : pRow[1 + (size_t)col];
+                                        A(ai, nP + (unsigned)pk) = v;
+                                        A(nP + (unsigned)pk, ai) = v;
+                                    }
+                                }
+                                net.polyMat = BRMatrix();
+                                net.polyMat.setSize(
+                                    (unsigned)subPolyDim, solveCount);
+                                bool geOk = true;
+                                std::vector<double> yAug(augN, 0.0);
+                                std::vector<double> wAug(augN, 0.0);
+                                for (unsigned c = 0;
+                                     c < solveCount; ++c)
+                                {
+                                    BRMatrix solveMat = A;
+                                    solveMat.setSingularThreshold(
+                                        singTol);
+                                    for (unsigned ai = 0;
+                                         ai < nP; ++ai)
+                                        yAug[ai] = yCols[c][ai];
+                                    for (unsigned k = nP;
+                                         k < augN; ++k)
+                                        yAug[k] = 0.0;
+                                    std::fill(wAug.begin(),
+                                              wAug.end(), 0.0);
+                                    int singIdx = -1;
+                                    if (!solveMat.solve(
+                                            yAug, wAug.data(),
+                                            singIdx))
+                                    {
+                                        geOk = false;
+                                        break;
+                                    }
+                                    for (unsigned i = 0; i < nP; ++i)
+                                        net.wMat(i, c) = wAug[i];
+                                    for (int pk = 0;
+                                         pk < activePolyDim; ++pk)
+                                    {
+                                        const int col =
+                                            activeToCol[(size_t)pk];
+                                        const unsigned fullRow =
+                                            (col < 0)
+                                            ? 0u
+                                            : (unsigned)(1 + col);
+                                        net.polyMat(fullRow, c) =
+                                            wAug[nP + (unsigned)pk];
+                                    }
+                                }
+                                solved = geOk;
+                            }
+                            if (!solved) {
+                                MGlobal::displayError(
+                                    MString(
+                                        "M_P0_RBF_HIERARCHICAL_TWO_"
+                                        "LEVEL: subnet '") + netLabel +
+                                    "' singular -- falling back to "
+                                    "legacy wMat (Phase 15 path).");
+                                return false;
+                            }
+                            return true;
+                        };
+
+                        // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28):
+                        // the old Gaussian-approximation inferSubNet
+                        // lambda is GONE -- training-time Predicted_
+                        // Base and inference-time Base_Output now
+                        // share inferSubNetExact (same kernel, same
+                        // sigma, same polynomial term; Bug B fix).
+
+                        // Anchored target space (Bug F fix): the
+                        // legacy solver trains on y - anchor and the
+                        // finalize loop adds the anchor back, so the
+                        // subnet RHS must live in the same space.
+                        // Quat-group columns are zeroed -- QWA owns
+                        // them, the scalar solve must not move them
+                        // (mirrors legacy yCols handling).
+                        BRMatrix anchoredValues;
+                        anchoredValues.setSize(poseCount, solveCount);
+                        for (unsigned r = 0; r < poseCount; ++r) {
+                            for (unsigned c = 0;
+                                 c < solveCount; ++c)
+                            {
+                                if (c < isQuatMember.size()
+                                    && isQuatMember[c])
+                                {
+                                    anchoredValues(r, c) = 0.0;
+                                    continue;
+                                }
+                                double anchor = 0.0;
+                                if (genericMode
+                                    && c < outputIsScaleArr.size())
+                                    anchor = outputIsScaleArr[c]
+                                             ? 1.0 : baseValueArr[c];
+                                anchoredValues(r, c) =
+                                    matValues(r, c) - anchor;
+                            }
+                        }
+
+                        // -- TRAIN BASE NET (Stage 2.2) --------------
+                        baseNet.poseIndices = basePoseIndices;
+                        buildUnion(basePoseIndices,
+                                   baseNet.activeDrivers,
+                                   "baseNet");
+                        if (basePoseIndices.empty()
+                            || baseNet.activeDrivers.empty()
+                            || !trainSubNet(baseNet, anchoredValues,
+                                            "baseNet"))
+                        {
+                            // No usable base -- fall back to legacy
+                            // wMat passthrough (Phase 15 path). The
+                            // legacy wMat was ALSO solved against
+                            // anchored RHS, full pose set, full
+                            // driver set -- inferSubNetExact on this
+                            // passthrough is numerically the legacy
+                            // forward.
+                            baseNet.wMat = wMat;
+                            baseNet.polyMat = polyMat;
+                            baseNet.poseIndices.clear();
+                            for (unsigned p = 0; p < poseCount; ++p)
+                                baseNet.poseIndices.push_back((int)p);
+                            baseNet.activeDrivers.clear();
+                            for (unsigned d = 0;
+                                 d < driverDimAll; ++d)
+                                baseNet.activeDrivers.push_back(
+                                    (int)d);
+                            baseNet.isActiveLinear.assign(
+                                driverDimAll, true);
+                        }
+
+                        // -- TRAIN DELTA NETS (Stage 2.3) ------------
+                        // Per-channel RHS family (engine-exact brief
+                        // §2.2):
+                        //   translate/rotate: anchored Actual minus
+                        //     Predicted_Base (additive delta).
+                        //   scale (Phase 17a): Actual/Predicted - 1
+                        //     (multiplicative relative delta in FULL
+                        //     value space; anchor for scale is 1.0).
+                        //   quat group (Phase 17b): so(3) tangent
+                        //     log(qb^-1 * qa) into the group's first
+                        //     3 columns, 4th column 0.
+                        deltaNets.clear();
+                        bool scaleDeltaDivZeroWarned = false;
+                        for (auto &kv : childGroups) {
+                            int parentId = kv.first;
+                            std::vector<int> &childList = kv.second;
+                            if (childList.empty()) continue;
+
+                            RBFSubNet net;
+                            net.poseIndices = childList;
+                            buildUnion(childList, net.activeDrivers,
+                                       "deltaNet");
+                            if (net.activeDrivers.empty()) continue;
+
+                            BRMatrix deltaTarget;
+                            deltaTarget.setSize(poseCount, solveCount);
+                            for (unsigned r = 0; r < poseCount; ++r)
+                                for (unsigned c = 0;
+                                     c < solveCount; ++c)
+                                    deltaTarget(r, c) = 0.0;
+                            for (int childIdx : childList) {
+                                // Child's full driver vector in the
+                                // NORMALIZED space (matPoses rows are
+                                // post-normalizeColumns); empty norms
+                                // tells the unified forward to skip
+                                // re-normalization. Projection onto
+                                // baseNet.activeDrivers happens
+                                // inside inferSubNetExact (hard
+                                // rail #7).
+                                std::vector<double> childDriver(
+                                    driverDimAll, 0.0);
+                                for (unsigned d = 0;
+                                     d < driverDimAll; ++d)
+                                    childDriver[d] = matPoses(
+                                        (unsigned)childIdx, d);
+                                MDoubleArray predicted;
+                                bool clipTmp = false;
+                                bool degenTmp = false;
+                                inferSubNetExact(
+                                    predicted, baseNet,
+                                    matPoses, matValues,
+                                    childDriver,
+                                    std::vector<double>(),  // already normalized
+                                    perPoseWidths,
+                                    getRadiusValue(),
+                                    distanceTypeVal,
+                                    (int)effectiveEncoding,
+                                    kernelVal, solveCount,
+                                    quatGroupStarts, isQuatMember,
+                                    clipTmp, degenTmp);
+                                for (unsigned c = 0;
+                                     c < solveCount; ++c)
+                                {
+                                    if (c < isQuatMember.size()
+                                        && isQuatMember[c])
+                                        continue;  // groups below
+                                    if (genericMode
+                                        && c < outputIsScaleArr.size()
+                                        && outputIsScaleArr[c])
+                                    {
+                                        // Phase 17a multiplicative:
+                                        // predicted is anchored
+                                        // (y - 1); full value =
+                                        // pred + 1.
+                                        const double predFull =
+                                            predicted[c] + 1.0;
+                                        const double actualFull =
+                                            matValues(
+                                                (unsigned)childIdx, c);
+                                        if (std::fabs(predFull)
+                                                < 1e-6)
+                                        {
+                                            deltaTarget(
+                                                (unsigned)childIdx,
+                                                c) = 0.0;
+                                            if (!scaleDeltaDivZeroWarned)
+                                            {
+                                                MGlobal::displayWarning(
+                                                    MString(
+                                                        "M_P0_HIERARCHICAL"
+                                                        "_ENGINE_EXACT: "
+                                                        "scale channel ")
+                                                    + c + " predicted "
+                                                    "base magnitude < "
+                                                    "1e-6 at pose " +
+                                                    childIdx +
+                                                    " -- multiplicative "
+                                                    "delta disabled for "
+                                                    "this sample "
+                                                    "(PHASE17a).");
+                                                scaleDeltaDivZeroWarned
+                                                    = true;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            deltaTarget(
+                                                (unsigned)childIdx,
+                                                c) =
+                                                actualFull / predFull
+                                                - 1.0;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // Additive channels: both
+                                        // sides in anchored space.
+                                        deltaTarget(
+                                            (unsigned)childIdx, c) =
+                                            anchoredValues(
+                                                (unsigned)childIdx, c)
+                                            - predicted[c];
+                                    }
+                                }
+                                // Phase 17b: per quat group, so(3)
+                                // tangent delta = log(qb^-1 * qa).
+                                for (size_t g = 0;
+                                     g < quatGroupStarts.size(); ++g)
+                                {
+                                    const int s = quatGroupStarts[g];
+                                    if (s < 0
+                                        || (unsigned)(s + 3)
+                                            >= solveCount)
+                                        continue;
+                                    double qb[4] = {
+                                        predicted[(unsigned)(s + 0)],
+                                        predicted[(unsigned)(s + 1)],
+                                        predicted[(unsigned)(s + 2)],
+                                        predicted[(unsigned)(s + 3)] };
+                                    quatNormalizeXYZW(qb);
+                                    double qa[4] = {
+                                        matValues((unsigned)childIdx,
+                                                  (unsigned)(s + 0)),
+                                        matValues((unsigned)childIdx,
+                                                  (unsigned)(s + 1)),
+                                        matValues((unsigned)childIdx,
+                                                  (unsigned)(s + 2)),
+                                        matValues((unsigned)childIdx,
+                                                  (unsigned)(s + 3)) };
+                                    quatNormalizeXYZW(qa);
+                                    // Hemisphere-align qa to qb so
+                                    // the tangent is the short arc.
+                                    if (qa[0]*qb[0] + qa[1]*qb[1]
+                                        + qa[2]*qb[2] + qa[3]*qb[3]
+                                            < 0.0)
+                                    {
+                                        qa[0] = -qa[0]; qa[1] = -qa[1];
+                                        qa[2] = -qa[2]; qa[3] = -qa[3];
+                                    }
+                                    const double qbInv[4] = {
+                                        -qb[0], -qb[1], -qb[2], qb[3] };
+                                    double dq[4];
+                                    quatMulXYZW(qbInv, qa, dq);
+                                    double v[3];
+                                    quatLogSO3(dq, v);
+                                    deltaTarget((unsigned)childIdx,
+                                                (unsigned)(s + 0)) = v[0];
+                                    deltaTarget((unsigned)childIdx,
+                                                (unsigned)(s + 1)) = v[1];
+                                    deltaTarget((unsigned)childIdx,
+                                                (unsigned)(s + 2)) = v[2];
+                                    deltaTarget((unsigned)childIdx,
+                                                (unsigned)(s + 3)) = 0.0;
+                                }
+                            }
+                            // The delta net is a PURE SCALAR
+                            // interpolant (additive residuals /
+                            // multiplicative ratios / so(3) tangent
+                            // components are all linear spaces), so
+                            // its quat columns must be solved like
+                            // scalars: hand trainSubNet a target with
+                            // the so(3) rows in place. trainSubNet
+                            // does not special-case quat columns --
+                            // the caller-side zeroing above only
+                            // applies to anchoredValues (baseNet).
+                            if (trainSubNet(net, deltaTarget,
+                                            "deltaNet"))
+                            {
+                                deltaNets[parentId] = net;
+                            }
+                            else
+                            {
+                                MGlobal::displayWarning(
+                                    MString(
+                                        "M_P0_RBF_HIERARCHICAL_TWO_"
+                                        "LEVEL: deltaNet for parent ")
+                                    + parentId + " failed to train -- "
+                                    "this parent's children will fall "
+                                    "back to base-only inference.");
+                            }
+                        }
+                        // Engine-exact marker (strings-grep anchor
+                        // for build verification).
+                        static const char *kEngineExactMarker =
+                            "RBFtools: PHASE17 engine-exact subnet "
+                            "training (multiplicative scale + so(3) "
+                            "quat delta).";
+                        (void)kEngineExactMarker;
+                        subnetEngaged = true;
+                        subnetCacheDirty = false;
+                    }
                 }
 
                 // -----------------------------------------------
@@ -1934,23 +3544,72 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
 
                 bool qwaAnyClipped = false;
                 bool qwaAnyDegenerate = false;
-                getPoseWeights(weightsArray,
-                               matPoses,
-                               inputNorms,
-                               driver,
-                               poseModes,
-                               wMat,
-                               perPoseWidths,         // Commit 0b
-                               getRadiusValue(),      // fallback
-                               distanceTypeVal,
-                               (int)effectiveEncoding,
-                               /*isMatrixMode*/ !genericMode,
-                               kernelVal,
-                               matValues,
-                               quatGroupStarts,
-                               isQuatMember,
-                               qwaAnyClipped,
-                               qwaAnyDegenerate);
+                // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): pass
+                // polyMat + polyDim so getPoseWeights can add the
+                // polynomial term to CPD-kernel inference. polyDim is
+                // re-derived from kernelVal + matPoses cols here so
+                // the inference side stays consistent with the
+                // training-side dispatch above.
+                const int polyDimInfer =
+                    getPolynomialDim(kernelVal,
+                                     (int)matPoses.getColSize());
+                // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28) -- Bug A
+                // fix: when the hierarchy / driver-mask engine is
+                // engaged, Pass 1's Base_Output MUST come from the
+                // baseNet subset (base poses only, masked driver
+                // subset), NOT the legacy full-pose wMat. The legacy
+                // call fed delta poses into the "base" output, which
+                // (a) leaked delta into quaternion channels (QWA over
+                // ALL poses -- e2e scenario D failure) and (b) double-
+                // counted deltas on additive channels (legacy output
+                // at a child pose already ≈ Actual, then + alpha*Δ on
+                // top, silently masked by the Output Clamp).
+                // Also fixes Bug H: a mask-only rig (no parents) now
+                // actually projects the driver subset.
+                // subnetEngaged == false -> legacy path, numerically
+                // equivalent to Phase 15.
+                if (subnetEngaged && genericMode
+                    && !baseNet.poseIndices.empty())
+                {
+                    inferSubNetExact(weightsArray,
+                                     baseNet,
+                                     matPoses,
+                                     matValues,
+                                     driver,
+                                     inputNorms,
+                                     perPoseWidths,
+                                     getRadiusValue(),
+                                     distanceTypeVal,
+                                     (int)effectiveEncoding,
+                                     kernelVal,
+                                     solveCount,
+                                     quatGroupStarts,
+                                     isQuatMember,
+                                     qwaAnyClipped,
+                                     qwaAnyDegenerate);
+                }
+                else
+                {
+                    getPoseWeights(weightsArray,
+                                   matPoses,
+                                   inputNorms,
+                                   driver,
+                                   poseModes,
+                                   wMat,
+                                   perPoseWidths,         // Commit 0b
+                                   getRadiusValue(),      // fallback
+                                   distanceTypeVal,
+                                   (int)effectiveEncoding,
+                                   /*isMatrixMode*/ !genericMode,
+                                   kernelVal,
+                                   matValues,
+                                   quatGroupStarts,
+                                   isQuatMember,
+                                   qwaAnyClipped,
+                                   qwaAnyDegenerate,
+                                   polyMat,             // M_P0_RBF_POLYNOMIAL_AUGMENTATION
+                                   polyDimInfer);
+                }
                 if (qwaAnyClipped && !qwaClippedWarningIssued)
                 {
                     MGlobal::displayWarning(thisName + MString(
@@ -1971,6 +3630,337 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
 
                 if (exposeDataVal == 2 || exposeDataVal == 4)
                     showArray(weightsArray, thisName + " : RBF Weights");
+
+                // -----------------------------------------------
+                // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 commit 4
+                // (2026-05-18) -- Three-Pass Shepard-gated inference.
+                // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28) --
+                // rewritten on the exact subnet engine + PHASE17a/b.
+                //
+                // weightsArray entering this block is the TRUE
+                // Base_Output: when subnetEngaged, Pass 1 above
+                // routed through inferSubNetExact(baseNet) -- base
+                // poses only, masked driver subset, QWA over base
+                // poses only. (Output Clamp NOT YET applied -- that
+                // lives in the per-channel finalize loop below.)
+                //
+                // When deltaNets is empty (trivial hierarchy or
+                // mask-only rig), this block is a no-op.
+                //
+                // When deltaNets is non-empty:
+                //   Gate:   phi_per_base_pose -- Gaussian gate kernel
+                //           (NOT the interpolation kernel: a gate
+                //           must decay monotonically from phi(0) =
+                //           max; TPS/MQ/Linear grow with distance
+                //           and would invert the anti-leak
+                //           guarantee -- engine-exact brief §2.4).
+                //           alpha_p = phi_p / sum_{k in base} phi_k,
+                //           partition of unity; sum < 1e-12 -> all
+                //           alpha = 0 (extrapolation safety).
+                //   Pass 2: Delta_p = inferSubNetExact(deltaNets[p])
+                //           -- same kernel/sigma/poly as training.
+                //   Pass 3: per output channel c:
+                //     * additive (translate/rotate):
+                //         y_c += sum_p alpha_p * Delta_p[c]
+                //     * outputIsScale[c] (PHASE17a multiplicative,
+                //       anchored space, scale anchor = 1):
+                //         y_c <- (y_c + 1) * prod_p(1 + alpha_p *
+                //                DeltaRel_p[c]) - 1
+                //     * quat group (PHASE17b so(3) log-exp,
+                //       Grassia 1998):
+                //         v_g = sum_p alpha_p * delta_so3_p
+                //         q <- q_base (x) exp(v_g), renormalized
+                //
+                // Input clamp already ran upstream (line 1685 area)
+                // BEFORE getPoseWeights, so the driver vector used
+                // here is the clamped one. Output clamp will run
+                // AFTER this block in the finalize loop.
+                if (!deltaNets.empty()
+                    && !baseNet.poseIndices.empty()
+                    && genericMode)
+                {
+                    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Shepard
+                    // gating marker (strings-grep anchor for
+                    // build verification).
+                    static const char *kHierarchicalMarker =
+                        "RBFtools: HIERARCHICAL Shepard-gated "
+                        "delta blend active.";
+                    (void)kHierarchicalMarker;
+                    const unsigned nBase =
+                        (unsigned)baseNet.poseIndices.size();
+                    // Pass 1: phi_per_base_pose (Gaussian fallback
+                    // for the Shepard gate; the math only needs
+                    // partition of unity, not exact kernel match
+                    // with getPoseWeights -- the brief uses the
+                    // kernel scalar conceptually, and Gaussian's
+                    // monotonic decay is sufficient for the
+                    // partition + far-driver-decay guarantees).
+                    std::vector<double> phi_per_base_pose(nBase, 0.0);
+                    double phi_sum = 0.0;
+                    {
+                        double radius_fb = getRadiusValue();
+                        if (radius_fb <= 1e-9) radius_fb = 1.0;
+                        for (unsigned r = 0; r < nBase; ++r) {
+                            int pIdx = baseNet.poseIndices[r];
+                            double sq = 0.0;
+                            for (size_t cc = 0;
+                                 cc < baseNet.activeDrivers.size()
+                                 && cc < driver.size(); ++cc)
+                            {
+                                int dIdx =
+                                    baseNet.activeDrivers[cc];
+                                if (dIdx < 0
+                                    || (unsigned)dIdx
+                                        >= driver.size())
+                                    continue;
+                                double dv =
+                                    driver[(size_t)dIdx]
+                                    - matPoses(
+                                        (unsigned)pIdx,
+                                        (unsigned)dIdx);
+                                sq += dv * dv;
+                            }
+                            double d_norm =
+                                std::sqrt(sq) / radius_fb;
+                            double phi_v =
+                                std::exp(-d_norm * d_norm);
+                            phi_per_base_pose[r] = phi_v;
+                            phi_sum += phi_v;
+                        }
+                    }
+
+                    // Pass 2 + Pass 3 (M_P0_HIERARCHICAL_ENGINE_EXACT
+                    // 2026-05-28): per-parent delta forward through
+                    // the SAME unified subnet evaluator used at
+                    // training time (Bug C fix -- the old inline
+                    // Gaussian loop evaluated a different basis than
+                    // the kernel the delta weights were solved
+                    // against, breaking interpolation at the child
+                    // poses). Channel composition:
+                    //   additive (translate/rotate):
+                    //       y += sum_p alpha_p * Delta_p
+                    //   multiplicative scale (PHASE17a), anchored
+                    //   space (scale anchor = 1):
+                    //       y <- (y + 1) * prod_p(1 + alpha_p *
+                    //            DeltaRel_p) - 1
+                    //   quat group (PHASE17b), so(3) tangent blend:
+                    //       v_g = sum_p alpha_p * delta_so3_p
+                    //       q <- q_base (x) exp(v_g)   [Grassia 98]
+                    if (phi_sum > 1e-12) {
+                        std::unordered_map<int, int>
+                            basePoseToLocal;
+                        for (unsigned r = 0; r < nBase; ++r)
+                            basePoseToLocal[
+                                baseNet.poseIndices[r]] = (int)r;
+
+                        std::vector<double> addSum(solveCount, 0.0);
+                        std::vector<double> multProd(solveCount, 1.0);
+                        std::vector<double> so3Sum(
+                            quatGroupStarts.size() * 3, 0.0);
+                        bool anyDelta = false;
+
+                        for (const auto &kv : deltaNets) {
+                            int parentPoseIdx = kv.first;
+                            const RBFSubNet &net = kv.second;
+                            auto it =
+                                basePoseToLocal.find(parentPoseIdx);
+                            if (it == basePoseToLocal.end())
+                                continue;
+                            const double phi_parent =
+                                phi_per_base_pose[(unsigned)
+                                                  it->second];
+                            const double alpha =
+                                phi_parent / phi_sum;
+                            if (alpha < 1e-12) continue;
+                            // Delta forward. EMPTY quat-group list:
+                            // every column takes the scalar path --
+                            // a delta net is a pure scalar
+                            // interpolant whose quat columns hold
+                            // so(3) tangent components, not
+                            // quaternions (no QWA).
+                            MDoubleArray deltaOut;
+                            bool clipTmp = false;
+                            bool degenTmp = false;
+                            inferSubNetExact(
+                                deltaOut, net, matPoses, matValues,
+                                driver, inputNorms, perPoseWidths,
+                                getRadiusValue(), distanceTypeVal,
+                                (int)effectiveEncoding, kernelVal,
+                                solveCount,
+                                std::vector<int>(),
+                                std::vector<bool>(),
+                                clipTmp, degenTmp);
+                            if (deltaOut.length() < solveCount)
+                                continue;
+                            anyDelta = true;
+                            for (unsigned c = 0;
+                                 c < solveCount; ++c)
+                            {
+                                if (c < isQuatMember.size()
+                                    && isQuatMember[c])
+                                    continue;  // per-group below
+                                if (c < outputIsScaleArr.size()
+                                    && outputIsScaleArr[c])
+                                    multProd[c] *=
+                                        (1.0 + alpha * deltaOut[c]);
+                                else
+                                    addSum[c] +=
+                                        alpha * deltaOut[c];
+                            }
+                            for (size_t g = 0;
+                                 g < quatGroupStarts.size(); ++g)
+                            {
+                                const int s = quatGroupStarts[g];
+                                if (s < 0
+                                    || (unsigned)(s + 3)
+                                        >= solveCount)
+                                    continue;
+                                so3Sum[g*3 + 0] += alpha
+                                    * deltaOut[(unsigned)(s + 0)];
+                                so3Sum[g*3 + 1] += alpha
+                                    * deltaOut[(unsigned)(s + 1)];
+                                so3Sum[g*3 + 2] += alpha
+                                    * deltaOut[(unsigned)(s + 2)];
+                            }
+                        }
+
+                        if (anyDelta) {
+                            for (unsigned c = 0;
+                                 c < solveCount
+                                 && c < weightsArray.length(); ++c)
+                            {
+                                if (c < isQuatMember.size()
+                                    && isQuatMember[c])
+                                    continue;
+                                const double cur = weightsArray[c];
+                                if (c < outputIsScaleArr.size()
+                                    && outputIsScaleArr[c])
+                                    weightsArray.set(
+                                        (cur + 1.0) * multProd[c]
+                                        - 1.0, c);
+                                else
+                                    weightsArray.set(
+                                        cur + addSum[c], c);
+                            }
+                            // PHASE17b: rotate the QWA base
+                            // quaternion by the alpha-blended so(3)
+                            // tangent. ||v|| ~ 0 -> exp = identity
+                            // (far driver: quat == Base_Output,
+                            // anti-leak guarantee preserved).
+                            for (size_t g = 0;
+                                 g < quatGroupStarts.size(); ++g)
+                            {
+                                const int s = quatGroupStarts[g];
+                                if (s < 0
+                                    || (unsigned)(s + 3)
+                                        >= weightsArray.length())
+                                    continue;
+                                const double v[3] = {
+                                    so3Sum[g*3 + 0],
+                                    so3Sum[g*3 + 1],
+                                    so3Sum[g*3 + 2] };
+                                if (std::fabs(v[0]) < 1e-12
+                                    && std::fabs(v[1]) < 1e-12
+                                    && std::fabs(v[2]) < 1e-12)
+                                    continue;
+                                double qb[4] = {
+                                    weightsArray[(unsigned)(s + 0)],
+                                    weightsArray[(unsigned)(s + 1)],
+                                    weightsArray[(unsigned)(s + 2)],
+                                    weightsArray[(unsigned)(s + 3)] };
+                                quatNormalizeXYZW(qb);
+                                double dq[4];
+                                quatExpSO3(v, dq);
+                                double qf[4];
+                                quatMulXYZW(qb, dq, qf);
+                                quatNormalizeXYZW(qf);
+                                weightsArray.set(
+                                    qf[0], (unsigned)(s + 0));
+                                weightsArray.set(
+                                    qf[1], (unsigned)(s + 1));
+                                weightsArray.set(
+                                    qf[2], (unsigned)(s + 2));
+                                weightsArray.set(
+                                    qf[3], (unsigned)(s + 3));
+                            }
+                        }
+                    }
+                }
+
+                // -----------------------------------------------
+                // M_P0_QUATERNION_BACKEND_LAND (2026-05-10):
+                // node-level outputEncoding inverse transform.
+                // Generic mode only — Matrix mode's output is one-hot
+                // pose weights, not Euler triples, so the encoding has
+                // no semantic anchor there.
+                //
+                // Quaternion / ExpMap rebuild the per-channel weighted
+                // sum that getPoseWeights produced into a quat-blended
+                // value. BendRoll (2) / SwingTwist (4) fall through to
+                // the legacy weighted sum and emit a once-per-rig
+                // warning — backend support deferred to v5.x post-final
+                // (each requires bespoke decomposition + composition
+                // math distinct from the Quat / ExpMap pair).
+                // -----------------------------------------------
+                MPlug outEncRebuildPlug(thisNode, RBFtools::outputEncoding);
+                short outEncRebuildVal = outEncRebuildPlug.asShort();
+                if (genericMode && outEncRebuildVal != 0)
+                {
+                    // M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): outputEncoding
+                    // schema only registers {0=Euler, 1=Quaternion,
+                    // 2=ExpMap} (cpp:295-298) — there is no BendRoll(2)
+                    // / SwingTwist(4) slot at all on the output side
+                    // (those are inputEncoding-only enum values). The
+                    // ce136dd version had a `else if (!...Issued)` branch
+                    // warning about deferred BendRoll/SwingTwist
+                    // implementation; that branch was unreachable dead
+                    // code and the user-facing message contradicted the
+                    // schema. Removed; applyOutputEncodingBlend's own
+                    // early-return handles the only legal "skip" case
+                    // (outputEncoding == 0 / Euler).
+                    MDoubleArray perPosePhi;
+                    computePerPosePhi(perPosePhi,
+                                      matPoses,
+                                      inputNorms,
+                                      driver,
+                                      poseModes,
+                                      perPoseWidths,
+                                      getRadiusValue(),
+                                      distanceTypeVal,
+                                      (int)effectiveEncoding,
+                                      /*isMatrixMode*/ !genericMode,
+                                      kernelVal);
+                    // rotateOrder = 0 (XYZ default). Per-driven-source
+                    // rotateOrder schema (drivenInputRotateOrder) does
+                    // not yet exist — see addendum
+                    // §M_P0_QUATERNION_BACKEND_LAND for the v5.x
+                    // forward pointer.
+                    bool overlapWarning = false;
+                    applyOutputEncodingBlend(weightsArray,
+                                             perPosePhi,
+                                             matValues,
+                                             outEncRebuildVal,
+                                             /*rotateOrder*/ 0,
+                                             isQuatMember,
+                                             overlapWarning);
+                    // M_P0_QUAT_RBF_OVERLAP_DISCLOSE: once-per-rig
+                    // disclosure when at least one B2 3-block was
+                    // skipped because it intersects a B1 (QWA) 4-
+                    // tuple. B1 takes precedence (Markley max-eigenvec
+                    // is more robust than nlerp / ExpMap weighted sum
+                    // for unit-quat output); this warning surfaces
+                    // the silent skip to user disclosure level.
+                    if (overlapWarning && !outputEncodingOverlapWarningIssued)
+                    {
+                        MGlobal::displayWarning(thisName + MString(
+                            ": outputEncoding 3-block overlaps quaternion "
+                            "group; skipped to preserve B1 QWA output. "
+                            "Resolve by adjusting outputQuaternionGroupStart "
+                            "or splitting the Euler 3-block off the quat "
+                            "group's column range."));
+                        outputEncodingOverlapWarningIssued = true;
+                    }
+                }
 
                 // -----------------------------------------------
                 // define the final values
@@ -2005,6 +3995,50 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                     if (genericMode && i < outputIsScaleArr.size())
                     {
                         value += outputIsScaleArr[i] ? 1.0 : baseValueArr[i];
+                    }
+
+                    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17):
+                    // output clamp -- Houdini rig::RBFInterpolation
+                    // clamp=True industry default. Inference output
+                    // is clipped into the training driven-value range
+                    // (per channel), optionally inflated by alpha.
+                    // Part C safety guards: AABB inversion auto-
+                    // corrected, negative inflation floored to 0,
+                    // NaN/Inf replaced with the AABB midpoint.
+                    if (outputClampEnabledVal
+                        && genericMode
+                        && i < outputMinVec.size()
+                        && i < outputMaxVec.size())
+                    {
+                        double yMin = outputMinVec[i];
+                        double yMax = outputMaxVec[i];
+                        if (yMax < yMin) {
+                            std::swap(yMin, yMax);
+                            MGlobal::displayWarning(
+                                MString("RBFtools: output AABB "
+                                        "inverted (max < min) at "
+                                        "channel ") + (unsigned)i +
+                                ", auto-corrected "
+                                "(M_P0_RBF_ANTI_OVERSHOOT "
+                                "Part C.1).");
+                        }
+                        const double rOut = yMax - yMin;
+                        const double inflOut =
+                            (outputClampInflationVal > 0.0)
+                            ? outputClampInflationVal : 0.0;
+                        const double lo = yMin - inflOut * rOut;
+                        const double hi = yMax + inflOut * rOut;
+                        if (!std::isfinite(value)) {
+                            value = (yMin + yMax) * 0.5;
+                            MGlobal::displayWarning(
+                                MString("RBFtools: non-finite output "
+                                        "at channel ") + (unsigned)i +
+                                ", replaced with AABB midpoint "
+                                "(M_P0_RBF_ANTI_OVERSHOOT "
+                                "Part C.3).");
+                        }
+                        if (value < lo) value = lo;
+                        else if (value > hi) value = hi;
                     }
 
                     // Set the final weight.
@@ -3023,12 +5057,43 @@ double RBFtools::getPoseDelta(std::vector<double> vec1, std::vector<double> vec2
     // -----------------------------------------------------------------
 
     // Raw (v4 legacy + BendRoll/SwingTwist placeholder target).
+    //
+    // M_P0_KERNEL_ALGO_AUDIT (2026-05-10): the legacy code path
+    // honoured distType == 1 (Angle) ONLY when n == 3 (single
+    // driver, single 3-vector). For multi-driver Raw setups
+    // (n = 3K, K > 1) the Angle selection was silently dropped
+    // and the path fell through to Euclidean — a multi-driver
+    // bug that produced inconsistent UX (the same dropdown
+    // choice meant different things at N=1 vs N>1).
+    //
+    // Fix: when n is a positive multiple of 3, aggregate per-3-
+    // block angles via L2 (matches the Riemannian product-
+    // manifold semantics used by the per-block quat / swing-twist
+    // distance helpers). N=1 case is unchanged (single block →
+    // single getAngle return).
     if (encoding == 0)
     {
         if (distType == 0)
             return getRadius(vec1, vec2);
         if (n == 3)
             return getAngle(vec1, vec2);
+        if (n > 3 && n % 3 == 0)
+        {
+            // Per-3-block angle aggregation, L2.
+            const size_t blocks = n / 3;
+            double sumSq = 0.0;
+            for (size_t k = 0; k < blocks; ++k)
+            {
+                const size_t base = k * 3;
+                const std::vector<double> a = {
+                    vec1[base + 0], vec1[base + 1], vec1[base + 2]};
+                const std::vector<double> b = {
+                    vec2[base + 0], vec2[base + 1], vec2[base + 2]};
+                const double ang = getAngle(a, b);
+                sumSq += ang * ang;
+            }
+            return sqrt(sumSq);
+        }
         return getRadius(vec1, vec2);
     }
 
@@ -3059,11 +5124,30 @@ double RBFtools::getPoseDelta(std::vector<double> vec1, std::vector<double> vec2
         return getRadius(vec1, vec2);  // defensive
     }
 
-    // Unknown encoding: defensive fall-through.
+    // Unknown encoding: defensive fall-through. Mirrors the Raw
+    // branch's multi-block Angle aggregation (M_P0_KERNEL_ALGO_AUDIT)
+    // so an out-of-range encoding value still produces a consistent
+    // distance shape across N=1 and N>1 driver setups.
     if (distType == 0)
         return getRadius(vec1, vec2);
     if (n == 3)
         return getAngle(vec1, vec2);
+    if (n > 3 && n % 3 == 0)
+    {
+        const size_t blocks = n / 3;
+        double sumSq = 0.0;
+        for (size_t k = 0; k < blocks; ++k)
+        {
+            const size_t base = k * 3;
+            const std::vector<double> a = {
+                vec1[base + 0], vec1[base + 1], vec1[base + 2]};
+            const std::vector<double> b = {
+                vec2[base + 0], vec2[base + 1], vec2[base + 2]};
+            const double ang = getAngle(a, b);
+            sumSq += ang * ang;
+        }
+        return sqrt(sumSq);
+    }
     return getRadius(vec1, vec2);
 }
 
@@ -3171,6 +5255,341 @@ void RBFtools::encodeEulerToQuaternion(double rx, double ry, double rz,
         default: out = mul(mul(qX, qY), qZ); break; // XYZ (Maya default)
     }
     qx = out.x; qy = out.y; qz = out.z; qw = out.w;
+}
+
+
+//
+// Description:
+//      M_P0_QUATERNION_BACKEND_LAND (2026-05-10) — inverse of
+//      encodeEulerToQuaternion. Maya's MQuaternion::asEulerRotation
+//      returns the canonical XYZ Tait-Bryan extraction; reorderIt
+//      then rewrites the same orientation under the requested
+//      rotateOrder so the result matches the convention the encode
+//      side used. Output (rx, ry, rz) is in radians.
+//
+void RBFtools::decodeQuaternionToEuler(double qx, double qy, double qz,
+                                       double qw, short rotateOrder,
+                                       double &rx, double &ry, double &rz)
+{
+    MQuaternion q(qx, qy, qz, qw);
+    MEulerRotation e = q.asEulerRotation();
+    MEulerRotation::RotationOrder order;
+    switch (rotateOrder)
+    {
+        case 1:  order = MEulerRotation::kYZX; break;
+        case 2:  order = MEulerRotation::kZXY; break;
+        case 3:  order = MEulerRotation::kXZY; break;
+        case 4:  order = MEulerRotation::kYXZ; break;
+        case 5:  order = MEulerRotation::kZYX; break;
+        case 0:
+        default: order = MEulerRotation::kXYZ; break;
+    }
+    e.reorderIt(order);
+    rx = e.x;
+    ry = e.y;
+    rz = e.z;
+}
+
+
+//
+// Description:
+//      M_P0_QUATERNION_BACKEND_LAND (2026-05-10) — inverse of
+//      encodeQuaternionToExpMap, then to Euler. ExpMap → Quat uses
+//      the standard q = (axis * sin(θ/2), cos(θ/2)) reconstruction
+//      with a Taylor branch (sin(θ/2)/θ → 1/2) for the θ → 0
+//      neighbourhood so log(identity) round-trips to (0, 0, 0)
+//      without a divide-by-zero. The encode side canonicalises to
+//      the q_w ≥ 0 hemisphere; the decode side reproduces a quat
+//      with q_w = cos(θ/2) ≥ 0 for θ ∈ [0, π], matching that.
+//
+void RBFtools::decodeExpMapToEuler(double lx, double ly, double lz,
+                                   short rotateOrder,
+                                   double &rx, double &ry, double &rz)
+{
+    const double angle = sqrt(lx * lx + ly * ly + lz * lz);
+    double qx, qy, qz, qw;
+    if (angle < 1.0e-9)
+    {
+        // Taylor: sin(θ/2) / θ → 1/2 as θ → 0; cos(θ/2) → 1.
+        qx = lx * 0.5;
+        qy = ly * 0.5;
+        qz = lz * 0.5;
+        qw = 1.0;
+    }
+    else
+    {
+        const double half = angle * 0.5;
+        const double s = sin(half) / angle;
+        qx = lx * s;
+        qy = ly * s;
+        qz = lz * s;
+        qw = cos(half);
+    }
+    decodeQuaternionToEuler(qx, qy, qz, qw, rotateOrder, rx, ry, rz);
+}
+
+
+//
+// Description:
+//      M_P0_QUATERNION_BACKEND_LAND (2026-05-10) — nlerp blend of
+//      N unit quaternions weighted by RBF activations. Antipodal
+//      correction picks the short-arc representative of each input
+//      quat against the first one as the reference hemisphere; this
+//      avoids the double-cover producing a near-zero average for
+//      two inputs that geometrically agree but differ in sign. The
+//      degenerate fallback (sum norm below 1e-9) returns the
+//      reference quat verbatim — this only happens when all weights
+//      collapse to zero or the inputs cancel exactly, both of which
+//      already mean "no signal"; identity rotation is the safest
+//      observable result.
+//
+//      nlerp (normalised linear interpolation) is the right blend
+//      for RBF: associative, commutative, and gradient-continuous
+//      under varying weights. SLERP would give constant angular
+//      speed but loses gradient smoothness when the active pose set
+//      changes; nlerp is what Maya-style rigging tools (Pose Space
+//      Deformer, etc.) use in production.
+//
+void RBFtools::nlerpQuaternions(const std::vector<double> &qxs,
+                                const std::vector<double> &qys,
+                                const std::vector<double> &qzs,
+                                const std::vector<double> &qws,
+                                const std::vector<double> &weights,
+                                double &outX, double &outY,
+                                double &outZ, double &outW)
+{
+    const size_t n = qxs.size();
+    if (n == 0)
+    {
+        outX = 0.0; outY = 0.0; outZ = 0.0; outW = 1.0;
+        return;
+    }
+    const double rx = qxs[0], ry = qys[0], rz = qzs[0], rw = qws[0];
+    double sumX = 0.0, sumY = 0.0, sumZ = 0.0, sumW = 0.0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        double qx = qxs[i], qy = qys[i], qz = qzs[i], qw = qws[i];
+        // Short-arc selection against the reference.
+        const double dot = qx * rx + qy * ry + qz * rz + qw * rw;
+        if (dot < 0.0)
+        {
+            qx = -qx; qy = -qy; qz = -qz; qw = -qw;
+        }
+        const double w = (i < weights.size()) ? weights[i] : 0.0;
+        sumX += w * qx;
+        sumY += w * qy;
+        sumZ += w * qz;
+        sumW += w * qw;
+    }
+    const double norm = sqrt(sumX*sumX + sumY*sumY + sumZ*sumZ + sumW*sumW);
+    if (norm < 1.0e-9)
+    {
+        outX = rx; outY = ry; outZ = rz; outW = rw;
+        return;
+    }
+    const double inv = 1.0 / norm;
+    outX = sumX * inv;
+    outY = sumY * inv;
+    outZ = sumZ * inv;
+    outW = sumW * inv;
+}
+
+
+//
+// Description:
+//      M_P0_QUATERNION_BACKEND_LAND (2026-05-10) — replay the per-
+//      pose distance + interpolateRbf loop without folding the
+//      result into a per-channel weighted sum. getPoseWeights
+//      already does exactly this on its way to the per-channel
+//      accumulate; we cannot read those phi values back out because
+//      the sum has been reduced. Re-running the loop keeps the math
+//      identical (same dist / sigma / kernel inputs) so the per-pose
+//      phi here matches what getPoseWeights used internally.
+//
+void RBFtools::computePerPosePhi(MDoubleArray &outPhi,
+                                 BRMatrix poses,
+                                 std::vector<double> norms,
+                                 std::vector<double> driver,
+                                 MIntArray poseModes,
+                                 const std::vector<double> &widths,
+                                 double widthFallback,
+                                 int distType,
+                                 int encoding,
+                                 bool isMatrixMode,
+                                 short kernelType)
+{
+    const unsigned int poseCount = poses.getRowSize();
+    outPhi.setLength(poseCount);
+    driver = normalizeVector(driver, norms);
+    for (unsigned int i = 0; i < poseCount; ++i)
+    {
+        std::vector<double> dv = driver;
+        std::vector<double> ps = poses.getRowVector(i);
+        if (isMatrixMode && dv.size() >= 4)
+        {
+            if (poseModes[i] == 1)
+                dv[3] = 0.0;
+            else if (poseModes[i] == 2)
+            {
+                dv[0] = 0.0;
+                dv[1] = 0.0;
+                dv[2] = 0.0;
+            }
+        }
+        const double dist = getPoseDelta(dv, ps, distType, encoding,
+                                          isMatrixMode);
+        const double sigma_i =
+            (i < widths.size() && widths[i] > 0.0)
+                ? widths[i]
+                : (widthFallback > 0.0 ? widthFallback : 1.0);
+        outPhi.set(interpolateRbf(dist, sigma_i, kernelType), i);
+    }
+}
+
+
+//
+// Description:
+//      M_P0_QUATERNION_BACKEND_LAND (2026-05-10) — overwrite the
+//      Euler 3-blocks of weightsArray with quat-blended values.
+//
+//      For each contiguous 3-block (output[s..s+2]):
+//        Quaternion (1): per-pose Euler → quat (encodeEulerToQuat),
+//                        nlerp with per-pose phi (antipodal short-arc),
+//                        decode back to Euler → overwrite [s..s+2].
+//        ExpMap (3):     per-pose Euler → quat → ExpMap, weighted
+//                        sum in ℝ³ (linear blend is the natural
+//                        Lie-algebra interpolation), decode back to
+//                        Euler → overwrite [s..s+2].
+//
+//      Channels not covered by a full 3-block (count % 3 != 0; tail
+//      remainder) keep their legacy per-channel weighted sum. This
+//      matches the assumption that Euler rotations are stored as
+//      contiguous (rx, ry, rz) triples — which is how recall_pose
+//      and add_pose write them.
+//
+//      rotateOrder is the node-level default for now; per-driven-source
+//      rotateOrder schema (drivenInputRotateOrder) does not yet exist
+//      and is deferred to v5.x.
+//
+void RBFtools::applyOutputEncodingBlend(MDoubleArray &weightsArray,
+                                        const MDoubleArray &perPosePhi,
+                                        const BRMatrix &poseVals,
+                                        short outputEncoding,
+                                        short rotateOrder,
+                                        const std::vector<bool> &isQuatMember,
+                                        bool &overlapWarning)
+{
+    // M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): outputEncoding schema is
+    // {0=Euler, 1=Quaternion, 2=ExpMap} (cpp:295-298) — node-level
+    // outputEncoding has only three slots. The original ce136dd
+    // dispatch used {1, 3} which mirrored inputEncoding's enum
+    // ({0=Raw, 1=Quat, 2=BendRoll, 3=ExpMap, 4=SwingTwist}); under
+    // that bug, picking ExpMap (value=2) silently fell through this
+    // early return and degenerated to Raw weighted-sum semantics.
+    // The fix here is purely renumbering: the math below for the
+    // outputEncoding == 2 branch is the original ExpMap path,
+    // unchanged.
+    overlapWarning = false;
+    if (outputEncoding != 1 && outputEncoding != 2) return;
+    const unsigned int count = weightsArray.length();
+    const unsigned int poseCount = perPosePhi.length();
+    if (count == 0 || poseCount == 0) return;
+    const unsigned int blocks = count / 3;
+    if (blocks == 0) return;
+
+    std::vector<double> wts(poseCount);
+    for (unsigned int p = 0; p < poseCount; ++p)
+        wts[p] = perPosePhi[p];
+
+    // M_P0_QUAT_RBF_OVERLAP_DISCLOSE (2026-05-10): mask available
+    // when the caller (compute()) passed isQuatMember sized to match
+    // weightsArray. A B2 3-block whose [s..s+2] intersects any B1
+    // member must be skipped — B1 (QWA Power Iteration on cpp:4310-
+    // 4355) has already written its 4-tuple to those slots and a
+    // subsequent nlerp / ExpMap weighted sum here would silently
+    // overwrite that result. The skip is per-block (not per-element)
+    // so partial-overlap blocks still preserve B1 fully; the entire
+    // 3-block falls back to the legacy weighted-sum value that
+    // getPoseWeights wrote (cpp:4300-4304), which for the Euler
+    // remainder (column outside any quat group) is correct. See
+    // §5.4.1 in docs/设计文档/RBFtools_v5_multi_quat_implementation.md.
+    const bool haveMask = (isQuatMember.size() == count);
+
+    for (unsigned int b = 0; b < blocks; ++b)
+    {
+        const unsigned int s = b * 3;
+
+        // Skip B2 block whose [s..s+2] intersects a B1 quat member.
+        if (haveMask)
+        {
+            bool overlaps = false;
+            for (unsigned int k = 0; k < 3; ++k)
+            {
+                if (isQuatMember[s + k])
+                {
+                    overlaps = true;
+                    break;
+                }
+            }
+            if (overlaps)
+            {
+                overlapWarning = true;
+                continue;
+            }
+        }
+
+        if (outputEncoding == 1)
+        {
+            // Quaternion path: encode → nlerp → decode.
+            std::vector<double> qxs(poseCount), qys(poseCount),
+                                 qzs(poseCount), qws(poseCount);
+            for (unsigned int p = 0; p < poseCount; ++p)
+            {
+                const double rx = poseVals(p, s + 0);
+                const double ry = poseVals(p, s + 1);
+                const double rz = poseVals(p, s + 2);
+                double qx, qy, qz, qw;
+                encodeEulerToQuaternion(rx, ry, rz, rotateOrder,
+                                        qx, qy, qz, qw);
+                qxs[p] = qx; qys[p] = qy; qzs[p] = qz; qws[p] = qw;
+            }
+            double oqx, oqy, oqz, oqw;
+            nlerpQuaternions(qxs, qys, qzs, qws, wts,
+                             oqx, oqy, oqz, oqw);
+            double rx, ry, rz;
+            decodeQuaternionToEuler(oqx, oqy, oqz, oqw, rotateOrder,
+                                    rx, ry, rz);
+            weightsArray.set(rx, s + 0);
+            weightsArray.set(ry, s + 1);
+            weightsArray.set(rz, s + 2);
+        }
+        else if (outputEncoding == 2)  // ExpMap (M_P0_OUTPUT_EXPMAP_FIX)
+        {
+            // ExpMap path: linear weighted sum in ℝ³.
+            double sumLx = 0.0, sumLy = 0.0, sumLz = 0.0;
+            for (unsigned int p = 0; p < poseCount; ++p)
+            {
+                const double rx = poseVals(p, s + 0);
+                const double ry = poseVals(p, s + 1);
+                const double rz = poseVals(p, s + 2);
+                double qx, qy, qz, qw;
+                encodeEulerToQuaternion(rx, ry, rz, rotateOrder,
+                                        qx, qy, qz, qw);
+                double lx, ly, lz;
+                encodeQuaternionToExpMap(qx, qy, qz, qw, lx, ly, lz);
+                const double w = wts[p];
+                sumLx += w * lx;
+                sumLy += w * ly;
+                sumLz += w * lz;
+            }
+            double rx, ry, rz;
+            decodeExpMapToEuler(sumLx, sumLy, sumLz, rotateOrder,
+                                rx, ry, rz);
+            weightsArray.set(rx, s + 0);
+            weightsArray.set(ry, s + 1);
+            weightsArray.set(rz, s + 2);
+        }
+    }
 }
 
 
@@ -3774,13 +6193,65 @@ void RBFtools::getActivations(BRMatrix &mat,
 // Return Value:
 //      double          The new interpolated value.
 //
+// M_P0_KERNEL_ALGO_AUDIT (2026-05-10): kernel φ(d, w) catalog.
+// Document the σ (width) semantics and PSD properties of each
+// kernel so a reader does not need to reverse-engineer them
+// from the math alone. Every kernel here is paired with the
+// per-block / Riemannian distance metric chosen by getPoseDelta;
+// the (kernel × distance) combination defines the K matrix shape.
+//
+// All formulas use d = pre-computed pairwise distance from
+// getPoseDelta. The width parameter w is the user's "Radius"
+// or per-pose σ (commit M_PER_POSE_SIGMA).
+//
+//   Type 0 — Linear:   φ(d) = d                       (φ(0) = 0)
+//     PSD: NO. K[i,i] = 0 always; needs λ > 0 to solve.
+//     Width: IGNORED (mathematical definition has no width).
+//     UX note: the radius slider has no effect on Linear.
+//
+//   Type 1 — Gaussian 1:  φ(d) = exp(-d / w²)        (φ(0) = 1)
+//     PSD: YES (positive definite kernel).
+//     Width: w² is the spatial decay rate; LARGER w → smoother.
+//     NOTE: this is NOT the canonical Gaussian (which has d²
+//     in the exponent). It is an exponential-decay-of-distance
+//     kernel preserved for backcompat. Use Gaussian 2 for true
+//     bell-shape decay.
+//
+//   Type 2 — Gaussian 2:  φ(d) = exp(-d² / w²)       (φ(0) = 1)
+//     PSD: YES (canonical Gaussian).
+//     Width: w is the half-width at φ=e^-1 ≈ 0.37; LARGER w →
+//     smoother. The internal 0.707 multiplier folds 1/√2 so the
+//     exponent denominator becomes w² (not 2·w²).
+//
+//   Type 3 — Thin Plate:  φ(r) = r²·log(r), r=d/w    (φ(0) = 0)
+//     PSD: conditionally negative-definite (works with λ > 0).
+//     Width: w normalizes d before the TPS evaluation.
+//     M_P0_KERNEL_ALGO_AUDIT: r ≤ 0 (including float-noise
+//     negatives) returns 0.0 to preserve K's PSD structure.
+//
+//   Type 4 — Multi-Quadric:  φ(d) = √(d² + w²)      (φ(0) = w)
+//     PSD: conditionally positive-definite.
+//     Width: w is the chord shift; LARGER w → smoother.
+//     NAME NOTE: schema labels this "Multi-Quadratic Biharmonic"
+//     for backcompat; the formula is the standard Multi-Quadric
+//     (MQ), not biharmonic MQ ((d²+w²)^1.5). The label is
+//     historical and not changed to preserve existing rig schema.
+//
+//   Type 5 — Inverse Multi-Quadric:  φ(d) = 1/√(d² + w²)
+//     PSD: positive definite.                       (φ(0) = 1/w)
+//     Width: w is the chord shift; LARGER w → smoother.
+//
+// Auto-adaptive λ retry (M_P0_AUTO_ADAPTIVE_LAMBDA) handles all
+// of the above PSD edge cases — kernels whose K is non-SPD at
+// the user's λ get auto-bumped λ until Cholesky / GE succeed,
+// so kernel choice no longer dictates "must set λ > 0 manually".
 double RBFtools::interpolateRbf(double value, double width, short kernelType)
 {
     double result = 0.0;
-    
+
     if (width == 0.0)
         width = 1.0;
-    
+
     // linear
     result = value;
     
@@ -3798,6 +6269,17 @@ double RBFtools::interpolateRbf(double value, double width, short kernelType)
         result = exp(-(value * value) / (2.0 * width * width));
     }
     // thin plate
+    // M_P0_KERNEL_SWITCH_ROLLBACK_1 (2026-05-11): TPS r<=0 reverted to
+    // oracle (X:\RBFtools cpp:3806-3807) behavior `result = value`. The
+    // M_P0_KERNEL_ALGO_AUDIT (2600d3e) change `result = 0.0` was intended
+    // to defend K's PSD against normalizeColumns floating-point noise,
+    // but user observation (kernel switch + manual Apply still drifts
+    // across ALL kernels, not just TPS) combined with 3-way diff
+    // (weightDriver omits TPS; Oracle returns value) shows the 0.0
+    // defense was either unnecessary in oracle's normalize path, or
+    // absorbed by GE elimination. See docs/排查/M_P0_KERNEL_SWITCH_ROLLBACK_index.md
+    // §3.c for full analysis. Oracle commit anchor: e249ec0
+    // (= 156af4c~1, see §0.5).
     else if (kernelType == 3)
     {
         value /= width;
@@ -3845,6 +6327,141 @@ std::vector<double> RBFtools::normalizeVector(std::vector<double> vec, std::vect
 
     return vec;
 }
+
+
+//
+// M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): polynomial dimension
+// for the given kernel. CPD kernels need polynomial augmentation of
+// degree (m - 1) where m is the kernel's conditional-positive-definite
+// order. Gaussian variants are strictly PD and need no augmentation.
+//
+// Kernel id (per cpp:212-218 schema):
+//   0 = Linear                            CPD m = 1 → polyDim = 1 + d
+//   1 = Gaussian 1   (strictly PD)        polyDim = 0
+//   2 = Gaussian 2   (strictly PD)        polyDim = 0
+//   3 = Thin Plate                        CPD m = 2 → polyDim = 1 + d
+//   4 = Multi-Quadric Biharmonic (MQB)    CPD m = 1 → polyDim = 1 + d
+//   5 = Inverse Multi-Quadric Biharmonic
+//                                  (IMQB) CPD m = 1 → polyDim = 1 + d
+//
+// M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12): MQB / IMQB / Linear
+// upgraded from polyDim = 1 (constant only) to polyDim = 1 + d
+// (constant + linear in each driver dim). The strict-CPD-minimum
+// polyDim = 1 leaves no driver-derived linear columns in P, which:
+//   1. Cannot represent affine variation (global rotate / scale) in
+//      the inference field — the polynomial term can only carry a
+//      bulk DC offset, not a directional ramp.
+//   2. Leaves no surface for the column-rank defence to drop
+//      degenerate columns — the column-rank defence is a no-op when
+//      polyDim = 1.
+// Upgrading to 1 + d matches the industry-standard treatment in
+// SciPy RBFInterpolator, PyGeM (its "multi-quadratic biharmonic"
+// preset uses n + 1 + d for 3D), and Wendland 2004 §10.4. The
+// extra (d) degrees of freedom add NO risk under degree-1 linear
+// polynomial — Runge oscillation only manifests at degree ≥ 2 on
+// equispaced 1-D samples. CPD uniqueness theorem (Wendland Thm
+// 10.3) guarantees the augmented system still has a unique solution
+// as long as P has full column rank, which M_P0_RBF_COLUMN_RANK_DEFENSE
+// ensures by dropping degenerate columns at solve time.
+//
+// User λ-sweep + visual repro confirmed kernels 0/3/4/5 all need
+// augmentation under dense / redundant pose sets — the uniform 1e-5
+// (8e7a6d3) and tiered 1e-3 (4a3cae4) ceil attempts were band-aids
+// over a math defect. Polynomial augmentation is the mathematically
+// correct treatment of CPD kernels per Wendland 2004 §10, Schaback
+// 1995, and Wahba 1990.
+//
+int RBFtools::getPolynomialDim(short kernelType, int driverDim)
+{
+    if (kernelType == 1 || kernelType == 2) return 0;   // Gaussian
+    return 1 + driverDim;                               // Linear / TPS / MQB / IMQB
+}
+
+
+//
+// M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): evaluate the
+// polynomial basis at the given (normalised) input. Output is
+//   polyDim == 0   : empty
+//   polyDim == 1   : [1.0]
+//   polyDim > 1    : [1.0, vec[0], vec[1], ..., vec[polyDim - 2]]
+//
+// The same basis is used for (a) filling the P block of the augmented
+// training matrix at each pose row, and (b) the polynomial term of
+// inference at the current driver vector. Coordinate frame match
+// (both normalised) is the caller's responsibility.
+//
+void RBFtools::polyBasis(const std::vector<double> &vec, int polyDim,
+                         std::vector<double> &out)
+{
+    out.assign((size_t)(polyDim > 0 ? polyDim : 0), 0.0);
+    if (polyDim == 0) return;
+    out[0] = 1.0;
+    if (polyDim == 1) return;
+    const int linearTerms = polyDim - 1;
+    for (int i = 0; i < linearTerms && (size_t)i < vec.size(); ++i)
+        out[1 + i] = vec[i];
+}
+
+
+//
+// M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12): scan the per-column
+// variance of the normalised pose matrix and flag columns whose
+// variance falls below ``varFloor`` as "degenerate". Degenerate
+// columns become rank-deficient linear terms in the polynomial
+// basis P (1, x_0, ..., x_{d-1}); leaving them in P makes the
+// saddle-point augmented system singular even with non-trivial λ.
+//
+// ``isActiveLinear`` is sized to driverDim (= polyDim - 1); entry
+// j is true iff matPoses column j carries enough signal to be
+// kept as a linear polynomial term. The caller maps this back to
+// P's column layout: P column 0 (constant) is always kept; P
+// column 1 + j is kept iff isActiveLinear[j] is true.
+//
+// Variance threshold ``varFloor`` defaults to 1.0e-8. After
+// poseData.normalizeColumns (cpp:2942) each column has unit L2
+// norm, so variance ≈ 1/N − mean² ∈ [0, 1/N]. A column whose
+// values are bit-identical across nearly all poses (e.g. rig data
+// where one driver dim is "rest" in most poses) collapses to
+// variance ≪ 1/N. 1e-8 is roughly 1e-6 of 1/N for N = 22 poses,
+// distinguishing genuinely degenerate columns from real-data
+// columns even at small N.
+//
+// Sets ``anyDegenerate`` to true iff at least one column was
+// flagged, so the caller can emit the once-per-rig warning.
+//
+void RBFtools::detectDegeneratePolyCols(const BRMatrix &poseData,
+                                        double varFloor,
+                                        std::vector<bool> &isActiveLinear,
+                                        bool &anyDegenerate)
+{
+    const unsigned rowCount = poseData.getRowSize();
+    const unsigned colCount = poseData.getColSize();
+    isActiveLinear.assign((size_t)colCount, true);
+    anyDegenerate = false;
+    if (rowCount == 0 || colCount == 0) return;
+
+    for (unsigned j = 0; j < colCount; ++j)
+    {
+        // Mean.
+        double sum = 0.0;
+        for (unsigned i = 0; i < rowCount; ++i)
+            sum += poseData(i, j);
+        const double mean = sum / (double)rowCount;
+        // Variance (population, divide by N).
+        double sqSum = 0.0;
+        for (unsigned i = 0; i < rowCount; ++i)
+        {
+            const double d = poseData(i, j) - mean;
+            sqSum += d * d;
+        }
+        const double var = sqSum / (double)rowCount;
+        if (var < varFloor)
+        {
+            isActiveLinear[j] = false;
+            anyDegenerate = true;
+        }
+    }
+}
 //
 // Description:
 //      Calculate the individual output weights based on the current
@@ -3884,7 +6501,9 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
                                   const std::vector<int> &quatGroupStarts,
                                   const std::vector<bool> &isQuatMember,
                                   bool &qwaAnyClippedOut,
-                                  bool &qwaAnyDegenerateOut)
+                                  bool &qwaAnyDegenerateOut,
+                                  const BRMatrix &polyMatArg,
+                                  int polyDim)
 {
     unsigned int poseCount = poses.getRowSize();
     unsigned int valueCount = out.length();
@@ -3984,6 +6603,38 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
         }
     }
 
+    // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): polynomial term
+    // of CPD-kernel inference. Adds Σ_k polyMat(k, j) * p_k(driver)
+    // to each scalar output channel. polyDim == 0 (Gaussian) skips
+    // this loop entirely — bit-identical to the pre-augmentation
+    // single-kernel path.
+    //
+    // Coordinate frame match: the training-side P matrix was filled
+    // from matPoses rows, which are post-normalizeColumns (cpp:2942
+    // in getPoseData). Inference-side polyBasis is evaluated on the
+    // normalised driver (line above this comment block: ``driver =
+    // normalizeVector(driver, norms);``). Both sides share the same
+    // coordinate frame so the augmented system's [w; a] solution
+    // generalises correctly to the inference call.
+    //
+    // Quat-group dimensions (isQuatMember[j] == true) skip the
+    // polynomial accumulate for the same reason they skipped the
+    // RBF accumulate above — those dimensions are owned by the QWA
+    // post-loop below and must not be double-contributed.
+    if (polyDim > 0)
+    {
+        std::vector<double> p_x;
+        polyBasis(driver, polyDim, p_x);
+        for (j = 0; j < valueCount; ++j)
+        {
+            if (haveMask && isQuatMember[j]) continue;
+            double polySum = 0.0;
+            for (int k = 0; k < polyDim; ++k)
+                polySum += polyMatArg((unsigned)k, j) * p_x[(size_t)k];
+            out[j] += polySum;
+        }
+    }
+
     // M2.2: resolve each group's QWA. OK / ZERO_MASS / NO_CONVERGE
     // all translate to a valid write (OK = eigenvector; others =
     // identity). Non-OK results collapse into a single caller-side
@@ -4000,6 +6651,111 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
         out[(unsigned)(s + 2)] = qOut[2];
         out[(unsigned)(s + 3)] = qOut[3];
     }
+}
+
+
+//
+// M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28): unified sub-net forward.
+//
+// THE one code path for every sub-net evaluation -- training-time
+// Predicted_Base (delta RHS), inference-time Base_Output, and
+// inference-time Delta_y all flow through here, which is the
+// structural guarantee that training and inference use the same
+// kernel, the same per-pose sigma, the same polynomial term, and the
+// same driver-subset projection (Bug B / Bug C of the engine-exact
+// brief). Internally a thin subset adapter around getPoseWeights.
+//
+void RBFtools::inferSubNetExact(MDoubleArray &out,
+                                const RBFSubNet &net,
+                                const BRMatrix &posesFull,
+                                const BRMatrix &valuesFull,
+                                const std::vector<double> &driverFull,
+                                const std::vector<double> &normsFull,
+                                const std::vector<double> &widthsFull,
+                                double widthFallback,
+                                int distType,
+                                int encoding,
+                                short kernelType,
+                                unsigned solveCount,
+                                const std::vector<int> &quatGroupStarts,
+                                const std::vector<bool> &isQuatMember,
+                                bool &qwaAnyClippedOut,
+                                bool &qwaAnyDegenerateOut)
+{
+    qwaAnyClippedOut = false;
+    qwaAnyDegenerateOut = false;
+    out.setLength(solveCount);
+    for (unsigned c = 0; c < solveCount; ++c)
+        out.set(0.0, c);
+
+    const unsigned nP = (unsigned)net.poseIndices.size();
+    const unsigned nD = (unsigned)net.activeDrivers.size();
+    if (nP == 0 || nD == 0) return;
+    if (net.wMat.getRowSize() != nP || net.wMat.getColSize() != solveCount)
+        return;
+
+    // Row/column subset of the full (normalized) pose matrix.
+    BRMatrix subPoses;
+    subPoses.setSize(nP, nD);
+    BRMatrix valuesSub;
+    valuesSub.setSize(nP, solveCount);
+    std::vector<double> widthsSub;
+    widthsSub.reserve(nP);
+    for (unsigned r = 0; r < nP; ++r) {
+        const int pIdx = net.poseIndices[r];
+        if (pIdx < 0 || (unsigned)pIdx >= posesFull.getRowSize())
+            return;  // defensive: stale subnet vs re-read pose data
+        for (unsigned c = 0; c < nD; ++c) {
+            const int dIdx = net.activeDrivers[c];
+            subPoses(r, c) =
+                (dIdx >= 0 && (unsigned)dIdx < posesFull.getColSize())
+                ? posesFull((unsigned)pIdx, (unsigned)dIdx) : 0.0;
+        }
+        for (unsigned c = 0; c < solveCount; ++c)
+            valuesSub(r, c) =
+                (c < valuesFull.getColSize()
+                 && (unsigned)pIdx < valuesFull.getRowSize())
+                ? valuesFull((unsigned)pIdx, c) : 0.0;
+        widthsSub.push_back(
+            ((size_t)pIdx < widthsFull.size())
+            ? widthsFull[(size_t)pIdx] : widthFallback);
+    }
+    if (widthsFull.empty()) widthsSub.clear();
+
+    // Driver + norms projected onto the active driver subset. An
+    // empty normsFull means the caller's driver is ALREADY in the
+    // normalized space (training-time Predicted_Base reads rows of
+    // matPoses directly); normalizeVector no-ops on size mismatch.
+    std::vector<double> driverSub;
+    driverSub.reserve(nD);
+    std::vector<double> normsSub;
+    if (!normsFull.empty()) normsSub.reserve(nD);
+    for (unsigned c = 0; c < nD; ++c) {
+        const int dIdx = net.activeDrivers[c];
+        driverSub.push_back(
+            (dIdx >= 0 && (size_t)dIdx < driverFull.size())
+            ? driverFull[(size_t)dIdx] : 0.0);
+        if (!normsFull.empty())
+            normsSub.push_back(
+                (dIdx >= 0 && (size_t)dIdx < normsFull.size())
+                ? normsFull[(size_t)dIdx] : 1.0);
+    }
+
+    // Polynomial term: same polyDim formula as training; defensive
+    // shape check downgrades to 0 (no augmentation) on mismatch so a
+    // failed/legacy subnet can never feed garbage into inference.
+    int polyDim = getPolynomialDim(kernelType, (int)nD);
+    if (polyDim > 0
+        && (net.polyMat.getRowSize() != (unsigned)polyDim
+            || net.polyMat.getColSize() != solveCount))
+        polyDim = 0;
+
+    getPoseWeights(out, subPoses, normsSub, driverSub,
+                   MIntArray(), net.wMat, widthsSub, widthFallback,
+                   distType, encoding, /*isMatrixMode*/ false,
+                   kernelType, valuesSub, quatGroupStarts,
+                   isQuatMember, qwaAnyClippedOut,
+                   qwaAnyDegenerateOut, net.polyMat, polyDim);
 }
 
 
@@ -4054,17 +6810,20 @@ void RBFtools::setOutputValues(MDoubleArray weightsArray, MDataBlock data, bool 
         ids = poseMatrixIds;
     }
 
-    // M_B24a1: read outputEncoding plug. a1 forward-compat — schema +
-    // read path + DG dirty live; actual inverse transform deferred to
-    // M_B24b. The thread_local sink (加固 K.1-2) prevents MSVC O2 dead-
-    // read elimination from removing the read, which would otherwise
-    // let the attributeAffects(outputEncoding, output) edge appear
-    // dead under DG dirty propagation analysis.
+    // M_B24a1 + M_P0_QUATERNION_BACKEND_LAND (2026-05-10): the
+    // actual outputEncoding inverse transform now lives in
+    // compute() (the per-channel weighted sum is rebuilt via
+    // applyOutputEncodingBlend before this method ever sees
+    // weightsArray). The thread_local sink (加固 K.1-2) is
+    // retained here purely to keep the legacy DG dirty edge proof
+    // alive — MSVC O2 dead-read elimination would otherwise drop
+    // the plug read in compute() too if both sites collapsed to
+    // unused. The sink does no functional work; the real read +
+    // dispatch is the one in compute().
     MPlug outEncPlug(thisNode, RBFtools::outputEncoding);
     short outEncVal = outEncPlug.asShort();
     if (outEncVal != 0) {
-        // Forward-compat placeholder — see addendum §M_B24a1.
-        // Touch outEncVal in a way the optimizer cannot elide.
+        // Forward-compat placeholder retained for DG-edge protection.
         static thread_local short s_outEncSink = 0;
         s_outEncSink = outEncVal;
         (void)s_outEncSink;

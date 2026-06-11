@@ -26,6 +26,9 @@
 #include <maya/MFnMessageAttribute.h>
 #include <maya/MFnTypedAttribute.h>
 #include <maya/MFnStringArrayData.h>   // M_B24a1: driverSource_attrs default value
+#include <maya/MFnIntArrayData.h>      // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16:
+                                       //   poseDriverMask intArray reads
+#include <maya/MIntArray.h>
 #include <maya/MRampAttribute.h>
 
 #include <maya/MArrayDataBuilder.h>
@@ -37,6 +40,7 @@
 #include <maya/MMatrix.h>
 #include <maya/MPlugArray.h>
 #include <maya/MPoint.h>
+#include <maya/MEulerRotation.h>
 #include <maya/MQuaternion.h>
 #include <maya/MString.h>
 #include <maya/MStringArray.h>
@@ -55,6 +59,51 @@
 
 #include "BRMatrix.h"
 #include <vector>
+#include <unordered_map>   // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16:
+                           //   deltaNets parent-pose-index map.
+
+
+// ----------------------------------------------------------------------
+// M_P0_RBF_HIERARCHICAL_TWO_LEVEL (Phase 16) -- factored sub-net.
+// ----------------------------------------------------------------------
+// Each RBFSubNet trains its own weight matrix on a subset of poses
+// (rows) and a subset of driver dimensions (columns of the K matrix).
+// Phase 16 instantiates:
+//   * one baseNet covering every pose with poseParentIndex == -1, with
+//     activeDrivers = union of those poses' driver masks (empty mask
+//     means "all drivers", preserving backward compat); and
+//   * one deltaNet per base parent that has children (children =
+//     poses whose poseParentIndex points to that parent's logical
+//     index), with activeDrivers = union of the children's masks.
+//
+// Phase 15 math invariants are preserved per sub-net:
+//   * polynomial augmentation (polyDim = 1 + |activeDrivers|) -- the
+//     existing add-augmented-block solve runs per sub-net, so anchor
+//     M_P0_RBF_POLYNOMIAL_AUGMENTATION is honoured inside each net;
+//   * column-rank defence (C lite) records its drop mask in
+//     isActiveLinear per sub-net, so M_P0_RBF_COLUMN_RANK_DEFENSE
+//     fires independently for each net.
+struct RBFSubNet {
+    BRMatrix          wMat;             // weights, rows = poseIndices,
+                                        //   cols = solveCount.
+    BRMatrix          polyMat;          // polynomial augmentation,
+                                        //   rows = polyDim
+                                        //         (1 + activeDrivers.size()),
+                                        //   cols = solveCount.
+                                        //   M_P0_RBF_POLYNOMIAL_AUGMENTATION
+                                        //   preserved per sub-net.
+    std::vector<int>  activeDrivers;    // flat-driver-vector indices this
+                                        //   sub-net cares about (the
+                                        //   columns of K).
+    std::vector<int>  poseIndices;      // logical pose indices owned by
+                                        //   this sub-net (base: parent
+                                        //   == -1; delta: children of
+                                        //   one parent).
+    std::vector<bool> isActiveLinear;   // C lite mask per sub-net,
+                                        //   parallel to activeDrivers.
+                                        //   M_P0_RBF_COLUMN_RANK_DEFENSE
+                                        //   preserved per sub-net.
+};
 
 class RBFtools : public MPxLocatorNode
 {
@@ -142,6 +191,30 @@ public:
     // double-cover discontinuity; caller does not need to canonicalize.
     static void encodeQuaternionToExpMap(double qx, double qy, double qz, double qw,
                                          double &lx, double &ly, double &lz);
+    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): inverse of
+    // encodeEulerToQuaternion. Routes through MEulerRotation::reorderIt
+    // so the result matches Maya's native rotateOrder convention.
+    static void decodeQuaternionToEuler(double qx, double qy, double qz, double qw,
+                                        short rotateOrder,
+                                        double &rx, double &ry, double &rz);
+    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): inverse of
+    // encodeQuaternionToExpMap, then to Euler. Taylor branch for θ → 0
+    // mirrors the encode side so log(identity) round-trips to (0, 0, 0).
+    static void decodeExpMapToEuler(double lx, double ly, double lz,
+                                    short rotateOrder,
+                                    double &rx, double &ry, double &rz);
+    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): nlerp blend of N
+    // unit quaternions with antipodal correction against the first
+    // quaternion as the reference hemisphere. Returns the normalized
+    // weighted sum; degenerate (sum near zero) falls back to the
+    // reference. Ordering of (qx, qy, qz, qw) matches MQuaternion.
+    static void nlerpQuaternions(const std::vector<double> &qxs,
+                                 const std::vector<double> &qys,
+                                 const std::vector<double> &qzs,
+                                 const std::vector<double> &qws,
+                                 const std::vector<double> &weights,
+                                 double &outX, double &outY,
+                                 double &outZ, double &outW);
     // M2.1b: Swing-Twist decomposition of a unit quaternion about a
     // principal axis. q = q_swing · q_twist. When the projection norm
     // (q_w² + axis_component²) collapses below a numeric epsilon the
@@ -225,6 +298,86 @@ public:
                                short kernelType);
     static double interpolateRbf(double value, double width, short kernelType);
     static std::vector<double> normalizeVector(std::vector<double> vec, std::vector<double> factors);
+    // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): polynomial-
+    // augmentation helpers for the conditionally-positive-definite
+    // (CPD) kernel family. Mathematically, kernels like Thin Plate,
+    // Multi-Quadric, and Inverse Multi-Quadric are CPD of order m,
+    // meaning the RBF interpolation system K w = y is rank-deficient
+    // without a polynomial augmentation of degree (m - 1). The
+    // augmented system
+    //   [ K + λI   P ] [ w ]   [ y ]
+    //   [ P^T      0 ] [ a ] = [ 0 ]
+    // is invertible (when P has full column rank, i.e. poses are in
+    // general position). The polynomial basis P is the trailing
+    // matrix of polyBasis() evaluated at every training pose.
+    //
+    // getPolynomialDim returns the number of polynomial basis
+    // functions for a given (kernel, driverDim) pair:
+    //   Gaussian 1 / Gaussian 2 (strictly PD)        → 0
+    //   Linear / MQB / IMQB     (CPD order m = 1)    → 1 (constant)
+    //   Thin Plate              (CPD order m = 2)    → 1 + driverDim
+    static int getPolynomialDim(short kernelType, int driverDim);
+    // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): evaluate the
+    // polynomial basis [1, x_0, x_1, ..., x_{polyDim - 2}] at the
+    // given (normalised) input vector. ``out`` is resized to polyDim.
+    // polyDim == 0 leaves ``out`` empty; polyDim == 1 yields the
+    // constant {1.0}; polyDim > 1 prepends the constant and appends
+    // the first (polyDim - 1) entries of ``vec``.
+    static void polyBasis(const std::vector<double> &vec, int polyDim,
+                          std::vector<double> &out);
+    // M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12): variance-floor scan
+    // of normalised pose columns. Flags driver-dim columns whose
+    // variance falls below ``varFloor`` as degenerate so the
+    // augmented-system solver can drop them from the polynomial
+    // basis P. ``isActiveLinear`` is sized to poseData.getColSize()
+    // (= driverDim = polyDim - 1 for CPD kernels); P column 1 + j
+    // is kept iff entry j is true. ``anyDegenerate`` is true iff
+    // at least one column was flagged.
+    static void detectDegeneratePolyCols(const BRMatrix &poseData,
+                                         double varFloor,
+                                         std::vector<bool> &isActiveLinear,
+                                         bool &anyDegenerate);
+    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): replay the per-pose
+    // distance + interpolateRbf loop without doing the per-channel
+    // weighted sum. Used by applyOutputEncodingBlend so the quat
+    // blend can see per-pose phi values that getPoseWeights folds
+    // away. Cheap enough — same arithmetic getPoseWeights already
+    // performs once per compute.
+    static void computePerPosePhi(MDoubleArray &outPhi,
+                                  BRMatrix poses,
+                                  std::vector<double> norms,
+                                  std::vector<double> driver,
+                                  MIntArray poseModes,
+                                  const std::vector<double> &widths,
+                                  double widthFallback,
+                                  int distType,
+                                  int encoding,
+                                  bool isMatrixMode,
+                                  short kernelType);
+    // M_P0_QUATERNION_BACKEND_LAND (2026-05-10): rebuild the entries
+    // of weightsArray that fall inside Euler 3-blocks under the
+    // node-level outputEncoding. For each 3-block (output[s..s+2])
+    // collects per-pose Euler triples, encodes to quat, nlerp blends
+    // with per-pose phi (Quaternion mode) or weights ExpMap vectors
+    // linearly (ExpMap mode), then decodes back to Euler and
+    // overwrites weightsArray[s..s+2]. Channels outside any block
+    // (count not divisible by 3, or trailing tail) keep their
+    // legacy weighted-sum value. outEncoding 2 / 4 fall through;
+    // the caller emits the once-per-rig "deferred to v5.x" warning.
+    //
+    // M_P0_QUAT_RBF_OVERLAP_DISCLOSE (2026-05-10): isQuatMember mask
+    // identifies columns owned by B1 (QWA quatGroupStarts). Any
+    // 3-block intersecting a B1 column is skipped here so B1's
+    // QWA output is not silently overwritten. overlapWarning is
+    // raised when at least one block was skipped — caller wires it
+    // to a once-per-rig MGlobal::displayWarning for user disclosure.
+    static void applyOutputEncodingBlend(MDoubleArray &weightsArray,
+                                         const MDoubleArray &perPosePhi,
+                                         const BRMatrix &poseVals,
+                                         short outputEncoding,
+                                         short rotateOrder,
+                                         const std::vector<bool> &isQuatMember,
+                                         bool &overlapWarning);
     // Commit 0b (M_PER_POSE_SIGMA): width parameter is now per-pose.
     // widths[i] is consumed inside the i-th pose loop iteration as
     // the σ for interpolateRbf(dist, σ_i, kernel). Empty vector or
@@ -248,7 +401,43 @@ public:
                                const std::vector<int> &quatGroupStarts,
                                const std::vector<bool> &isQuatMember,
                                bool &qwaAnyClippedOut,
-                               bool &qwaAnyDegenerateOut);
+                               bool &qwaAnyDegenerateOut,
+                               // M_P0_RBF_POLYNOMIAL_AUGMENTATION:
+                               // polynomial coefficients (polyDim ×
+                               // valueCount) + dim. polyDim == 0
+                               // means no augmentation (Gaussian);
+                               // polyMat is then ignored.
+                               const BRMatrix &polyMatArg,
+                               int polyDim);
+
+    // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28): unified sub-net
+    // forward pass -- the ONE code path shared by (a) training-time
+    // Predicted_Base for the delta RHS, and (b) inference-time
+    // Base_Output / Delta_y. Wraps getPoseWeights on the row/column
+    // subset described by net.poseIndices / net.activeDrivers, so
+    // the sub-net forward uses the exact same kernel + per-pose
+    // sigma + polynomial term as the legacy path. Passing an empty
+    // quatGroupStarts/isQuatMember runs every column through the
+    // scalar path (delta nets ARE pure scalar interpolants -- their
+    // quat columns hold so(3) tangent components, not quaternions).
+    // normsFull empty => driverFull is already in normalized space
+    // (normalizeVector no-ops on size mismatch).
+    static void inferSubNetExact(MDoubleArray &out,
+                                 const RBFSubNet &net,
+                                 const BRMatrix &posesFull,
+                                 const BRMatrix &valuesFull,
+                                 const std::vector<double> &driverFull,
+                                 const std::vector<double> &normsFull,
+                                 const std::vector<double> &widthsFull,
+                                 double widthFallback,
+                                 int distType,
+                                 int encoding,
+                                 short kernelType,
+                                 unsigned solveCount,
+                                 const std::vector<int> &quatGroupStarts,
+                                 const std::vector<bool> &isQuatMember,
+                                 bool &qwaAnyClippedOut,
+                                 bool &qwaAnyDegenerateOut);
 
     virtual double interpolateWeight(double value, int type);
     virtual double blendCurveWeight(double value);
@@ -297,6 +486,12 @@ public:
     static MObject baseValue;
     static MObject clampEnabled;
     static MObject clampInflation;
+    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): output-side clamp
+    // attributes -- mirror of clampEnabled / clampInflation but for
+    // the inference OUTPUT (RBF y), aligning RBFtools defaults with
+    // Houdini rig::RBFInterpolation.clamp=True industry behaviour.
+    static MObject outputClampEnabled;
+    static MObject outputClampInflation;
     static MObject outputIsScale;
     static MObject radius;
     static MObject regularization;
@@ -347,6 +542,22 @@ public:
     // (arithmetic mean — preserves symmetry => Cholesky path of
     // M1.4 stays valid); at inference, query-vs-center j uses σ_j.
     static MObject poseRadius;
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- per-pose
+    // schema additions. M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR
+    // (2026-05-28) moved both from top-level multis parallel to poses[]
+    // into *children of the poses[] compound* so they travel with the
+    // pose element through add / remove / .ma round-trip:
+    //   * poseParentIndex: int child (poses[p].poseParentIndex).
+    //     Default -1 means "base pose" (legacy single-layer behaviour).
+    //     >= 0 means "delta of poseParentIndex". Hard-cap-2 layers: any
+    //     value pointing at another delta is demoted to base at
+    //     training time + warned.
+    //   * poseDriverMask: kIntArray child (poses[p].poseDriverMask).
+    //     Lists the flat-driver-vector indices this pose cares about.
+    //     Empty array (default / legacy node) means "all drivers"
+    //     (numerically equivalent to Phase 15).
+    static MObject poseParentIndex;
+    static MObject poseDriverMask;
     // Commit 0 (M_BASE_POSE): per-output-channel additive baseline
     // applied at setOutputValues (driven side). Top-level multi
     // double, length = output[]. Empty array (legacy node) =>
@@ -428,6 +639,12 @@ private:
     double meanDist;
     MIntArray poseModes;
     BRMatrix wMat;
+    // M_P0_RBF_POLYNOMIAL_AUGMENTATION (2026-05-11): polynomial
+    // coefficients matrix (polyDim × solveCount). Runtime state,
+    // not persisted to .ma. Rebuilt each evalInput=true alongside
+    // wMat. Inference adds polyMat * polyBasis(driver) to the RBF
+    // sum. polyDim == 0 (Gaussian) leaves polyMat unused / empty.
+    BRMatrix polyMat;
     
     std::vector<double> inputNorms;
 
@@ -437,6 +654,32 @@ private:
     std::vector<double> prevBaseValueArr;
     std::vector<bool>   prevOutputIsScaleArr;
 
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18): prev-state
+    // snapshot for poseParentIndex + poseDriverMask. Same pattern as
+    // prevBaseValueArr / prevQuatGroupConfigHash -- attributeAffects on
+    // these plugs alone is NOT enough (Maya would re-use the cached
+    // baseNet / deltaNets after a parent change and produce stale
+    // output). compute() compares current vs prev per tick and trips
+    // evalInput = true + subnetCacheDirty = true on any drift.
+    std::vector<int>              prevPoseParentArr;
+    std::vector<std::vector<int>> prevPoseDriverMaskArr;
+
+    // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 cache. INSTANCE members
+    // -- per RBFtools node, never shared. compute() at evalInput==true
+    // writes; inference path only reads. Static would corrupt across
+    // nodes (hard rail #12).
+    RBFSubNet                          baseNet;
+    std::unordered_map<int, RBFSubNet> deltaNets;
+    bool                               subnetCacheDirty;
+    // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28): true when the last
+    // training pass found ANY explicit parent OR explicit driver mask
+    // -- the inference Pass 1 then routes through the baseNet subset
+    // forward (inferSubNetExact) instead of the legacy full-pose
+    // getPoseWeights call. false = Phase 15 fast path, numerically
+    // equivalent to pre-Phase-16. Runtime state, never persisted;
+    // recomputed by the first compute() after .ma load.
+    bool                               subnetEngaged;
+
     // M1.3: per-dimension raw-space bounds snapshot. Refilled inside the
     // evalInput==true training path in getPoseData / getPoseVectors, read
     // by compute() on every tick to clip live driver values onto the
@@ -444,6 +687,15 @@ private:
     // not participate in the weight solve.
     std::vector<double> poseMinVec;
     std::vector<double> poseMaxVec;
+
+    // M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): per-output-channel
+    // bounds. Refilled in the evalInput==true training path right
+    // after matValues is populated; the inference finalize loop clips
+    // each output value into [outputMinVec[c] - infl * r,
+    // outputMaxVec[c] + infl * r]. Cached so inference can stay
+    // branch-light. Lifetime mirrors poseMinVec / poseMaxVec.
+    std::vector<double> outputMinVec;
+    std::vector<double> outputMaxVec;
 
     // M1.4: last successful solver tier. 0 = Cholesky, 1 = GE (fallback).
     // Cross-compute hint: next training attempt prefers the method that
@@ -463,6 +715,22 @@ private:
     // on every DG evaluation.
     bool  inputEncodingWarningIssued;
     short prevInputEncodingVal;
+    // M_P0_RBF_COLUMN_RANK_DEFENSE (2026-05-12): once-per-rig flag
+    // for the "degenerate polynomial column" warning. Reset to
+    // false on construction; flipped to true the first time the
+    // augmented solver detects a near-constant driver column and
+    // drops it from P. Prevents Script Editor flood on interactive
+    // scrubbing.
+    bool  degenerateColumnWarningIssued;
+    // M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): the ce136dd-era
+    // ``outputEncodingDeferredWarningIssued`` flag was removed —
+    // the BendRoll/SwingTwist-deferred warning was emitted from a
+    // dead else branch (outputEncoding schema only registers
+    // {0=Euler, 1=Quaternion, 2=ExpMap}; the warning was
+    // unreachable and its text contradicted the schema). All three
+    // legal outputEncoding values now route directly to
+    // applyOutputEncodingBlend, which handles the Euler skip case
+    // via its own early return.
 
     // M2.2: three independent once-per-config warning flags for the
     // QWA path. `qwaConfigWarningIssued` is for invalid quat-group
@@ -476,6 +744,38 @@ private:
     bool   qwaClippedWarningIssued;
     bool   qwaDegenerateWarningIssued;
     size_t prevQuatGroupConfigHash;
+
+    // M_P0_QUAT_RBF_OVERLAP_DISCLOSE (2026-05-10): once-per-rig flag
+    // for B2 (outputEncoding 3-block) skipping a block that overlaps
+    // a B1 (quatGroupStarts) 4-tuple. Reset along with the other QWA
+    // warning flags when the user edits quatGroupStarts (config-hash
+    // change at cpp:1664-1668), so a fresh quat-group config gets a
+    // fresh overlap-disclosure chance.
+    bool   outputEncodingOverlapWarningIssued;
+
+    // M_P0_TRAINING_AFFECTING_ATTRS (2026-05-10): trackers for
+    // attributes whose change requires wMat re-solve. Without these,
+    // attributeAffects(<attr>, output) marks output dirty but
+    // ``evalInput = evaluatePlug.asBool()`` is False by default, so
+    // the cached wMat (trained under the OLD attribute value) is
+    // reused with the NEW value at inference → mathematically
+    // inconsistent solver state → driven joints drift on rest pose.
+    //
+    // Repro that surfaced this defense: switching kernel from
+    // Gaussian (φ(0)=1) to MQB (φ(0)=w) without an explicit Apply
+    // produced visible joint offset at rest pose. Same problem
+    // applied to distanceType / radius / radiusType / regularization
+    // / inputEncoding switches.
+    //
+    // Detection at compute() entry: any of these prevs differ from
+    // the current plug value → set ``evalInput = true`` + update prev.
+    // Sentinels chosen so the first compute() after node creation
+    // never spuriously triggers a re-train (initial == current).
+    short  prevKernelVal;
+    short  prevDistanceTypeVal;
+    short  prevRadiusTypeVal;
+    double prevRadiusVal;
+    double prevRegularizationVal;
 };
 
 // ---------------------------------------------------------------------

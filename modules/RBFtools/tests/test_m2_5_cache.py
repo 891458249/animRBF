@@ -140,7 +140,12 @@ class T3_ApplyPosesIntegration(unittest.TestCase):
         idx = text.find("def apply_poses(node, driver_node, "
                         "driven_node,")
         self.assertGreater(idx, 0)
-        body = text[idx:idx + 4000]
+        # Window sized to fit the full function body. Defensive
+        # comment-block additions like M_P0_APPLY_FORCE_GENERIC
+        # entry/exit guards (2026-05-10) push the body length past
+        # the historical 4000-char ceiling; bump to 8000 to track
+        # the actual function body without hardcoded tightness.
+        body = text[idx:idx + 8000]
         # All three calls must appear in this order:
         i_write_pose = body.find("_write_pose_to_node(")
         i_swing_cache = body.find("write_pose_swing_twist_cache(")

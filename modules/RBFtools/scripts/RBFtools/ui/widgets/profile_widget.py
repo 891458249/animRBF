@@ -32,11 +32,14 @@ class ProfileWidget(QtWidgets.QWidget):
         layout.setSpacing(4)
 
         # ----- Refresh button row -----
+        # M_HELPBUBBLE_BATCH: long-form HelpButton next to the button.
+        from RBFtools.ui.widgets.help_button import HelpButton
         btn_row = QtWidgets.QHBoxLayout()
         self._btn_refresh = QtWidgets.QPushButton(tr("btn_refresh_profile"))
         self._btn_refresh.setToolTip(tr("profile_widget_refresh_tip"))
         self._btn_refresh.clicked.connect(self._on_refresh)
         btn_row.addWidget(self._btn_refresh)
+        btn_row.addWidget(HelpButton("btn_refresh_profile"))
         btn_row.addStretch(1)
         layout.addLayout(btn_row)
 

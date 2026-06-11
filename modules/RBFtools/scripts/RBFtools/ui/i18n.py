@@ -87,12 +87,30 @@ _EN = {
     # clampInflation schema, more intuitive surface.
     "clamp_enabled":       "Limit Driver to Registered Pose Range",
     "clamp_inflation":     "Limit Inflation:",
+    # M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): output clamp
+    # exposure -- mirror of the input clamp pair, aligning with the
+    # Houdini rig::RBFInterpolation.clamp=True industry default.
+    "output_clamp_enabled":     "Limit Output to Trained Range",
+    "output_clamp_enabled_tip":
+        "Clip RBF output to the range of trained driven values, "
+        "preventing inter-pose overshoot / undershoot. Houdini "
+        "industry default (default ON).",
+    "output_clamp_inflation":   "Output Inflation:",
+    "output_clamp_inflation_tip":
+        "Allow output to exceed the trained range by this fraction. "
+        "0 = strict clamp, 0.05 = +/-5% margin, 1.0 = up to 100% "
+        "extrapolation.",
     # -- M2.4a: per-output scale flag (OutputScaleEditor) --
     "output_is_scale":     "Output Is Scale",
     "output_is_scale_hdr": "Mark scale-channel outputs (M1.2 anchor 1.0)",
     # -- M2.4b: ordered-list editors for M2.1a / M2.2 multi attrs --
     "driver_rotate_order_label":   "Driver Input Rotate Order:",
     "rotate_order_empty_hint":     "No driver rotate orders defined.",
+    # M_ROTORDER_UI_REFACTOR (2026-04-29): per-row label template for
+    # the driver-tab-synced rotate-order editor. {idx} is 1-based for
+    # user-facing display; {name} is the driver.node string.
+    "driver_rotate_order_row_label":
+        "Driver {idx} ({name}):",
     "quat_group_start_label":      "Quaternion Group Starts (output index):",
     "quat_group_empty_hint":       "No quaternion groups defined.",
     "quat_group_start_value_tip":
@@ -148,6 +166,23 @@ _EN = {
     "menu_import_rbf":                 "Import RBF Setup...",
     "menu_export_selected":            "Export Selected RBF...",
     "menu_export_all":                 "Export All RBF...",
+    # -- M_P0_POSES_IO: focused poses-only round-trip --
+    "menu_export_poses":               "Export Poses Only...",
+    "menu_import_poses":               "Import Poses Only...",
+    "msg_export_poses_no_node":        "No active RBFtools node to export poses from.",
+    "msg_import_poses_no_node":        "No active RBFtools node to import poses into. Create or pick a node first.",
+    "title_poses_exported":            "Poses Exported",
+    "msg_poses_exported":              "Poses exported successfully:\n{path}",
+    "title_import_poses_mode":         "Import Mode",
+    "msg_import_poses_mode":           "Replace all existing poses, or append the file's poses to the current set?",
+    "btn_replace":                     "Replace",
+    "btn_append":                      "Append",
+    "btn_cancel":                      "Cancel",
+    "title_import_poses_done":         "Import Complete",
+    "msg_import_poses_done":           "Imported {n} poses ({mode} mode).",
+    "title_import_poses_failed":       "Import Failed",
+    "msg_import_poses_failed":         "Pose import failed. See Script Editor for details (likely cause: driver/driven dimension mismatch — connect the same number of attrs as the source rig before importing).",
+    "label_warnings":                  "Warnings",
     "title_import_rbf":                "Import RBF Setup",
     "title_import_replace":            "Replace existing nodes?",
     "summary_import_replace":
@@ -184,15 +219,50 @@ _EN = {
         "Per-source weight; reserved for M_B24b downstream consumption.",
     "driver_source_encoding_tip":
         "Per-source input encoding (0=Raw, 1=Quat, 2=BendRoll, 3=ExpMap, 4=SwingTwist).",
+    # M_P0_QUATERNION_HONEST_DISCLOSURE (2026-05-10): per-source
+    # encoding is metadata-only (forward-compat M5+); compute()
+    # actually reads node-level inputEncoding. The combo is disabled
+    # in the row widget so users do not silently set a no-op value.
+    "source_encoding_disabled_tip":
+        "Per-source encoding is metadata-only (forward-compat M5+); "
+        "compute reads node-level inputEncoding instead.",
     "output_encoding_label":           "Output encoding:",
+    # M_P0_QUATERNION_BACKEND_LAND (2026-05-10): Quat + ExpMap
+    # inverse transforms now ship; tooltip describes the active
+    # math. BendRoll / SwingTwist remain forward-compat (deferred
+    # to v5.x post-final) and emit a once-per-rig warning at the
+    # dispatch site if the user picks them.
     "output_encoding_combo_tip":
-        "Node-level output encoding (forward-compat; M_B24b business consumption deferred).",
+        "Output encoding mode. Quaternion / ExpMap rebuild each "
+        "Euler 3-block via per-pose nlerp (smoother than the "
+        "Euler weighted average for large rotations). BendRoll / "
+        "SwingTwist are forward-compat -- backend deferred to v5.x.",
+    # M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): distanceType=Angle is
+    # only consumed by getPoseDelta when inputEncoding=Raw + n==3
+    # (RBFtools.cpp:3084-3088). Per-block encodings hard-code a
+    # Euclidean-style metric. The combo disables the Angle item
+    # for non-Raw encodings so users do not silently set a no-op.
+    "angle_disabled_for_encoding_tip":
+        "Angle distance only available with Raw encoding. "
+        "Per-block encodings (Quaternion / BendRoll / ExpMap / "
+        "SwingTwist) use a hard-coded per-block metric and ignore "
+        "this setting (see addendum §M_P0_OUTPUT_EXPMAP_FIX).",
     "output_encoding_euler":           "Euler",
     "output_encoding_quaternion":      "Quaternion",
     "output_encoding_expmap":          "ExpMap",
     "title_remove_driver_source":      "Remove Driver Source",
     "summary_remove_driver_source":
         "Remove this driver source entry from the current node?",
+    # -- M_P0_DUPLICATE_POSE_DETECT (2026-05-01) --
+    "title_duplicate_poses":           "Duplicate Poses Detected",
+    "duplicate_pose_warning_header":
+        "The following pose pairs have identical input vectors:",
+    "duplicate_pose_warning_action":
+        "Identical inputs cause RBF kernel matrix singularity. "
+        "Multi-Quadratic Biharmonic + Inverse-MQB kernels will fail "
+        "decomposition. Recommend deleting one pose of each pair "
+        "before Apply, or switch kernel to Gaussian (which tolerates "
+        "via regularization). Continue anyway?",
     # -- M_B24c: Mirror multi-source informational notice
     #    (Generic mode supported; Matrix mode DEFERRED to M_B24c2) --
     "title_mirror_multi_source":       "Mirror — Multi-source node",
@@ -505,6 +575,74 @@ _EN = {
     "msg_disconnect_precise":
         "Disconnected the selected attributes only; other "
         "attributes on this source remain wired.",
+    # M_P0_DRIVER_CONNECT_UX_REVAMP (2026-05-12) -- per-tab idempotent
+    # Connect dispatch + attr count change confirmation.
+    "title_attr_count_change":         "Driver attr count change",
+    "msg_attr_count_change_will_rewire":
+        "Driver {0} attr count will change from {1} to {2}. This "
+        "will trigger re-wiring of all {3} subsequent driver "
+        "source(s). Continue?",
+    "driver_idempotent_skip":
+        "Driver {0} already fully connected with the same attrs; "
+        "skipping (idempotent).",
+    "connect_all_already_connected":
+        "All driver tabs are already fully connected with the "
+        "selected attrs (idempotent skip).",
+    # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -- per-row
+    # hierarchy editors in the pose grid tail container.
+    "pose_col_parent":                 "Parent",
+    "pose_col_parent_tip":
+        "Set this pose as a delta of another pose (= its parent). "
+        "'None' makes the pose a base. Hard-cap-2 enforced: delta "
+        "of delta is auto-demoted to base.",
+    "pose_col_driver_mask":            "Mask...",
+    "pose_col_driver_mask_tip":
+        "Restrict this pose's training to a subset of the driver "
+        "attributes. Empty selection = all drivers (legacy "
+        "behaviour).",
+    "pose_driver_mask_popup_title":    "Driver Mask",
+    "pose_parent_none_label":          "None (-1)",
+    "pose_layering_warning_inconsistent_mask":
+        "Sibling deltas under the same parent have inconsistent "
+        "driver masks. Union is used; check the Script Editor for "
+        "the displayWarning.",
+    # M_P0_POSE_DITHER_AND_UPDATE_FIX (2026-05-12) -- pose-panel
+    # dither + global-radius UX.
+    "btn_dither_drivers":              "Dither Drivers",
+    "btn_dither_drivers_tip":
+        "Add +/-0.005 random perturbation to clustered driver "
+        "channels (preserves Pose 0)",
+    "btn_dither_drivens":              "Dither Drivens",
+    "btn_dither_drivens_tip":
+        "Add +/-0.005 random perturbation to clustered driven "
+        "channels. WARNING: reduces RBF training accuracy.",
+    "title_dither_driven_warning":     "Dither Driven Output -- Warning",
+    "msg_dither_driven_warning":
+        "Adding noise to driven (output) values will reduce RBF "
+        "training accuracy. The trained weights will learn from "
+        "noisy targets, which may produce visible artifacts during "
+        "inference. Use only when driver-side dither alone cannot "
+        "resolve cluster issues. Continue?",
+    "confirm_dither_driven_label":     "Confirm",
+    "cancel_dither_driven_label":      "Cancel",
+    "dither_driver_done":
+        "Driver dither applied to {0} channel(s).",
+    "dither_driver_no_cluster":
+        "No clustered driver channels detected. Dither skipped.",
+    "dither_driven_done":
+        "Driven dither applied to {0} channel(s).",
+    "dither_driven_no_cluster":
+        "No clustered driven channels detected. Dither skipped.",
+    "lbl_global_radius":               "Radius:",
+    "spin_global_radius_tip":
+        "Per-pose RBF radius (sigma). 0.001 - 1000.0; non-positive "
+        "values fall back to the default.",
+    "btn_apply_global_radius":         "Apply Radius to All",
+    "btn_apply_global_radius_tip":
+        "Set the radius value above on every pose of the active "
+        "node",
+    "global_radius_done":
+        "Radius {1:.3f} applied to {0} pose(s).",
     # M_BATCH_PATH_A_WIRE (2026-04-28) — confirm dialogs for the
     # cross-tab broadcast Connect / Disconnect.
     "title_batch_apply_confirm":      "Batch apply across all tabs?",
@@ -587,11 +725,24 @@ _ZH = {
     # M_QUICKWINS Item 4a: \u6807\u7b7e\u66f4\u65b0\u4e3a"\u52a8\u4f5c\u8303\u56f4\u9650\u5236"\uff0c\u4e0e TD \u671f\u671b\u5bf9\u9f50
     "clamp_enabled":       u"\u52a8\u4f5c\u8303\u56f4\u9650\u5236\uff08\u8d85\u51fa\u5df2\u6ce8\u518c\u59ff\u52bf\u65f6\u505c\u6b62\uff09",
     "clamp_inflation":     u"\u9650\u5236\u81a8\u80c0\u6bd4\u4f8b\uff1a",
+    # M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17)
+    "output_clamp_enabled":     u"\u8f93\u51fa\u8303\u56f4\u9650\u5236\uff08\u9632\u8fc7\u51b2\uff09",
+    "output_clamp_enabled_tip":
+        u"\u5c06 RBF \u8f93\u51fa\u503c\u9650\u5236\u5728\u8bad\u7ec3 pose \u7684\u8f93\u51fa\u8303\u56f4\u5185\uff0c"
+        u"\u9632\u6b62 inter-pose overshoot/undershoot\u3002"
+        u"Houdini \u5de5\u4e1a\u6807\u51c6\uff0c\u9ed8\u8ba4\u5f00\u542f\u3002",
+    "output_clamp_inflation":   u"\u8f93\u51fa\u81a8\u80c0\u6bd4\u4f8b\uff1a",
+    "output_clamp_inflation_tip":
+        u"\u5141\u8bb8\u8f93\u51fa\u8d85\u51fa\u8bad\u7ec3\u8303\u56f4\u7684\u6bd4\u4f8b\u30020=\u4e25\u683c clamp\uff0c"
+        u"0.05=\u00b15% \u5f39\u6027\uff0c1.0=\u5141\u8bb8 100% \u5916\u63a8\u3002",
     "output_is_scale":     u"\u8f93\u51fa\u4e3a\u7f29\u653e",
     "output_is_scale_hdr": u"\u6807\u8bb0\u7f29\u653e\u901a\u9053\u8f93\u51fa\uff08M1.2 anchor 1.0\uff09",
     # -- M2.4b: ordered-list editors --
     "driver_rotate_order_label":   u"\u9a71\u52a8\u8f93\u5165\u65cb\u8f6c\u987a\u5e8f\uff1a",
     "rotate_order_empty_hint":     u"\u672a\u5b9a\u4e49\u9a71\u52a8\u65cb\u8f6c\u987a\u5e8f\u3002",
+    # M_ROTORDER_UI_REFACTOR (2026-04-29) \u2014 ZH parity --
+    "driver_rotate_order_row_label":
+        u"\u9a71\u52a8 {idx} ({name})\uff1a",
     "quat_group_start_label":      u"\u56db\u5143\u6570\u7ec4\u8d77\u59cb\u7d22\u5f15\uff08\u8f93\u51fa\u7d22\u5f15\uff09\uff1a",
     "quat_group_empty_hint":       u"\u672a\u5b9a\u4e49\u56db\u5143\u6570\u7ec4\u3002",
     "quat_group_start_value_tip":
@@ -647,6 +798,23 @@ _ZH = {
     "menu_import_rbf":                 u"\u5bfc\u5165 RBF \u914d\u7f6e...",
     "menu_export_selected":            u"\u5bfc\u51fa\u9009\u4e2d RBF...",
     "menu_export_all":                 u"\u5bfc\u51fa\u5168\u90e8 RBF...",
+    # -- M_P0_POSES_IO --
+    "menu_export_poses":               u"\u5bfc\u51fa\u59ff\u52bf\u6570\u636e...",
+    "menu_import_poses":               u"\u5bfc\u5165\u59ff\u52bf\u6570\u636e...",
+    "msg_export_poses_no_node":        u"\u5f53\u524d\u6ca1\u6709\u9009\u4e2d RBFtools \u8282\u70b9\uff0c\u65e0\u6cd5\u5bfc\u51fa\u59ff\u52bf\u3002",
+    "msg_import_poses_no_node":        u"\u5f53\u524d\u6ca1\u6709\u9009\u4e2d RBFtools \u8282\u70b9\uff0c\u8bf7\u5148\u521b\u5efa\u6216\u62fe\u53d6\u4e00\u4e2a\u8282\u70b9\u518d\u5bfc\u5165\u59ff\u52bf\u3002",
+    "title_poses_exported":            u"\u59ff\u52bf\u5bfc\u51fa\u6210\u529f",
+    "msg_poses_exported":              u"\u59ff\u52bf\u5df2\u6210\u529f\u5bfc\u51fa\u81f3\uff1a\n{path}",
+    "title_import_poses_mode":         u"\u5bfc\u5165\u6a21\u5f0f",
+    "msg_import_poses_mode":           u"\u9009\u62e9\u5bfc\u5165\u6a21\u5f0f\uff1a\u8986\u76d6\u73b0\u6709\u59ff\u52bf\uff0c\u8fd8\u662f\u5728\u73b0\u6709\u59ff\u52bf\u540e\u9762\u8ffd\u52a0\uff1f",
+    "btn_replace":                     u"\u8986\u76d6",
+    "btn_append":                      u"\u8ffd\u52a0",
+    "btn_cancel":                      u"\u53d6\u6d88",
+    "title_import_poses_done":         u"\u5bfc\u5165\u5b8c\u6210",
+    "msg_import_poses_done":           u"\u6210\u529f\u5bfc\u5165 {n} \u4e2a\u59ff\u52bf\uff08{mode} \u6a21\u5f0f\uff09\u3002",
+    "title_import_poses_failed":       u"\u5bfc\u5165\u5931\u8d25",
+    "msg_import_poses_failed":         u"\u59ff\u52bf\u5bfc\u5165\u5931\u8d25\u3002\u8bf7\u67e5\u770b Script Editor \u4e86\u89e3\u8be6\u60c5\uff08\u5e38\u89c1\u539f\u56e0\uff1adriver/driven \u7ef4\u5ea6\u4e0d\u5339\u914d\uff0c\u8bf7\u5148\u8fde\u63a5\u4e0e\u6e90 rig \u76f8\u540c\u6570\u91cf\u7684 attrs \u540e\u518d\u5bfc\u5165\uff09\u3002",
+    "label_warnings":                  u"\u8b66\u544a",
     "title_import_rbf":                u"\u5bfc\u5165 RBF \u914d\u7f6e",
     "title_import_replace":            u"\u8986\u76d6\u73b0\u6709\u8282\u70b9\uff1f",
     "summary_import_replace":
@@ -683,15 +851,53 @@ _ZH = {
         u"\u6bcf\u6e90\u6743\u91cd\uff1bM_B24b \u4e0b\u6e38\u6d88\u8d39\u4fdd\u7559\u3002",
     "driver_source_encoding_tip":
         u"\u6bcf\u6e90\u8f93\u5165\u7f16\u7801\u679a\u4e3e (0..4)\u3002",
+    # M_P0_QUATERNION_HONEST_DISCLOSURE (2026-05-10)
+    "source_encoding_disabled_tip":
+        u"\u6bcf\u6e90\u7f16\u7801\u4ec5\u4e3a\u5143\u6570\u636e "
+        u"(forward-compat M5+)\uff1b"
+        u"compute \u5b9e\u9645\u8bfb\u53d6\u8282\u70b9\u7ea7 "
+        u"inputEncoding\u3002",
     "output_encoding_label":           u"\u8f93\u51fa\u7f16\u7801\uff1a",
+    # M_P0_QUATERNION_BACKEND_LAND (2026-05-10)
     "output_encoding_combo_tip":
-        u"\u8282\u70b9\u7ea7\u8f93\u51fa\u7f16\u7801 (forward-compat)\u3002",
+        u"\u8282\u70b9\u7ea7\u8f93\u51fa\u7f16\u7801\u6a21\u5f0f\u3002"
+        u"Quaternion / ExpMap "
+        u"\u901a\u8fc7\u9010\u59ff\u52bf nlerp \u91cd\u5efa"
+        u"\u6bcf\u4e2a Euler \u4e09\u5143\u7ec4 "
+        u"(\u5bf9\u5927\u65cb\u8f6c\u6bd4 Euler "
+        u"\u52a0\u6743\u5e73\u5747\u66f4\u5e73\u6ed1)\u3002"
+        u"BendRoll / SwingTwist "
+        u"\u4e3a forward-compat \u2014\u2014 "
+        u"\u540e\u7aef\u63a8\u8fdf\u5230 v5.x\u3002",
+    # M_P0_OUTPUT_EXPMAP_FIX (2026-05-10)
+    "angle_disabled_for_encoding_tip":
+        u"Angle \u8ddd\u79bb\u4ec5\u5728 Raw \u7f16\u7801"
+        u"\u4e0b\u53ef\u7528\u3002\u9010\u5757\u7f16\u7801 "
+        u"(Quaternion / BendRoll / "
+        u"ExpMap / SwingTwist) \u4f7f\u7528"
+        u"\u786c\u7f16\u7801\u7684\u9010\u5757\u5ea6\u91cf\uff0c"
+        u"\u5ffd\u7565\u6b64\u8bbe\u7f6e (\u8be6\u89c1 addendum "
+        u"\u00a7M_P0_OUTPUT_EXPMAP_FIX)\u3002",
     "output_encoding_euler":           u"Euler",
     "output_encoding_quaternion":      u"Quaternion",
     "output_encoding_expmap":          u"ExpMap",
     "title_remove_driver_source":      u"\u79fb\u9664\u9a71\u52a8\u6e90",
     "summary_remove_driver_source":
         u"\u4ece\u5f53\u524d\u8282\u70b9\u79fb\u9664\u8be5\u9a71\u52a8\u6e90\uff1f",
+    # -- M_P0_DUPLICATE_POSE_DETECT (2026-05-01) --
+    "title_duplicate_poses":
+        u"\u68c0\u6d4b\u5230\u91cd\u590d\u59ff\u52bf",
+    "duplicate_pose_warning_header":
+        u"\u4ee5\u4e0b\u59ff\u52bf\u5bf9\u7684\u8f93\u5165\u5411\u91cf"
+        u"\u5b8c\u5168\u76f8\u540c\uff1a",
+    "duplicate_pose_warning_action":
+        u"\u76f8\u540c\u8f93\u5165\u5bfc\u81f4 RBF \u6838\u77e9\u9635"
+        u"\u5947\u5f02\u3002Multi-Quadratic Biharmonic + Inverse-MQB "
+        u"\u6838\u51fd\u6570\u4f1a\u5206\u89e3\u5931\u8d25\u3002\u5efa"
+        u"\u8bae\u5220\u9664\u6bcf\u5bf9\u4e2d\u7684\u4e00\u4e2a\u59ff"
+        u"\u52bf\u540e\u518d Apply\uff0c\u6216\u5207\u6362\u4e3a "
+        u"Gaussian \u6838\uff08\u53ef\u901a\u8fc7\u6b63\u5219\u5316"
+        u"\u5bb9\u5fcd\uff09\u3002\u662f\u5426\u7ee7\u7eed\uff1f",
     # -- M_B24c Mirror \u591a\u6e90\u4fe1\u606f\u63d0\u793a
     #    (Generic mode \u652f\u6301; Matrix mode \u63a8\u8fdf\u5230 M_B24c2) --
     "title_mirror_multi_source":       u"\u955c\u50cf \u2014 \u591a\u6e90\u8282\u70b9",
@@ -951,6 +1157,66 @@ _ZH = {
     "title_disconnect_precise":       u"\u7cbe\u786e\u65ad\u5f00",
     "msg_disconnect_precise":
         u"\u4ec5\u65ad\u5f00\u6240\u9009\u5c5e\u6027;\u6b64\u76ee\u6807\u7684\u5176\u4ed6\u5c5e\u6027\u4fdd\u6301\u8fde\u63a5\u3002",
+    # M_P0_DRIVER_CONNECT_UX_REVAMP (2026-05-12)
+    "title_attr_count_change":         u"\u9a71\u52a8\u5c5e\u6027\u6570\u53d8\u5316",
+    "msg_attr_count_change_will_rewire":
+        u"Driver {0} \u7684 attr \u6570\u5c06\u4ece {1} \u53d8\u4e3a {2}\uff0c"
+        u"\u8fd9\u4f1a\u89e6\u53d1\u540e\u7eed {3} \u4e2a driver source \u7684\u91cd\u8fde\u3002"
+        u"\u662f\u5426\u7ee7\u7eed\uff1f",
+    "driver_idempotent_skip":
+        u"Driver {0} \u5df2\u7528\u76f8\u540c\u5c5e\u6027\u5b8c\u6574\u8fde\u63a5\uff0c"
+        u"\u8df3\u8fc7 (\u5e42\u7b49).",
+    "connect_all_already_connected":
+        u"\u6240\u6709 driver tab \u90fd\u5df2\u7528\u5f53\u524d\u6240\u9009\u5c5e\u6027"
+        u"\u5b8c\u6574\u8fde\u63a5\uff0c\u65e0\u9700\u91cd\u8fde (\u5e42\u7b49).",
+    # M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18)
+    "pose_col_parent":                 u"\u7236\u59ff\u52bf",
+    "pose_col_parent_tip":
+        u"\u628a\u5f53\u524d pose \u8bbe\u4e3a\u53e6\u4e00\u4e2a pose \u7684 delta\uff08\u5176 parent\uff09\u3002"
+        u"None \u8868\u793a base\u3002\u4e24\u5c42\u786c\u4e0a\u9650\uff1adelta-of-delta \u4f1a\u81ea\u52a8\u964d\u7ea7\u4e3a base\u3002",
+    "pose_col_driver_mask":            u"\u9a71\u52a8\u63a9\u7801\u2026",
+    "pose_col_driver_mask_tip":
+        u"\u9650\u5236\u672c pose \u4ec5\u7528\u90e8\u5206 driver \u5c5e\u6027\u8bad\u7ec3\u3002"
+        u"\u5168\u52fe\u6216\u7a7a\u9009 = \u5168 driver\uff08\u517c\u5bb9\u65e7\u884c\u4e3a\uff09\u3002",
+    "pose_driver_mask_popup_title":    u"\u9a71\u52a8\u63a9\u7801",
+    "pose_parent_none_label":          u"\u65e0 (-1)",
+    "pose_layering_warning_inconsistent_mask":
+        u"\u540c parent \u4e0b\u7684\u5144\u5f1f delta \u9a71\u52a8\u63a9\u7801\u4e0d\u4e00\u81f4\uff0c"
+        u"\u53d6\u5e76\u96c6\uff1b\u8be6\u89c1 Script Editor warning\u3002",
+    # M_P0_POSE_DITHER_AND_UPDATE_FIX (2026-05-12)
+    "btn_dither_drivers":              u"\u9a71\u52a8\u5668\u53bb\u91cd",
+    "btn_dither_drivers_tip":
+        u"\u5bf9\u9a71\u52a8\u5668 pose \u4e2d\u91cd\u590d\u7684\u5c5e\u6027\u52a0 \u00b10.005 \u968f\u673a\u6270\u52a8 "
+        u"(Pose 0 \u4e0d\u53d8)",
+    "btn_dither_drivens":              u"\u88ab\u9a71\u52a8\u5668\u53bb\u91cd",
+    "btn_dither_drivens_tip":
+        u"\u5bf9\u88ab\u9a71\u52a8\u5668 pose \u4e2d\u91cd\u590d\u7684\u5c5e\u6027\u52a0 \u00b10.005 \u968f\u673a\u6270\u52a8\u3002"
+        u"\u8b66\u544a: \u4f1a\u964d\u4f4e RBF \u8bad\u7ec3\u7cbe\u5ea6\u3002",
+    "title_dither_driven_warning":     u"\u88ab\u9a71\u52a8\u5668\u53bb\u91cd \u2014 \u8b66\u544a",
+    "msg_dither_driven_warning":
+        u"\u5bf9\u88ab\u9a71\u52a8\u5668 (\u8f93\u51fa) \u503c\u52a0\u566a\u97f3\u4f1a\u964d\u4f4e RBF \u8bad\u7ec3\u7cbe\u5ea6\u3002"
+        u"weights \u5b66\u5230\u7684\u662f\u5e26\u566a\u97f3\u7684\u76ee\u6807\uff0c\u53ef\u80fd\u5728 inference \u65f6"
+        u"\u4ea7\u751f\u53ef\u89c1 artifact\u3002\u4ec5\u5728\u9a71\u52a8\u5668\u53bb\u91cd\u65e0\u6cd5\u89e3\u51b3 cluster "
+        u"\u95ee\u9898\u65f6\u4f7f\u7528\u3002\u662f\u5426\u7ee7\u7eed\uff1f",
+    "confirm_dither_driven_label":     u"\u786e\u8ba4",
+    "cancel_dither_driven_label":      u"\u53d6\u6d88",
+    "dither_driver_done":
+        u"\u5df2\u5bf9 {0} \u4e2a\u9a71\u52a8\u5668\u901a\u9053\u52a0\u6270\u52a8\u3002",
+    "dither_driver_no_cluster":
+        u"\u672a\u68c0\u6d4b\u5230 cluster \u7684\u9a71\u52a8\u5668\u901a\u9053\uff0c\u5df2\u8df3\u8fc7\u3002",
+    "dither_driven_done":
+        u"\u5df2\u5bf9 {0} \u4e2a\u88ab\u9a71\u52a8\u5668\u901a\u9053\u52a0\u6270\u52a8\u3002",
+    "dither_driven_no_cluster":
+        u"\u672a\u68c0\u6d4b\u5230 cluster \u7684\u88ab\u9a71\u52a8\u5668\u901a\u9053\uff0c\u5df2\u8df3\u8fc7\u3002",
+    "lbl_global_radius":               u"\u534a\u5f84:",
+    "spin_global_radius_tip":
+        u"\u6bcf pose \u7684 RBF \u534a\u5f84 (sigma)\u3002\u8303\u56f4 0.001 - 1000.0; "
+        u"\u975e\u6b63\u503c\u4f1a\u56de\u9000\u5230\u9ed8\u8ba4\u503c\u3002",
+    "btn_apply_global_radius":         u"\u6279\u91cf\u8bbe\u7f6e\u534a\u5f84",
+    "btn_apply_global_radius_tip":
+        u"\u628a\u4e0a\u65b9\u534a\u5f84\u503c\u5e94\u7528\u5230\u5f53\u524d\u8282\u70b9\u7684\u6240\u6709 pose",
+    "global_radius_done":
+        u"\u5df2\u5bf9 {0} \u4e2a pose \u8bbe\u7f6e\u534a\u5f84 = {1:.3f}\u3002",
     # M_BATCH_PATH_A_WIRE (2026-04-28)
     "title_batch_apply_confirm":      u"\u8de8\u6240\u6709\u6807\u7b7e\u9875\u6279\u91cf\u8fde\u63a5?",
     "msg_batch_apply_confirm":

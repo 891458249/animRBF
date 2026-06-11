@@ -91,7 +91,13 @@ class TestM_BONE_NAME_CACHE_SourceScan(unittest.TestCase):
         body_setter = self._tab.split(
             "def set_node_name(self, name):")[1].split(
             "\n    def ")[0]
-        self.assertIn("self._node_name = str(name", body_setter)
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): the original guard
+        # required ``self._node_name = str(name``. Under py2,
+        # ``str(u"中文")`` raises UnicodeEncodeError; the cache now
+        # uses ``name or ""`` (no encode coercion). The intent —
+        # populate the cache from the setter argument — is
+        # preserved.
+        self.assertIn("self._node_name = name or \"\"", body_setter)
 
         body_getter = self._tab.split(
             "def node_name(self):")[1].split("\n    def ")[0]

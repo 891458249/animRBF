@@ -46,6 +46,15 @@ public:
 
     bool solve(std::vector<double> y, double w[], int &singularIndex);
 
+    // M_P0_RBF_ANTI_OVERSHOOT Part C.4 (2026-05-17) -- configurable
+    // singular-pivot threshold for solve(). Default 1e-4 preserves the
+    // legacy hardcoded value so existing call sites see no behaviour
+    // change. RBFtools training is expected to call
+    // setSingularThreshold(max(1e-9, lambda * 1e-3)) so a stronger
+    // regularization permits smaller stable pivots.
+    void setSingularThreshold(double threshold);
+    double getSingularThreshold() const;
+
     // M1.4: Cholesky A = L Lᵀ for SPD matrices. In-place on the lower
     // triangle; the upper triangle is zeroed. Returns false as soon as
     // a non-positive diagonal is encountered (matrix is not SPD — the
@@ -66,6 +75,10 @@ private:
     std::vector<std::vector<double> > mat;
     unsigned rows;
     unsigned cols;
+    // M_P0_RBF_ANTI_OVERSHOOT Part C.4: configurable solve()
+    // singular-pivot threshold. Default mirrors the legacy hardcoded
+    // 1e-4 so existing callers see identical behaviour.
+    double singularThreshold;
 };
 
 #endif

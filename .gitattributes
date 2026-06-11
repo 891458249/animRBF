@@ -1,0 +1,8 @@
+# M_P0_MAYA_VERSION_ISOLATION (2026-05-12): pin scripts_2022/ to LF.
+#
+# tools/sync_2022_from_2025.py always emits LF for byte-stable drift
+# detection. If git's autocrlf were allowed to translate to CRLF on
+# Windows checkout, the drift test would fail on any Windows clone.
+# The `eol=lf` attribute keeps the working-tree bytes identical to
+# what the sync script writes.
+modules/RBFtools/scripts_2022/** text eol=lf

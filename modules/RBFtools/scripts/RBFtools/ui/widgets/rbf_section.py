@@ -15,11 +15,16 @@ from RBFtools.constants import (
     SOLVER_METHOD_LABELS, INPUT_ENCODING_LABELS,   # M2.4a
     DRIVER_INPUT_ROTATE_ORDER_LABELS,              # M2.4b
 )
-from RBFtools.ui.widgets.ordered_enum_list_editor import (
-    OrderedEnumListEditor,
-)
 from RBFtools.ui.widgets.ordered_int_list_editor import (
     OrderedIntListEditor,
+)
+# M_ROTORDER_UI_REFACTOR (2026-04-29): rotate-order editor swapped
+# from the legacy add/remove/reorder OrderedEnumListEditor to the
+# driver-tab-synced DriverRotateOrderEditor. The legacy class is
+# kept (not imported here) for OrderedIntListEditor's quat-group
+# editor which still needs the 4-button shared base behaviour.
+from RBFtools.ui.widgets.driver_rotate_order_editor import (
+    DriverRotateOrderEditor,
 )
 
 
@@ -30,6 +35,10 @@ class RBFSection(CollapsibleFrame):
     kernelChanged = QtCore.Signal(int)
     radiusTypeChanged = QtCore.Signal(int)
     radiusEdited = QtCore.Signal(float)
+    # M_ENC_AUTOPIPE: emitted alongside attributeChanged("inputEncoding")
+    # so the controller can run the rotateOrder auto-derive side-effect
+    # without overloading the generic set_attribute dispatch.
+    inputEncodingChanged = QtCore.Signal(int)
 
     def __init__(self, parent=None):
         super(RBFSection, self).__init__(
@@ -155,6 +164,41 @@ class RBFSection(CollapsibleFrame):
         row_cli.addWidget(HelpButton("clamp_inflation"))
         lay.addLayout(row_cli)
 
+        # M_P0_RBF_ANTI_OVERSHOOT Part A UI (2026-05-17) -- mirror of
+        # the input clamp pair above, but for the OUTPUT side. Default
+        # ON aligns with Houdini rig::RBFInterpolation.clamp=True.
+        row_oce = QtWidgets.QHBoxLayout()
+        self._cb_output_clamp = QtWidgets.QCheckBox(
+            tr("output_clamp_enabled"))
+        self._cb_output_clamp.setToolTip(
+            tr("output_clamp_enabled_tip"))
+        self._cb_output_clamp.setChecked(True)
+        self._cb_output_clamp.toggled.connect(
+            self._on_output_clamp_toggled)
+        row_oce.addWidget(self._cb_output_clamp)
+        row_oce.addStretch()
+        row_oce.addWidget(HelpButton("output_clamp_enabled"))
+        lay.addLayout(row_oce)
+
+        row_oci = QtWidgets.QHBoxLayout()
+        self._lbl_output_clinf = QtWidgets.QLabel(
+            tr("output_clamp_inflation"))
+        self._spn_output_clamp_inflation = QtWidgets.QDoubleSpinBox()
+        self._spn_output_clamp_inflation.setRange(0.0, 1.0)
+        self._spn_output_clamp_inflation.setDecimals(4)
+        self._spn_output_clamp_inflation.setSingleStep(0.01)
+        self._spn_output_clamp_inflation.setValue(0.0)
+        self._spn_output_clamp_inflation.setEnabled(True)
+        self._spn_output_clamp_inflation.setToolTip(
+            tr("output_clamp_inflation_tip"))
+        self._spn_output_clamp_inflation.valueChanged.connect(
+            lambda v: self.attributeChanged.emit(
+                "outputClampInflation", v))
+        row_oci.addWidget(self._lbl_output_clinf)
+        row_oci.addWidget(self._spn_output_clamp_inflation, 1)
+        row_oci.addWidget(HelpButton("output_clamp_inflation"))
+        lay.addLayout(row_oci)
+
         # Scale
         row_s = QtWidgets.QHBoxLayout()
         self._lbl_scale = QtWidgets.QLabel(tr("scale"))
@@ -241,8 +285,19 @@ class RBFSection(CollapsibleFrame):
         # Generic subsection because rotateOrder is irrelevant to
         # Matrix mode. Visibility is gated by inputEncoding via
         # `_update_encoding_visibility`; default Raw → hidden.
-        self._rotate_order_editor = OrderedEnumListEditor(
-            DRIVER_INPUT_ROTATE_ORDER_LABELS)
+        # M_ROTORDER_UI_REFACTOR (2026-04-29): editor type swapped
+        # from OrderedEnumListEditor to DriverRotateOrderEditor —
+        # rows are now a strict projection of the driver-source
+        # tabs (one row per driver, label "Driver N (joint_name)";
+        # the user can only edit the per-row enum combo, not
+        # add / remove / reorder rows). Driver tabs are the single
+        # source of truth; main_window's _reload_driver_sources
+        # pushes the live driver name list via
+        # set_driver_sources_for_rotate_order on every tab change.
+        # DRIVER_INPUT_ROTATE_ORDER_LABELS no longer flows through
+        # the constructor — the new widget reads it directly from
+        # constants.py.
+        self._rotate_order_editor = DriverRotateOrderEditor()
         self._rotate_order_editor.set_label(tr("driver_rotate_order_label"))
         self._rotate_order_editor.set_empty_hint(tr("rotate_order_empty_hint"))
         self._rotate_order_editor.listChanged.connect(
@@ -401,12 +456,23 @@ class RBFSection(CollapsibleFrame):
         self._spn_dridx.setValue(data.get("driverIndex", 0))
         # M2.4a: load M1.3 / M1.4 / M2.1a values with safe defaults
         # so v4 / v5-pre-M2.4 rigs show the C++ default exactly.
+        # M_P0_CREATE_NODE_REGULARIZATION (2026-05-10): mirror the
+        # rigging-friendly default (was 1e-8 per cpp:532 / Chad Vernon
+        # reference). Authoritative value is the node attr; this is
+        # the "data dict missing key" fallback only.
         self._spn_reg.setValue(data.get("regularization", 1.0e-8))
         self._cmb_slvm.setCurrentIndex(data.get("solverMethod", 0))
         clamp_on = data.get("clampEnabled", False)
         self._cb_clamp.setChecked(clamp_on)
         self._spn_clamp_inflation.setValue(data.get("clampInflation", 0.0))
         self._spn_clamp_inflation.setEnabled(clamp_on)
+        # M_P0_RBF_ANTI_OVERSHOOT Part A: output clamp UI state.
+        # Default ON (matches plugin default + Houdini industry).
+        output_clamp_on = data.get("outputClampEnabled", True)
+        self._cb_output_clamp.setChecked(output_clamp_on)
+        self._spn_output_clamp_inflation.setValue(
+            data.get("outputClampInflation", 0.0))
+        self._spn_output_clamp_inflation.setEnabled(output_clamp_on)
         ienc = data.get("inputEncoding", 0)
         self._cmb_ienc.setCurrentIndex(ienc)
         # M2.4b: rotateOrder + quat-group multi editors. set_values()
@@ -422,8 +488,61 @@ class RBFSection(CollapsibleFrame):
         # encoding=2 sees the populated editor visible immediately
         # (addendum §M2.4b Q2).
         self._update_encoding_visibility(ienc)
+        # M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): honest disclosure for
+        # distanceType=Angle -- gated identically on rig load and on
+        # interactive combo change (see _on_input_encoding).
+        self._update_distance_type_state(ienc)
         self._update_radius_state()
         self._update_mode_visibility(self._cmb_mode.currentIndex())
+
+    def force_mode_visibility(self, idx):
+        """M_P0_RBF_MODE_UI_RESYNC (2026-05-10): authoritative resync
+        from a node-attr value into the combo + Generic / Matrix frame
+        visibility. Used by ``main_window._on_settings_loaded`` after
+        ``load(data)`` so UI state cannot drift away from the actual
+        ``shape.rbfMode`` value when ``blockSignals`` suppresses the
+        combo's ``currentIndexChanged`` cascade.
+
+        Signal-suppressed combo write avoids a round-trip
+        ``attributeChanged.emit -> controller.set_attribute -> setAttr``
+        — the value is already on the node, this method only
+        synchronises the **view**.
+        """
+        idx = int(idx)
+        blocked = self._cmb_mode.blockSignals(True)
+        try:
+            self._cmb_mode.setCurrentIndex(idx)
+        finally:
+            self._cmb_mode.blockSignals(blocked)
+        self._update_mode_visibility(idx)
+
+    def set_driver_sources_for_rotate_order(self, names):
+        """M_ROTORDER_UI_REFACTOR (2026-04-29): public entry-point
+        called from main_window's ``_reload_driver_sources`` slot
+        whenever the driver-source tab list changes (add / remove /
+        node load). The widget rebuilds its rows from *names*
+        (length owned by the driver tabs); previously-set rotate-
+        order values are preserved by row index when the new length
+        permits.
+
+        ``hasattr`` guard preserves the M2.4b §D① contract."""
+        if hasattr(self, "_rotate_order_editor"):
+            self._rotate_order_editor.set_driver_sources(
+                list(names or []))
+
+    def set_rotate_order_values(self, values):
+        """M_P1_ENC_COMBO_FIX (2026-04-29): narrow public entry-point
+        for the rotate-order editor; called from main_window in
+        response to the controller's ``rotateOrderEditorReload``
+        signal (the post-encoding-switch auto-derive path) so the
+        editor refreshes from live driverInputRotateOrder[] without
+        round-tripping through settingsLoaded -> load() — that wider
+        path triggered the inputEncoding combo bounce-back regression.
+
+        ``hasattr`` guard preserves the M2.4b §D① contract
+        (defends against future _build reordering)."""
+        if hasattr(self, "_rotate_order_editor"):
+            self._rotate_order_editor.set_values(list(values or []))
 
     def set_radius_value(self, value):
         """Update radius display without emitting."""
@@ -485,26 +604,90 @@ class RBFSection(CollapsibleFrame):
         self._update_mode_visibility(idx)
 
     def _on_input_encoding(self, idx):
-        """Emit attr + sync visibility via the dedicated helper. The
-        helper is also called from load() so a v5 rig opening with
-        encoding != Raw shows the rotateOrder editor immediately."""
+        """Emit attr + side-effect signal + sync visibility.
+
+        Two signals fire on user-initiated combo change:
+          1. ``attributeChanged("inputEncoding", idx)`` -> generic
+             set_attribute dispatch writes the schema field.
+          2. ``inputEncodingChanged(idx)`` (M_ENC_AUTOPIPE) -> the
+             controller runs the rotateOrder auto-derive side-effect
+             so Generic-mode TDs get "select-encoding -> works"
+             without manually filling the rotate-order editor.
+
+        :func:`_update_encoding_visibility` is also called from
+        load() so a v5 rig opening with encoding != Raw shows the
+        rotateOrder editor immediately.
+
+        :func:`_update_distance_type_state` honestly discloses that
+        ``distanceType=Angle`` only takes effect when
+        ``inputEncoding=Raw`` (M_P0_OUTPUT_EXPMAP_FIX).
+        """
         self.attributeChanged.emit("inputEncoding", idx)
+        self.inputEncodingChanged.emit(int(idx))
         self._update_encoding_visibility(idx)
+        self._update_distance_type_state(idx)
+
+    def _update_distance_type_state(self, encoding_idx):
+        """M_P0_OUTPUT_EXPMAP_FIX (2026-05-10): honestly disclose
+        the distanceType=Angle constraint.
+
+        ``getPoseDelta`` (RBFtools.cpp:3084-3088) reads
+        ``distType`` only when ``encoding == 0`` (Raw) and
+        ``n == 3``. Every non-Raw encoding (Quaternion / BendRoll /
+        ExpMap / SwingTwist) routes through a per-block distance
+        function with a hard-coded Euclidean-style metric, so
+        picking Angle while encoded silently has no effect.
+
+        This slot disables the Angle item (combo index 1) when
+        encoding != Raw and forces the combo back to Euclidean if
+        the user had Angle selected -- consistent with the
+        per-source encoding combo disable pattern from
+        M_P0_QUATERNION_HONEST_DISCLOSURE.
+        """
+        is_raw = (int(encoding_idx) == 0)
+        # The Angle item is index 1 in DISTANCE_TYPE_LABELS
+        # (cpp: distType enum 0=Euclidean, 1=Angle).
+        model = self._cmb_dist.model()
+        angle_item = model.item(1) if model is not None else None
+        if angle_item is not None:
+            angle_item.setEnabled(is_raw)
+        # Tooltip carries the "why" so the user knows what was
+        # disabled and why.
+        self._cmb_dist.setToolTip(
+            "" if is_raw else tr("angle_disabled_for_encoding_tip"))
+        # If the user had Angle selected and switches to a non-Raw
+        # encoding, snap the combo back to Euclidean so the rig is
+        # not left in a silent-no-op state.
+        if (not is_raw) and self._cmb_dist.currentIndex() == 1:
+            self._cmb_dist.setCurrentIndex(0)
 
     def _update_encoding_visibility(self, idx):
         """Single source of truth for the rotateOrder editor visibility.
 
         ``hasattr`` guard preserved per addendum §M2.4b (D)①: defends
         against future ``_build`` reordering that might construct the
-        editor after a callback fires."""
+        editor after a callback fires.
+
+        M_ENC_AUTOPIPE: the editor is hidden for both Raw (0) and
+        Quaternion (1) since neither encoding consumes
+        ``driverInputRotateOrder[]`` in C++ applyEncodingToBlock
+        (cpp:2606-2624). BendRoll (2) / ExpMap (3) / SwingTwist (4)
+        show the editor.
+        """
         if hasattr(self, "_rotate_order_editor"):
-            # Raw (idx == 0) hides; non-Raw shows.
-            self._rotate_order_editor.setVisible(idx != 0)
+            needs_rotate_order = int(idx) in (2, 3, 4)
+            self._rotate_order_editor.setVisible(needs_rotate_order)
 
     def _on_clamp_toggled(self, checked):
         self.attributeChanged.emit("clampEnabled", checked)
         # Visual cue: inflation has no effect when clamp is off.
         self._spn_clamp_inflation.setEnabled(checked)
+
+    def _on_output_clamp_toggled(self, checked):
+        """M_P0_RBF_ANTI_OVERSHOOT Part A: mirror of _on_clamp_toggled
+        but for the OUTPUT side."""
+        self.attributeChanged.emit("outputClampEnabled", checked)
+        self._spn_output_clamp_inflation.setEnabled(checked)
 
     def _update_mode_visibility(self, idx):
         """Show Generic sub-section for mode 0, Matrix sub-section for mode 1."""

@@ -47,14 +47,24 @@ class TestM_CRASH_FIX_Defense1_PureStringGather(unittest.TestCase):
         cls._mw = _read(_MW_PY)
 
     def test_gather_returns_pure_strings(self):
-        # The gather function MUST coerce every node + attr through
-        # str() so no Qt object reference (e.g. QString returned by
-        # PySide widgets) leaks into the controller / core layer.
+        # The gather function MUST normalize every node + attr to
+        # a plain string container so no Qt object reference (e.g.
+        # QString from PyQt4-era PySide) leaks into the controller
+        # / core layer.
+        #
+        # M_P0_PY2_COMPAT_UNICODE (2026-05-01): the original guard
+        # required ``str(node)`` / ``str(a)`` literally. Under py2,
+        # ``str(u"中文")`` raises UnicodeEncodeError — the guard
+        # now checks the structural contract (plain falsy-coalesce
+        # and list-comp normalisation) instead. PySide2/PySide6
+        # already return native Python strings, so the historical
+        # str() coercion for QString protection is no longer
+        # needed; the runtime test below pins the actual behaviour.
         body = self._mw.split(
             "def _gather_routed_targets(self):")[1].split(
             "\n    def ")[0]
-        self.assertIn("str(node", body)
-        self.assertIn("str(a)", body)
+        self.assertIn("(node or \"\")", body)
+        self.assertIn("for a in (attrs or [])", body)
 
     @unittest.skipIf(conftest._REAL_MAYA,
         "mock-dependent (PySide stubs)")

@@ -1,0 +1,2602 @@
+# -*- coding: utf-8 -*-
+u"""
+MainController \u2014 the **sole bridge** between the UI layer and
+:mod:`RBFtools.core`.
+
+Responsibilities
+----------------
+* Holds application state (current node, auto-fill toggle).
+* Owns the :class:`PoseTableModel` instance.
+* Exposes **public methods** that UI signal handlers call.
+* Calls ``core.*`` functions and updates the model accordingly.
+* Emits Qt signals so the view can react (e.g. refresh node list).
+
+The UI (main_window + widgets) must **never** import ``core`` directly.
+Everything flows through this controller.
+
+Thread safety
+-------------
+All methods are designed to run on Maya's main thread.
+``maya.cmds`` is not thread-safe; the controller does **not** spawn
+background threads.
+"""
+
+from __future__ import absolute_import
+
+import maya.cmds as cmds
+
+from RBFtools.ui.compat import QtCore
+from RBFtools.ui.pose_model import PoseTableModel
+from RBFtools import core
+from RBFtools.constants import (
+    AUTO_FILL_OPT_VAR,
+    NODE_TYPE,
+)
+
+
+class MainController(QtCore.QObject):
+    """Central business-logic dispatcher.
+
+    Signals
+    -------
+    nodesRefreshed(list)
+        Emitted after the scene is scanned for RBFtools nodes.
+        Payload is the ordered list of transform names.
+    settingsLoaded(dict)
+        Emitted with the full settings dict (from ``core.get_all_settings``).
+        ``None`` when no node is selected.
+    radiusUpdated(float, bool, bool)
+        ``(radius_value, radius_enabled, radius_type_enabled)``
+        Emitted after kernel / radiusType changes so the view can
+        update its spinbox state.
+    editorLoaded()
+        Emitted after the pose editor has been fully populated from
+        the current node.
+    statusMessage(str)
+        Optional HUD / status-bar message forwarding.
+    """
+
+    nodesRefreshed  = QtCore.Signal(list)
+    settingsLoaded  = QtCore.Signal(object)       # dict or None
+    radiusUpdated   = QtCore.Signal(float, bool, bool)
+    editorLoaded    = QtCore.Signal()
+    statusMessage   = QtCore.Signal(str)
+    # M_UIRECONCILE (F.1): MVC-clean signal that fires after every
+    # add_driver_source / remove_driver_source mutation so the UI can
+    # reload its multi-source widgets from the new node state. Widgets
+    # never talk to each other directly - they all subscribe here.
+    driverSourcesChanged = QtCore.Signal()
+    # M_DRIVEN_MULTI (Item 4c, 2026-04-27): symmetric signal for the
+    # driven side. Emitted after every add_driven_source /
+    # remove_driven_source / set_driven_source_attrs mutation.
+    drivenSourcesChanged = QtCore.Signal()
+    # Phase 3 (Header naming radio 2026-04-27): emitted whenever
+    # the TD picks a different LongName / ShortName / NiceName mode.
+    # Subscribers re-render any displayed node names through
+    # core.format_node_for_display.
+    nameDisplayModeChanged = QtCore.Signal(str)
+    # M_P1_ENC_COMBO_FIX (2026-04-29): narrow signal carrying the
+    # freshly-derived driverInputRotateOrder list for the rbf_section
+    # rotate-order editor. Replaces the prior _load_settings()
+    # cascade in on_input_encoding_changed (M_ENC_AUTOPIPE) which
+    # round-tripped through settingsLoaded -> rbf_section.load and
+    # exposed the get_all_settings 7-field gap as a combo bounce-back
+    # bug. The narrow path touches only the editor that needs
+    # fresh data; combos and other M2.x fields are not re-pushed.
+    rotateOrderEditorReload = QtCore.Signal(list)
+
+    def __init__(self, parent=None):
+        super(MainController, self).__init__(parent)
+
+        self._current_node = ""
+        self._auto_fill    = False
+        # Phase 3: TD-controlled node-name display mode for the
+        # inspector. Pure UI concern - the underlying scene names
+        # are unchanged; only the surface representation toggles.
+        self._name_display_mode = "long"
+
+        # The single pose data model -- shared with the QTableView
+        self._pose_model = PoseTableModel(self)
+
+        self._init_auto_fill()
+
+    # =================================================================
+    #  Properties
+    # =================================================================
+
+    @property
+    def pose_model(self):
+        """The :class:`PoseTableModel` instance that the view binds to."""
+        return self._pose_model
+
+    @property
+    def current_node(self):
+        return self._current_node
+
+    @property
+    def auto_fill(self):
+        return self._auto_fill
+
+    # =================================================================
+    #  Initialisation
+    # =================================================================
+
+    def _init_auto_fill(self):
+        try:
+            self._auto_fill = bool(
+                cmds.optionVar(query=AUTO_FILL_OPT_VAR))
+        except Exception:
+            self._auto_fill = False
+
+    def init(self):
+        """Run after the controller and view are fully wired.
+
+        Loads the plugin and emits the first ``nodesRefreshed``.
+        """
+        core.ensure_plugin()
+        self.refresh_nodes()
+
+    # =================================================================
+    #  1. Node selector actions
+    # =================================================================
+
+    def refresh_nodes(self):
+        """Re-scan the scene and emit :signal:`nodesRefreshed`."""
+        nodes = core.list_all_nodes()
+        self.nodesRefreshed.emit(nodes)
+        return nodes
+
+    def on_node_changed(self, name):
+        """Called when the user picks a different node in the combo."""
+        self._current_node = name
+        self._load_settings()
+        self._load_editor()
+
+    def pick_selected(self):
+        """Pick the first selected RBFtools from the viewport.
+
+        Returns
+        -------
+        str or None
+            The transform name that was selected, or ``None``.
+        """
+        sel = cmds.ls(selection=True) or []
+        for s in sel:
+            shape = core.get_shape(s)
+            if (shape and cmds.objExists(shape)
+                    and cmds.nodeType(shape) == NODE_TYPE):
+                nodes = self.refresh_nodes()
+                transform = core.get_transform(shape)
+                self._current_node = transform
+                self._load_settings()
+                self._load_editor()
+                return transform
+        cmds.warning("No RBFtools node selected.")
+        return None
+
+    def create_node(self):
+        """Create a new RBFtools and select it.
+
+        Returns
+        -------
+        str
+            New transform name.
+        """
+        transform = core.create_node()
+        self.refresh_nodes()
+        self._current_node = transform
+        self._load_settings()
+        self._load_editor()
+        # M3.6: auto-seed a rest pose on freshly created RBF nodes
+        # when the per-user optionVar is on. Gated on type == 1
+        # (RBF mode) so VectorAngle nodes are untouched. The "New"
+        # button currently creates type=0 nodes, making this a
+        # no-op in that flow today -- the manual Tools menu entry
+        # is the practical entry point. See addendum sec.M3.6.
+        if self._auto_neutral_enabled() and \
+           core.safe_get(core.get_shape(transform) + ".type", 0) == 1:
+            from RBFtools import core_neutral
+            try:
+                if core_neutral.add_neutral_sample(transform):
+                    self._load_editor()
+            except Exception as exc:
+                cmds.warning(
+                    "create_node: auto-neutral seed failed: {} "
+                    u"(continuing \u2014 neutral seed is advisory)".format(exc))
+        return transform
+
+    # =================================================================
+    #  M3.6 -- Auto-neutral-sample (path A consumer; 5th)
+    # =================================================================
+
+    AUTO_NEUTRAL_OPT_VAR = "RBFtools_auto_neutral_sample"
+
+    def _auto_neutral_enabled(self):
+        """Return the user's auto-neutral preference (default True)."""
+        try:
+            if cmds.optionVar(exists=self.AUTO_NEUTRAL_OPT_VAR):
+                return bool(cmds.optionVar(query=self.AUTO_NEUTRAL_OPT_VAR))
+        except Exception:
+            pass
+        return True
+
+    # ------------------------------------------------------------------
+    # M_B24b1 -- multi-source driver path A wiring
+    # ------------------------------------------------------------------
+
+    def add_driver_source(self, driver_node, driver_attrs,
+                           weight=1.0, encoding=0):
+        """Path A entry-point for adding a driver source to the
+        current RBFtools node. No confirm dialog (additive op).
+        Routes through :func:`core.add_driver_source`."""
+        if not self._current_node:
+            cmds.warning("add_driver_source: no current node")
+            return None
+        try:
+            idx = core.add_driver_source(
+                self._current_node, driver_node, driver_attrs,
+                weight=weight, encoding=encoding)
+        except Exception as exc:
+            cmds.warning(
+                "add_driver_source failed: {}".format(exc))
+            return None
+        # M_UIRECONCILE (F.1): notify subscribers so the
+        # DriverSourceListEditor + any future multi-source widgets
+        # reload from the post-mutation node state.
+        self.driverSourcesChanged.emit()
+        return idx
+
+    def remove_driver_source(self, index):
+        """Path A entry-point for removing a driver source. Walks
+        ask_confirm because removal is destructive (deletes the
+        Maya plug entry)."""
+        if not self._current_node:
+            cmds.warning("remove_driver_source: no current node")
+            return False
+        from RBFtools.ui.i18n import tr
+        # M_P0_TAB_REMOVE_SPARSE_FIX (2026-04-30): translate tab-
+        # position to sparse multi index BEFORE the confirm dialog
+        # so a stale view index aborts cleanly instead of asking the
+        # user about a phantom source.
+        multi_idx = self._list_idx_to_sparse("driver", index)
+        if multi_idx is None:
+            cmds.warning(
+                "remove_driver_source: list_idx {} out of range "
+                "or no current node".format(index))
+            return False
+        proceed = self.ask_confirm(
+            action_id="remove_driver_source",
+            title=tr("title_remove_driver_source"),
+            summary=tr("summary_remove_driver_source"),
+            preview_text="")
+        if not proceed:
+            return False
+        try:
+            core.remove_driver_source(self._current_node, multi_idx)
+        except Exception as exc:
+            cmds.warning(
+                "remove_driver_source failed: {}".format(exc))
+            return False
+        # M_UIRECONCILE (F.1): notify subscribers - same channel as
+        # add_driver_source above.
+        self.driverSourcesChanged.emit()
+        return True
+
+    def disconnect_driver_source_attrs(self, index, attrs=None):
+        u"""M_CONNECT_DISCONNECT_FIX Bug 2 (2026-04-28) \u2014 extended
+        signature accepts optional ``attrs`` list:
+
+          attrs=None  -> Scene B: full source disconnect (legacy
+                         behavior)
+          attrs=[...] -> Scene A: precise disconnect of ONLY the
+                         listed attrs (mirrors the new
+                         attrsClearRequested(int, list) signal
+                         payload).
+
+        Routes through :func:`core.disconnect_driver_source_attrs`
+        which itself uses ``_disconnect_or_purge`` for the atomic
+        protocol reuse (M_BREAK_REBUILD / M_UNITCONV_PURGE /
+        M_REMOVE_MULTI / M_SWEEP_EMPTY)."""
+        if not self._current_node:
+            cmds.warning(
+                "disconnect_driver_source_attrs: no current node")
+            return False
+        multi_idx = self._list_idx_to_sparse("driver", index)
+        if multi_idx is None:
+            cmds.warning(
+                "disconnect_driver_source_attrs: list_idx {} out "
+                "of range".format(index))
+            return False
+        try:
+            ok = core.disconnect_driver_source_attrs(
+                self._current_node, multi_idx,
+                attrs=list(attrs) if attrs else None)
+        except Exception as exc:
+            cmds.warning(
+                "disconnect_driver_source_attrs failed: {}".format(exc))
+            return False
+        if ok:
+            self.driverSourcesChanged.emit()
+        return ok
+
+    def set_driver_source_attrs(self, index, new_attrs):
+        """M_UIRECONCILE_PLUS (Item 4b): replace the attrs list of
+        an existing driverSource[index] entry on the active node.
+        Routes through :func:`core.set_driver_source_attrs` and
+        emits :attr:`driverSourcesChanged` so the editor reloads."""
+        if not self._current_node:
+            cmds.warning("set_driver_source_attrs: no current node")
+            return False
+        multi_idx = self._list_idx_to_sparse("driver", index)
+        if multi_idx is None:
+            cmds.warning(
+                "set_driver_source_attrs: list_idx {} out of "
+                "range".format(index))
+            return False
+        try:
+            ok = core.set_driver_source_attrs(
+                self._current_node, multi_idx, list(new_attrs))
+        except Exception as exc:
+            cmds.warning(
+                "set_driver_source_attrs failed: {}".format(exc))
+            return False
+        if ok:
+            self.driverSourcesChanged.emit()
+        return ok
+
+    def read_driver_sources(self):
+        """Read current node's driver sources (multi). Returns
+        list[DriverSource] or empty list."""
+        if not self._current_node:
+            return []
+        try:
+            return list(core.read_driver_info_multi(self._current_node))
+        except Exception as exc:
+            cmds.warning(
+                "read_driver_sources failed: {}".format(exc))
+            return []
+
+    def driver_source_connection_state(self, index):
+        """M_P0_DRIVER_CONNECT_UX_REVAMP Part A.3 (2026-05-12) --
+        forward to :func:`core.driver_source_connection_state` for
+        the active node's driverSource[index].
+
+        ``index`` is the tab-position (dense) index. The
+        sparse-multi translation matches the rest of the controller
+        API surface so callers do not need to think about the
+        sparse subscript layout.
+        """
+        if not self._current_node:
+            return "disconnected"
+        multi_idx = self._list_idx_to_sparse("driver", index)
+        if multi_idx is None:
+            return "disconnected"
+        try:
+            return core.driver_source_connection_state(
+                self._current_node, multi_idx)
+        except Exception as exc:
+            cmds.warning(
+                "driver_source_connection_state failed: {}".format(
+                    exc))
+            return "disconnected"
+
+    # =================================================================
+    #  M_ROTORDER_UI_REFACTOR (2026-04-29) -- driver-tab-synced
+    #  rotate-order self-heal.
+    # =================================================================
+
+    def _list_idx_to_sparse(self, role, list_idx):
+        u"""M_P0_TAB_REMOVE_SPARSE_FIX (2026-04-30) \u2014 translate a tab-
+        position index (0..n-1, dense) to the Maya multi-instance
+        sparse index that ``core.{remove,set,disconnect}_*_source``
+        expects.
+
+        Background: ``core.add_*_source`` allocates new entries via
+        ``max(indices) + 1`` (append-only, no hole reuse), so the
+        ``driverSource[]`` / ``drivenSource[]`` sparse multi grows
+        discontinuous after any remove. The view emits Qt
+        tabCloseRequested / list-enumerate indices (always dense
+        0..n-1); core takes sparse multi indices. The bug: the
+        first remove coincidentally hits ``list_pos == sparse_idx``
+        and works; every subsequent remove / attrs edit on a
+        sparse-discontinuous node lands on the wrong (or empty)
+        slot \u2014 the user-reported "only first \u274c works" repro.
+
+        Lesson #7 (project-methodology candidate): "view <-> core
+        index-space drift goes silent until sparse goes
+        discontinuous". Boundary translator at the controller
+        layer is the canonical fix \u2014 view and core both keep
+        their native conventions.
+
+        Args:
+          role:     "driver" or "driven" \u2014 selects the multi attr
+                    name (driverSource / drivenSource).
+          list_idx: dense list position from the view (0..n-1).
+
+        Returns:
+          int sparse index, or ``None`` when (a) no current node,
+          (b) shape unresolved, (c) multiIndices unavailable, or
+          (d) list_idx is out of range. Callers MUST treat None as
+          "abort the operation safely with a cmds.warning" \u2014 never
+          fall through to core with a list-pos that drifted.
+        """
+        if not self._current_node:
+            return None
+        try:
+            shape = core.get_shape(self._current_node)
+        except Exception:
+            return None
+        if not shape:
+            return None
+        multi_attr = "{}.{}Source".format(shape, role)
+        try:
+            sparse = sorted(
+                cmds.getAttr(multi_attr, multiIndices=True) or [])
+        except Exception:
+            return None
+        li = int(list_idx)
+        if 0 <= li < len(sparse):
+            return int(sparse[li])
+        return None
+
+    def _resync_rotate_order_length(self):
+        u"""Re-derive ``driverInputRotateOrder[]`` to match the current
+        driverSource[] population by routing through the canonical
+        M_ENC_AUTOPIPE auto-resolve path.
+
+        M_P0_ENCODING_OUTPUT_GLITCH (2026-04-30): the previous
+        implementation called ``core.write_driver_rotate_orders``
+        which delegates to ``core.set_node_multi_attr``. That helper's
+        clear-then-write contract (M2.4a refinement 2) calls
+        ``cmds.removeMultiInstance`` per index \u2014 and removeMultiInstance
+        TEARS DOWN any incoming connection. The M_ENC_AUTOPIPE fix
+        (commit 673ab13) had wired ``driver.rotateOrder ->
+        shape.driverInputRotateOrder[d]`` as a LIVE connection so the
+        C++ ``applyEncodingToBlock`` (cpp:1464-1483 / 2606-2624) reads
+        the right rotate-order at every evaluation. The clear-then-
+        write self-heal silently demoted those live connections to
+        static 0 (XYZ); for any non-XYZ driver under a non-Raw
+        encoding (Quaternion / BendRoll / ExpMap / SwingTwist) the
+        Euler -> Quaternion preconversion picked the wrong rotation
+        order and the driven outputs jumped on every viewport change.
+        Raw encoding short-circuits the rotate-order read in
+        applyEncodingToBlock and was not affected \u2014 matching the
+        user-reported "Raw \u6b63\u5e38 + \u5176\u4ed6\u7f16\u7801\u4e71\u8df3" symptom verbatim.
+
+        Path C fix: replace the static write-back with a call into
+        ``core.auto_resolve_generic_rotate_orders`` \u2014 the same helper
+        that establishes the live connection in the first place. It
+        internally:
+
+          * For Raw / Quaternion encodings (rotate-order-independent
+            in C++), clears ``driverInputRotateOrder[]`` via the
+            transactional helper. Live connections are not relevant
+            here so the clear is correct.
+          * For BendRoll / ExpMap / SwingTwist encodings, walks
+            driverSource[] and ``connectAttr force=True`` per source
+            \u2014 re-establishing or refreshing each
+            ``driver.rotateOrder -> driverInputRotateOrder[d]`` live
+            connection. The force=True flag turns this into an
+            idempotent "ensure connection" without an intermediate
+            removeMultiInstance.
+
+        Length self-heal (the original purpose) is now an emergent
+        property of auto_resolve walking the live driverSource list:
+        new sources get a fresh connection, removed sources leave
+        their stale rotate-order slot which the next clear-on-bypass
+        cycle (Raw/Quat) cleans up. The TD-visible behaviour matches
+        what M_ROTORDER_UI_REFACTOR contracted; the Bug-1 mechanism
+        is the only thing removed.
+
+        Returns True iff the auto-resolve was invoked (test hook).
+        """
+        if not self._current_node:
+            return False
+        try:
+            shape = core.get_shape(self._current_node)
+        except Exception:
+            return False
+        if not shape:
+            return False
+        try:
+            encoding = int(cmds.getAttr(shape + ".inputEncoding"))
+        except Exception:
+            encoding = 0
+        try:
+            core.auto_resolve_generic_rotate_orders(
+                self._current_node, encoding)
+        except Exception as exc:
+            cmds.warning(
+                "_resync_rotate_order_length: auto-resolve failed "
+                "for {!r}: {}".format(self._current_node, exc))
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # M_DRIVEN_MULTI - multi-driven path A wiring (Item 4c)
+    # ------------------------------------------------------------------
+
+    def add_driven_source(self, driven_node, driven_attrs):
+        """Path A entry-point for adding a driven source on the active
+        node (M_DRIVEN_MULTI). Wraps :func:`core.add_driven_source` +
+        emits :attr:`drivenSourcesChanged`."""
+        if not self._current_node:
+            cmds.warning("add_driven_source: no current node")
+            return None
+        try:
+            idx = core.add_driven_source(
+                self._current_node, driven_node, list(driven_attrs))
+        except Exception as exc:
+            cmds.warning(
+                "add_driven_source failed: {}".format(exc))
+            return None
+        self.drivenSourcesChanged.emit()
+        return idx
+
+    def remove_driven_source(self, index):
+        """Path A entry-point for removing a driven source. Walks
+        ``ask_confirm`` because removal disconnects scene plugs."""
+        if not self._current_node:
+            cmds.warning("remove_driven_source: no current node")
+            return False
+        from RBFtools.ui.i18n import tr
+        # M_P0_TAB_REMOVE_SPARSE_FIX: list-pos -> sparse translation
+        # before the confirm dialog so a stale view index aborts
+        # cleanly. Driven mirror of remove_driver_source.
+        multi_idx = self._list_idx_to_sparse("driven", index)
+        if multi_idx is None:
+            cmds.warning(
+                "remove_driven_source: list_idx {} out of range "
+                "or no current node".format(index))
+            return False
+        proceed = self.ask_confirm(
+            action_id="remove_driven_source",
+            title=tr("title_remove_driven_source"),
+            summary=tr("summary_remove_driven_source"),
+            preview_text="")
+        if not proceed:
+            return False
+        try:
+            core.remove_driven_source(self._current_node, multi_idx)
+        except Exception as exc:
+            cmds.warning(
+                "remove_driven_source failed: {}".format(exc))
+            return False
+        self.drivenSourcesChanged.emit()
+        return True
+
+    def disconnect_driven_source_attrs(self, index, attrs=None):
+        u"""M_CONNECT_DISCONNECT_FIX Bug 2 driven mirror \u2014 same
+        signature semantics as :meth:`disconnect_driver_source_attrs`."""
+        if not self._current_node:
+            cmds.warning(
+                "disconnect_driven_source_attrs: no current node")
+            return False
+        multi_idx = self._list_idx_to_sparse("driven", index)
+        if multi_idx is None:
+            cmds.warning(
+                "disconnect_driven_source_attrs: list_idx {} out "
+                "of range".format(index))
+            return False
+        try:
+            ok = core.disconnect_driven_source_attrs(
+                self._current_node, multi_idx,
+                attrs=list(attrs) if attrs else None)
+        except Exception as exc:
+            cmds.warning(
+                "disconnect_driven_source_attrs failed: {}".format(exc))
+            return False
+        if ok:
+            self.drivenSourcesChanged.emit()
+        return ok
+
+    def set_driven_source_attrs(self, index, new_attrs):
+        """M_DRIVEN_MULTI: replace attrs on an existing
+        drivenSource[index] entry."""
+        if not self._current_node:
+            cmds.warning("set_driven_source_attrs: no current node")
+            return False
+        multi_idx = self._list_idx_to_sparse("driven", index)
+        if multi_idx is None:
+            cmds.warning(
+                "set_driven_source_attrs: list_idx {} out of "
+                "range".format(index))
+            return False
+        try:
+            ok = core.set_driven_source_attrs(
+                self._current_node, multi_idx, list(new_attrs))
+        except Exception as exc:
+            cmds.warning(
+                "set_driven_source_attrs failed: {}".format(exc))
+            return False
+        if ok:
+            self.drivenSourcesChanged.emit()
+        return ok
+
+    # ------------------------------------------------------------------
+    # Phase 3 - Header naming display mode + Utility cleanup
+    # ------------------------------------------------------------------
+
+    @property
+    def name_display_mode(self):
+        return self._name_display_mode
+
+    def set_name_display_mode(self, mode):
+        """Phase 3 (Header naming radio 2026-04-27): pick the active
+        LongName / ShortName / NiceName mode. Emits
+        :attr:`nameDisplayModeChanged` for inspector subscribers."""
+        if mode not in ("long", "short", "nice"):
+            cmds.warning(
+                "set_name_display_mode: unknown mode {!r}".format(mode))
+            return
+        if self._name_display_mode == mode:
+            return
+        self._name_display_mode = mode
+        self.nameDisplayModeChanged.emit(mode)
+
+    def cleanup_remove_connectionless_inputs(self):
+        """Phase 3 (Utility - cleanup tools): forward to
+        core helper. Returns the number of input[] indices removed."""
+        if not self._current_node:
+            cmds.warning(
+                "cleanup_remove_connectionless_inputs: no current node")
+            return 0
+        try:
+            n = core.cleanup_remove_connectionless_inputs(
+                self._current_node)
+        except Exception as exc:
+            cmds.warning(
+                "cleanup_remove_connectionless_inputs failed: "
+                "{}".format(exc))
+            return 0
+        # Source list may have shifted - re-emit so the editor
+        # rebuilds.
+        self.driverSourcesChanged.emit()
+        return n
+
+    def cleanup_remove_connectionless_outputs(self):
+        if not self._current_node:
+            cmds.warning(
+                "cleanup_remove_connectionless_outputs: no current node")
+            return 0
+        try:
+            n = core.cleanup_remove_connectionless_outputs(
+                self._current_node)
+        except Exception as exc:
+            cmds.warning(
+                "cleanup_remove_connectionless_outputs failed: "
+                "{}".format(exc))
+            return 0
+        self.drivenSourcesChanged.emit()
+        return n
+
+    def cleanup_remove_redundant_poses(self):
+        if not self._current_node:
+            cmds.warning(
+                "cleanup_remove_redundant_poses: no current node")
+            return 0
+        try:
+            n = core.cleanup_remove_redundant_poses(
+                self._current_node)
+        except Exception as exc:
+            cmds.warning(
+                "cleanup_remove_redundant_poses failed: "
+                "{}".format(exc))
+            return 0
+        return n
+
+    def split_solver_for_each_joint(self):
+        """Phase 3 (Utility - Split RBFSolver For Each Joint): the
+        core implementation is non-trivial (decomposing a multi-
+        driven node into per-joint copies) and is out of scope for
+        the Phase 3 commit. Surfaced as a warning so the TD knows
+        the button is wired but execution is deferred."""
+        cmds.warning(
+            "Split RBFSolver For Each Joint: implementation "
+            "deferred to a follow-up sub-task. The button is "
+            "registered + wired; the solver decomposition logic "
+            "lands separately.")
+        return False
+
+    def read_driven_sources(self):
+        """Read current node's driven sources (multi). Returns
+        list[DrivenSource] or empty list."""
+        if not self._current_node:
+            return []
+        try:
+            return list(core.read_driven_info_multi(self._current_node))
+        except Exception as exc:
+            cmds.warning(
+                "read_driven_sources failed: {}".format(exc))
+            return []
+
+    def reset_auto_neutral_default(self):
+        u"""Edit menu reset entry \u2014 wipe the optionVar so the next
+        node creation falls back to default-True. Mirrors the
+        M3.0 ``reset_all_skip_confirms`` pattern; no confirm
+        dialog (selecting the menu item is the user intent)."""
+        try:
+            if cmds.optionVar(exists=self.AUTO_NEUTRAL_OPT_VAR):
+                cmds.optionVar(remove=self.AUTO_NEUTRAL_OPT_VAR)
+        except Exception as exc:
+            cmds.warning(
+                "reset_auto_neutral_default failed: {}".format(exc))
+
+    def add_neutral_sample_to_current_node(self):
+        u"""Manual entry point \u2014 used by the Tools menu callback.
+        Walks path A confirm only when existing poses would be
+        pushed by the index-0 insertion (G.3 contract)."""
+        if not self._current_node:
+            cmds.warning("add_neutral_sample: no current node")
+            return False
+        from RBFtools import core_neutral
+        from RBFtools.ui.i18n import tr
+
+        existing = core.read_all_poses(self._current_node)
+        if existing:
+            preview = (
+                "Add Neutral Sample will INSERT a rest pose at "
+                "index 0,\npushing {} existing pose(s) to indices "
+                "1..{}.\n\nContinue?".format(len(existing), len(existing)))
+            proceed = self.ask_confirm(
+                title=tr("title_add_neutral"),
+                summary=tr("summary_add_neutral"),
+                preview_text=preview,
+                action_id="add_neutral_with_existing",
+            )
+            if not proceed:
+                return False
+
+        try:
+            wrote = core_neutral.add_neutral_sample(self._current_node)
+        except Exception as exc:
+            cmds.warning(
+                "add_neutral_sample failed: {}".format(exc))
+            return False
+        if wrote:
+            self._load_editor()
+        return wrote
+
+    def delete_node(self):
+        """Delete the current node."""
+        if not self._current_node:
+            return
+        core.delete_node(self._current_node)
+        self._current_node = ""
+        self.refresh_nodes()
+        self._load_settings()
+        self._load_editor()
+
+    # =================================================================
+    #  2. Settings read / write
+    # =================================================================
+
+    def _load_settings(self):
+        """Read all node attributes and emit ``settingsLoaded``."""
+        data = core.get_all_settings(self._current_node)
+        self.settingsLoaded.emit(data)
+
+    # =================================================================
+    #  M3.0 -- Shared infrastructure access (addendum sec.M3.0 path A)
+    # =================================================================
+    #
+    # M3.x sub-tasks reach the StatusProgressController and the
+    # ConfirmDialog through the controller, NOT through main_window
+    # private members. Keeps the MVC red line clean: sub-task widgets
+    # only know the controller, never the window's private layout.
+
+    def set_progress_controller(self, ctrl):
+        """Inject the StatusProgressController. Called by main_window
+        after ``_build_ui`` finishes (the progress widget is created
+        there, AFTER MainController.__init__)."""
+        self._status_progress = ctrl
+
+    def progress(self):
+        u"""Return the StatusProgressController, or None when running
+        headlessly (no main window) \u2014 callers must guard against None
+        in test / CI contexts."""
+        return getattr(self, "_status_progress", None)
+
+    # =================================================================
+    #  M3.2 -- Mirror Tool dispatcher (path A consumer)
+    # =================================================================
+
+    def mirror_current_node(self, config):
+        """Mirror the current node per *config*. First real-world
+        consumer of M3.0 path A (ask_confirm + progress).
+
+        Parameters
+        ----------
+        config : dict
+            ``{"target_name": str, "mirror_axis": int,
+              "naming_rule_index": int, "custom": (pat, rep) or None,
+              "naming_direction": "auto"/"forward"/"reverse"}``
+
+        Returns
+        -------
+        dict or None
+            ``mirror_node`` result on success, None on user-cancel /
+            failure. Failures emit warnings; never raise to UI.
+        """
+        if not self._current_node:
+            return None
+        from RBFtools import core, core_mirror
+        from RBFtools.ui.i18n import tr
+
+        source = self._current_node
+        target_name = config.get("target_name", "")
+        if not target_name:
+            cmds.warning("mirror_current_node: empty target_name")
+            return None
+
+        target_exists = core._exists(target_name)
+        # Build preview text per addendum sec.M3.2.Q8.
+        axis = int(config.get("mirror_axis", core_mirror.AXIS_X))
+        axis_label = core_mirror.AXIS_LABELS[axis]
+        rule_idx = int(config.get("naming_rule_index", 0))
+        if rule_idx < len(core_mirror.NAMING_PRESETS):
+            rule_label = core_mirror.NAMING_PRESETS[rule_idx][4]
+        else:
+            rule_label = "naming_rule_custom"
+
+        # M_B24c (G.1 + D.3): informational notice when the source
+        # node carries multiple Generic-mode driver sources. Matrix-
+        # mode multi-source mirror remains DEFERRED to M_B24c2 and is
+        # blocked by the engine-level hard guard in mirror_node, so
+        # this dialog is purely informational - no Matrix mode special
+        # case here. See addendum
+        # sec.M_B24c.write-side-add-driver-source-reuse.
+        try:
+            sources = core.read_driver_info_multi(source)
+        except Exception:
+            sources = []
+        if len(sources) > 1:
+            proceed = self.ask_confirm(
+                action_id="mirror_multi_source_info",
+                title=tr("title_mirror_multi_source"),
+                summary=tr("summary_mirror_multi_source"),
+                preview_text="")
+            if not proceed:
+                return None
+
+        src_driven, _dn_attrs = core.read_driven_info(source)
+        new_driven, _ = core_mirror.apply_naming_rule(
+            src_driven or "", rule_idx,
+            config.get("custom"), config.get("naming_direction", "auto"))
+
+        # Per-source driver name remap preview (M_B24c (A.3)
+        # source-by-source semantic). For single-source nodes this
+        # collapses to the legacy one-line preview shape.
+        driver_preview_lines = []
+        for i, s in enumerate(sources):
+            new_name, _status = core_mirror.apply_naming_rule(
+                s.node or "", rule_idx,
+                config.get("custom"),
+                config.get("naming_direction", "auto"))
+            found = ("(found)" if (new_name and core._exists(new_name))
+                     else "(MISSING)")
+            driver_preview_lines.append(
+                "Driver[{}]: {!s:<22}  ->  {!s:<22} {}  "
+                "({} attrs, encoding={})".format(
+                    i, s.node or "(none)", new_name or "(none)",
+                    found, len(s.attrs), int(s.encoding)))
+        if not driver_preview_lines:
+            driver_preview_lines.append("Driver:   (none wired)")
+
+        n_poses = len(core.read_all_poses(source))
+
+        preview_lines = [
+            "Mirror Configuration:",
+            "  Source Node:    {}".format(source),
+            "  Target Node:    {}  ({})".format(
+                target_name,
+                "will OVERWRITE" if target_exists else "will be CREATED"),
+            "  Mirror Axis:    {}".format(axis_label),
+            "  Naming Rule:    {}".format(rule_label),
+            "",
+        ]
+        preview_lines.extend(driver_preview_lines)
+        preview_lines.extend([
+            "Driven:   {!s:<22}  ->  {!s:<22} {}".format(
+                src_driven or "(none)",
+                new_driven or "(none)",
+                "(found)" if (new_driven and core._exists(new_driven))
+                else "(MISSING)"),
+            "",
+            "Poses ({} total) will be mirrored across {}.".format(
+                n_poses, axis_label),
+        ])
+        preview = "\n".join(preview_lines)
+
+        action_id = ("mirror_overwrite" if target_exists
+                     else "mirror_create")
+        proceed = self.ask_confirm(
+            title="Mirror Node",
+            summary="Mirror {} -> {}?".format(source, target_name),
+            preview_text=preview,
+            action_id=action_id,
+        )
+        if not proceed:
+            return None
+
+        prog = self.progress()
+        try:
+            return core.mirror_node(
+                source_node=source,
+                target_name=target_name,
+                mirror_axis=axis,
+                naming_rule_index=rule_idx,
+                custom_naming=config.get("custom"),
+                naming_direction=config.get("naming_direction", "auto"),
+                progress=prog,
+                overwrite=target_exists,
+            )
+        except Exception as exc:
+            cmds.warning("mirror_current_node failed: {}".format(exc))
+            if prog is not None:
+                prog.end("Mirror failed")
+            return None
+
+    # =================================================================
+    #  M3.4 -- Live Edit Mode (driver-only; thin wrapper over update_pose)
+    # =================================================================
+
+    def live_edit_apply_inputs(self, row):
+        u"""Live Edit's leading / trailing emit calls into this
+        thin wrapper. Reuses :meth:`update_pose` end-to-end \u2014
+        ``read_current_values(driver)`` then ``model.update_pose_values``.
+
+        Read-then-write is intentional: any momentary race with
+        a user-clicked Update Pose simply lets the last write
+        win; addendum \u00a7M3.4 (Q6) discusses why no lock is needed
+        (Maya scriptJob + Qt signals are main-thread serial)."""
+        if not self._current_node or row is None or row < 0:
+            return
+        drv_node, drv_attrs = core.read_driver_info(self._current_node)
+        drvn_node, drvn_attrs = core.read_driven_info(self._current_node)
+        if not drv_node or not drv_attrs:
+            return
+        self.update_pose(row, drv_node, drvn_node, drv_attrs, drvn_attrs)
+
+    # =================================================================
+    #  M3.5 -- Pose Profiler (read-only diagnostic; no path A confirm
+    #         because profile_node performs no scene mutation)
+    # =================================================================
+
+    def profile_current_node(self):
+        u"""Compute a profile report for the current node.
+
+        Returns the formatted ASCII report string, or None when no
+        node is selected. The dialog/widget caller is responsible
+        for displaying the text \u2014 the controller stays MVC-clean
+        and does not own UI rendering.
+        """
+        if not self._current_node:
+            cmds.warning("profile_current_node: no current node")
+            return None
+        from RBFtools import core_profile
+        return core_profile.profile_node_to_text(self._current_node)
+
+    def profile_to_script_editor(self):
+        """Tools menu side-channel: print the profile report to
+        the Script Editor. Useful for copy-paste / saving as a
+        text snapshot."""
+        text = self.profile_current_node()
+        if text:
+            print(text)
+        return text
+
+    # =================================================================
+    #  M3.1 -- Pose Pruner (path A consumer; 4th real-world consumer)
+    # =================================================================
+
+    def prune_current_node(self, opts=None):
+        """Two-phase prune: dry-run analysis -> path A confirm ->
+        execute. Returns the result dict from
+        :func:`core_prune.execute_prune`, or None on cancellation /
+        no-op.
+        """
+        if not self._current_node:
+            cmds.warning("prune_current_node: no current node")
+            return None
+        from RBFtools import core_prune
+        from RBFtools.ui.i18n import tr
+
+        action = core_prune.analyse_node(self._current_node, opts)
+        if not action.has_changes() and not action.conflict_pairs:
+            cmds.warning("Pose Pruner: nothing to prune.")
+            return None
+
+        preview = self._format_prune_report(self._current_node, action)
+        if not action.has_changes():
+            # Conflict pairs only -- display warning, no actual action.
+            cmds.warning(
+                "Pose Pruner: conflict pairs reported (informational).\n"
+                + preview)
+            return None
+
+        proceed = self.ask_confirm(
+            title=tr("title_prune_poses"),
+            summary=tr("summary_prune_poses"),
+            preview_text=preview,
+            action_id="prune_poses",
+        )
+        if not proceed:
+            return None
+
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_prune_starting"))
+        try:
+            result = core_prune.execute_prune(self._current_node, action)
+        except Exception as exc:
+            cmds.warning("prune_current_node failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_prune_failed"))
+            return None
+        if prog is not None:
+            prog.end(tr("status_prune_done"))
+        # Pose count / column shape may have changed -- refresh editor.
+        self._load_editor()
+        return result
+
+    @staticmethod
+    def _format_prune_report(node_name, action):
+        """Render a :class:`core_prune.PruneAction` as ASCII for the
+        ConfirmDialog preview pane."""
+        lines = ["Pose Pruner Preview", "  Node:   {}".format(node_name), ""]
+
+        if action.duplicate_pose_indices:
+            lines.append("  Duplicate poses ({} found)".format(
+                len(action.duplicate_pose_indices)))
+            for idx in action.duplicate_pose_indices:
+                lines.append("        pose[{}]  duplicate (same input AND value)"
+                             .format(idx))
+        if action.redundant_input_indices:
+            lines.append("  Redundant driver dims ({} found)".format(
+                len(action.redundant_input_indices)))
+            for idx in action.redundant_input_indices:
+                nm = (action.driver_attr_names[idx]
+                      if idx < len(action.driver_attr_names) else "?")
+                lines.append("        input[{}] ({}):  all poses same value"
+                             .format(idx, nm))
+        if action.constant_output_indices:
+            lines.append("  Constant outputs ({} found)".format(
+                len(action.constant_output_indices)))
+            for idx in action.constant_output_indices:
+                nm = (action.driven_attr_names[idx]
+                      if idx < len(action.driven_attr_names) else "?")
+                lines.append("        output[{}] ({}):  all poses same value"
+                             .format(idx, nm))
+        if action.conflict_pairs:
+            lines.append("")
+            lines.append("  ! Conflicting poses ({} pair(s), NOT auto-removed)"
+                         .format(len(action.conflict_pairs)))
+            for a, b in action.conflict_pairs:
+                lines.append("        pose[{}] vs pose[{}]: same input, "
+                             "different values".format(a, b))
+            lines.append("        Manual review needed.")
+
+        # Side effects on quat groups.
+        invalid = [e for e in action.quat_group_effects if e.invalidated]
+        shifted = [e for e in action.quat_group_effects
+                   if not e.invalidated and e.new_start != e.old_start]
+        if invalid or shifted:
+            lines.append("")
+            lines.append("  ! Side effects:")
+            for e in shifted:
+                lines.append(
+                    "        quat group[{}]: start {} -> {} (index shift)"
+                    .format(e.group_idx, e.old_start, e.new_start))
+            for e in invalid:
+                lines.append(
+                    "        quat group[{}] (start={}): INVALID after prune; "
+                    "C++ will silently skip".format(e.group_idx, e.old_start))
+
+        # After-prune summary.
+        lines.append("")
+        lines.append("  After prune: {} poses -> {} poses".format(
+            action.n_poses_before,
+            action.n_poses_before - len(action.duplicate_pose_indices)))
+        lines.append("               {} driver dims -> {} driver dims".format(
+            action.n_inputs_before,
+            action.n_inputs_before - len(action.redundant_input_indices)))
+        lines.append("               {} driven dims -> {} driven dims".format(
+            action.n_outputs_before,
+            action.n_outputs_before - len(action.constant_output_indices)))
+        return "\n".join(lines)
+
+    # =================================================================
+    #  M3.3 -- JSON Import / Export (path A consumers)
+    # =================================================================
+
+    def export_current_to_path(self, path, meta=None):
+        u"""Export the current node to a single-node JSON at *path*.
+        Non-destructive \u2014 no confirm dialog, only progress feedback."""
+        if not self._current_node:
+            cmds.warning("export_current_to_path: no current node")
+            return False
+        from RBFtools import core_json
+        from RBFtools.ui.i18n import tr
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_export_starting"))
+        try:
+            core_json.export_nodes_to_path(
+                [self._current_node], path, meta=meta)
+        except Exception as exc:
+            cmds.warning("export failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_export_failed"))
+            return False
+        if prog is not None:
+            prog.end(tr("status_export_done"))
+        return True
+
+    # ----- M_P0_POSES_IO (2026-05-10) -------------------------------
+    # Focused poses-only import/export for the test-iteration workflow:
+    # save just the pose data on the current node, reload later into
+    # the same (or matching) node without recreating the whole node.
+    # Validation on import gates dim mismatch as a hard fail; renames
+    # are surfaced as warnings.
+    # ----------------------------------------------------------------
+
+    def export_poses_to_path(self, path):
+        u"""Export the current node's poses to a JSON file.
+
+        Returns True on success, False on failure / no current node.
+
+        M_P0_POSES_IO_DIALOG_CTD_FIX2 (2026-05-11): bulletproof
+        defensive coding \u2014 every step is print-traced + try/except
+        wrapped so a crash inside any one step is captured (logged)
+        and the function returns False instead of letting the
+        exception escape and CTD Maya.
+        """
+        print("[RBFtools] ctrl.export_poses_to_path: ENTER path={!r}".format(path))
+        if not self._current_node:
+            cmds.warning("export_poses_to_path: no current node selected")
+            return False
+        if not path:
+            cmds.warning("export_poses_to_path: empty path")
+            return False
+        # Path sanity -- force string, expand user, normalize.
+        try:
+            import os
+            path = os.path.expanduser(str(path))
+        except Exception as exc:
+            cmds.warning("export_poses: path normalize failed: {}".format(exc))
+            return False
+        print("[RBFtools] ctrl.export_poses_to_path: normalized path={!r}".format(path))
+        # Lazy import to avoid bringing core_json into the controller's
+        # cold import path.
+        try:
+            from RBFtools import core_json
+        except Exception as exc:
+            cmds.warning(
+                "export_poses: failed to import core_json: {}".format(exc))
+            return False
+        # Core export call -- wrap every possible exception type.
+        try:
+            print("[RBFtools] ctrl.export_poses_to_path: calling core_json.export_poses_to_path...")
+            abspath = core_json.export_poses_to_path(
+                self._current_node, path)
+            print("[RBFtools] ctrl.export_poses_to_path: core returned abspath={!r}".format(abspath))
+        except core_json.PosesImportValidationError as exc:
+            cmds.warning("export_poses (validation): {}".format(exc))
+            return False
+        except IOError as exc:
+            cmds.warning("export_poses (IO): {}".format(exc))
+            return False
+        except OSError as exc:
+            cmds.warning("export_poses (OS): {}".format(exc))
+            return False
+        except UnicodeError as exc:
+            cmds.warning("export_poses (unicode): {}".format(exc))
+            return False
+        except Exception as exc:
+            cmds.warning("export_poses (other): {!r}".format(exc))
+            return False
+        cmds.warning("RBFtools: exported poses to {}".format(abspath))
+        try:
+            self.statusMessage.emit("Poses exported.")
+        except Exception:
+            pass  # signal emission is advisory; never block on it
+        print("[RBFtools] ctrl.export_poses_to_path: SUCCESS")
+        return True
+
+    def import_poses_from_path(self, path, mode="replace"):
+        """Import poses from a file into the current node. Validates
+        dim consistency; raises a UI-level dialog on hard failure
+        (caller wraps).
+
+        Returns dict {"n_poses_imported": int, "warnings": [str]} on
+        success, or None on validation failure / no current node.
+        """
+        if not self._current_node:
+            cmds.warning("import_poses_from_path: no current node selected")
+            return None
+        from RBFtools import core_json
+        try:
+            result = core_json.import_poses_from_path(
+                self._current_node, path, mode=mode)
+        except core_json.PosesImportValidationError as exc:
+            cmds.warning("import_poses validation failed: {}".format(exc))
+            return None
+        except Exception as exc:
+            cmds.warning("import_poses failed: {}".format(exc))
+            return None
+        # Warnings are advisory (rename detection); surface them.
+        for w in result.get("warnings", []):
+            cmds.warning("import_poses: {}".format(w))
+        self.statusMessage.emit(
+            "Imported {} poses ({} mode).".format(
+                result["n_poses_imported"], mode))
+        # Reload pose grid + settings so the UI reflects new state.
+        self._load_settings()
+        self._load_editor()
+        return result
+
+    def export_all_to_path(self, path, meta=None):
+        """Export every RBFtools node in the scene to a multi-node JSON."""
+        from RBFtools import core, core_json
+        from RBFtools.ui.i18n import tr
+        nodes = core.list_all_nodes()
+        if not nodes:
+            cmds.warning("export_all_to_path: no RBFtools nodes in scene")
+            return False
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_export_starting"))
+        try:
+            core_json.export_nodes_to_path(nodes, path, meta=meta)
+        except Exception as exc:
+            cmds.warning("export_all failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_export_failed"))
+            return False
+        if prog is not None:
+            prog.end(tr("status_export_done"))
+        return True
+
+    def import_rbf_setup(self, path, mode="add"):
+        """Two-phase import (path A): dry-run -> ask_confirm (only when
+        mode='replace' will overwrite an existing node) -> execute.
+
+        Returns the dict from :func:`core_json.import_path` or None on
+        cancellation / total failure.
+        """
+        from RBFtools import core_json
+        from RBFtools.ui.i18n import tr
+        try:
+            data = core_json.read_json_with_schema_check(path)
+        except core_json.SchemaVersionError as exc:
+            cmds.warning(
+                "import_rbf_setup: {}".format(exc))
+            return None
+        try:
+            reports = core_json.dry_run(data, mode=mode)
+        except core_json.SchemaValidationError as exc:
+            cmds.warning(
+                "import_rbf_setup: dry-run failed:\n  {}".format(
+                    "\n  ".join(exc.errors)))
+            return None
+
+        # Path A confirm only when at least one Replace overwrite is
+        # imminent; pure-Add imports proceed without a prompt
+        # (non-destructive -- addendum sec.M3.3 D.2).
+        will_overwrite_any = any(r.will_overwrite for r in reports)
+        if mode == "replace" and will_overwrite_any:
+            preview = self._format_dry_run_report(reports)
+            proceed = self.ask_confirm(
+                title=tr("title_import_replace"),
+                summary=tr("summary_import_replace"),
+                preview_text=preview,
+                action_id="import_replace",
+            )
+            if not proceed:
+                return None
+
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_import_starting"))
+        try:
+            result = core_json.import_path(path, mode=mode)
+        except Exception as exc:
+            cmds.warning("import_rbf_setup failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_import_failed"))
+            return None
+        if prog is not None:
+            prog.end(tr("status_import_done"))
+        self.refresh_nodes()
+        return result
+
+    @staticmethod
+    def _format_dry_run_report(reports):
+        """Render a dry-run report list as ASCII for ConfirmDialog."""
+        lines = ["Import dry-run report ({} node(s)):".format(len(reports)),
+                 ""]
+        for r in reports:
+            mark = "[OK]" if r.ok else "[XX]"
+            ow = " (OVERWRITES existing)" if r.will_overwrite else ""
+            lines.append("{} {}{}".format(mark, r.name, ow))
+            for w in r.warnings:
+                lines.append("    ! {}".format(w))
+            for e in r.errors:
+                lines.append("    X {}".format(e))
+        return "\n".join(lines)
+
+    # =================================================================
+    #  M3.7 -- auto-alias dispatchers (path A consumers)
+    # =================================================================
+
+    def regenerate_aliases_for_current_node(self):
+        u"""Re-run alias generation in *preserve-user-aliases* mode
+        (E.1 default). No confirm dialog \u2014 non-destructive.
+
+        Returns the dict from :func:`core.auto_alias_outputs`, or None
+        if there is no current node.
+        """
+        if not self._current_node:
+            return None
+        from RBFtools import core
+        from RBFtools.ui.i18n import tr
+
+        driver_node, driver_attrs = core.read_driver_info(self._current_node)
+        driven_node, driven_attrs = core.read_driven_info(self._current_node)
+        # driver_node / driven_node are unused at this layer -- alias
+        # writes target the shape only, not the rig nodes (write-
+        # boundary contract, addendum sec.M3.7).
+        del driver_node, driven_node
+
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_alias_starting"))
+        try:
+            result = core.auto_alias_outputs(
+                self._current_node, driver_attrs, driven_attrs,
+                force=False)
+        except Exception as exc:
+            cmds.warning("regenerate_aliases failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_alias_failed"))
+            return None
+        if prog is not None:
+            prog.end(tr("status_alias_done"))
+        return result
+
+    def force_regenerate_aliases_for_current_node(self):
+        u"""Re-run alias generation in *force* mode \u2014 wipes ALL aliases
+        on the shape (managed AND user-set) before regenerating.
+
+        Goes through :meth:`ask_confirm` (path A) with
+        ``action_id="force_regenerate_aliases"`` because this is a
+        destructive operation against any user-managed aliases.
+        """
+        if not self._current_node:
+            return None
+        from RBFtools import core, core_alias
+        from RBFtools.ui.i18n import tr
+
+        shape = core.get_shape(self._current_node)
+        # Build preview: list every existing alias the user is about
+        # to lose. Two sections so user-set vs managed are visible.
+        existing_pairs = core_alias._query_existing_aliases(shape) if shape else []
+        managed = [a for a, _ in existing_pairs
+                   if core_alias.is_rbftools_managed_alias(a)]
+        user_set = [a for a, _ in existing_pairs
+                    if not core_alias.is_rbftools_managed_alias(a)]
+        preview_lines = [
+            "Force regenerate will WIPE all aliases on:",
+            "  Shape:  {}".format(shape or "(none)"),
+            "",
+            "User-set aliases that will be LOST ({}):".format(len(user_set)),
+        ]
+        if user_set:
+            preview_lines.extend("  - {}".format(a) for a in user_set)
+        else:
+            preview_lines.append("  (none)")
+        preview_lines.extend([
+            "",
+            "RBFtools-managed aliases that will be regenerated ({}):".format(
+                len(managed)),
+        ])
+        if managed:
+            preview_lines.extend("  - {}".format(a) for a in managed)
+        else:
+            preview_lines.append("  (none)")
+        preview = "\n".join(preview_lines)
+
+        proceed = self.ask_confirm(
+            title=tr("title_force_alias"),
+            summary=tr("summary_force_alias"),
+            preview_text=preview,
+            action_id="force_regenerate_aliases",
+        )
+        if not proceed:
+            return None
+
+        driver_node, driver_attrs = core.read_driver_info(self._current_node)
+        driven_node, driven_attrs = core.read_driven_info(self._current_node)
+        del driver_node, driven_node
+
+        prog = self.progress()
+        if prog is not None:
+            prog.begin(tr("status_alias_starting"))
+        try:
+            result = core.auto_alias_outputs(
+                self._current_node, driver_attrs, driven_attrs,
+                force=True)
+        except Exception as exc:
+            cmds.warning(
+                "force_regenerate_aliases failed: {}".format(exc))
+            if prog is not None:
+                prog.end(tr("status_alias_failed"))
+            return None
+        if prog is not None:
+            prog.end(tr("status_alias_done"))
+        return result
+
+    def ask_confirm(self, title, summary, preview_text="", action_id=""):
+        u"""Synchronous user-confirmation prompt (addendum \u00a7M3.0).
+
+        Returns True if the user clicked OK (or had previously silenced
+        this action via "Don't ask again"), False on Cancel / close.
+        Sub-tasks call this instead of importing ConfirmDialog
+        directly \u2014 keeps MVC clean and centralises the parent-widget
+        wiring.
+
+        M_P0_REMOVE_TAB_FIX (2026-04-30): ``preview_text`` and
+        ``action_id`` carry empty-string defaults so destructive ops
+        with no diff to preview (e.g. ``remove_driver_source`` /
+        ``remove_driven_source``) can omit them safely. ConfirmDialog
+        already coerces an empty / None preview to "" internally \u2014
+        the defaults here close the historical drift between this
+        signature (introduced as 4-strict-positional in M3.0) and
+        the M_UIRECONCILE-era callers that only passed three kwargs,
+        which silently raised ``TypeError`` inside Qt slot dispatch
+        and made the tab-close X look unresponsive.
+
+        Defence in depth: the per-callsite fixes at lines 257 / 419 /
+        708 explicitly pass ``preview_text=""`` so a future signature
+        revert cannot silently re-introduce the same drift; the
+        defaults here are the catch-all guard. Lesson #6 \u2014 "call-site
+        contract drift static-grep cannot catch needs an AST guard"
+        \u2014 is implemented by T_REMOVE_TAB_CONFIRM_CONTRACT (e).
+        """
+        from RBFtools.ui.widgets.confirm_dialog import ConfirmDialog
+        return ConfirmDialog.confirm(
+            title, summary, preview_text, action_id,
+            parent=self.parent())
+
+    # =================================================================
+    #  Generic attribute write
+    # =================================================================
+
+    # M_P0_TRAINING_ATTRS_FORCE_RETRAIN (2026-05-11): attribute set
+    # affecting K matrix / encoded pose vectors must force evaluate=1
+    # so the C++ solver retrains the wMat under the new value. The
+    # M_P0_TRAINING_AFFECTING_ATTRS C++ prev-tracker already does this
+    # in compute(), but the Python-layer write here is the
+    # belt-and-suspenders defense: if the C++ tracker fails to fire
+    # for any reason (DG dirty propagation race, plug coalescing,
+    # parallel eval), the explicit evaluate=0/1 toggle here triggers
+    # the training block unconditionally.
+    _TRAINING_AFFECTING_ATTRS = frozenset({
+        "kernel",             # K[i,j] = phi(d, sigma) shape
+        "distanceType",       # d(p_i, p_j) metric
+        "inputEncoding",      # encoded pose vector dimension/content
+        "radius",             # sigma in phi(d, sigma) for Custom radiusType
+        "radiusType",         # which sigma source (mean / median / custom)
+        "regularization",     # lambdaI diagonal injection
+        "allowNegativeWeights",  # affects matValues sign treatment
+        "rbfMode",            # Generic vs Matrix path divergence
+    })
+
+    def set_attribute(self, attr, value):
+        u"""Write a single attribute on the current node.
+
+        Dispatch by value type:
+          * ``list`` / ``tuple`` \u2192 multi-instance write via
+            :func:`core.set_node_multi_attr` (transactional;
+            clear-then-write under a single undo chunk per
+            v5 addendum \u00a7M2.4a refinement 2).
+          * scalar (int / float / bool) \u2192 :func:`core.set_node_attr`.
+
+        M_P0_TRAINING_ATTRS_FORCE_RETRAIN (2026-05-11): when the
+        attr is a training-affecting one (kernel / radius / etc.),
+        also toggle evaluate=0/1 AFTER the write so the C++ solver
+        retrains wMat under the new value. Defends against any
+        prev-tracker miss in the C++ auto-retrain path.
+        """
+        if not self._current_node:
+            return
+        if isinstance(value, (list, tuple)):
+            core.set_node_multi_attr(self._current_node, attr, value)
+        else:
+            core.set_node_attr(self._current_node, attr, value)
+        # Belt-and-suspenders retrain trigger for training-affecting attrs.
+        if attr in self._TRAINING_AFFECTING_ATTRS:
+            try:
+                shape = core.get_shape(self._current_node)
+                if shape and core._exists(shape):
+                    cmds.setAttr(shape + ".evaluate", 0)
+                    cmds.setAttr(shape + ".evaluate", 1)
+            except Exception as exc:
+                cmds.warning(
+                    "set_attribute: force-retrain toggle failed for "
+                    "{!r}: {!r}".format(attr, exc))
+
+    # =================================================================
+    #  M_ENC_AUTOPIPE - inputEncoding side-effect: auto-derive
+    #  driverInputRotateOrder[] from connected drivers (Generic mode).
+    # =================================================================
+
+    def on_input_encoding_changed(self, idx):
+        """Side-effect slot for the inputEncoding combo (rbf_section
+        emits ``inputEncodingChanged`` immediately after the regular
+        ``attributeChanged`` write).
+
+        Generic-mode TDs expect "select an encoding -> RBF compute
+        uses it" with zero manual setup. The C++ math chain
+        (RBFtools.cpp:1182 + 2606-2624 + 3135) consumes
+        ``driverInputRotateOrder[]`` for BendRoll / ExpMap /
+        SwingTwist; without an auto-derive step the array stays
+        empty and the C++ falls back to xyz=0 for all drivers,
+        silently mis-encoding any non-XYZ joint.
+
+        :func:`core.auto_resolve_generic_rotate_orders` walks the
+        currently connected ``driverSource[]`` entries and
+        force-connects each ``driver_node.rotateOrder`` so the array
+        tracks the live driver topology. Emitting
+        :attr:`driverSourcesChanged` after the derive forces the
+        rbf_section list editor to reload from the now-populated
+        multi via its existing ``set_values`` path.
+        """
+        if not self._current_node:
+            return
+        try:
+            core.auto_resolve_generic_rotate_orders(
+                self._current_node, int(idx))
+        except Exception as exc:
+            cmds.warning(
+                "on_input_encoding_changed: auto-derive failed: "
+                "{}".format(exc))
+            return
+        # M_P1_ENC_COMBO_FIX: emit a NARROW signal carrying the
+        # freshly-derived rotate-order list. The earlier
+        # _load_settings() cascade re-emitted settingsLoaded which
+        # round-tripped through rbf_section.load() -- that path
+        # called setCurrentIndex() on the inputEncoding combo from
+        # data.get("inputEncoding", 0), and because get_all_settings
+        # historically omitted the inputEncoding key the default 0
+        # bounced the combo back to Raw immediately after the user
+        # picked SwingTwist (TD repro 2026-04-29).
+        # The narrow signal touches ONLY the rotate-order editor;
+        # the combo selection that fired this slot is left alone.
+        try:
+            values = list(core.read_driver_rotate_orders(
+                self._current_node) or [])
+        except Exception:
+            values = []
+        self.rotateOrderEditorReload.emit(values)
+        self.driverSourcesChanged.emit()
+
+    # =================================================================
+    #  3. Kernel / radius interactions
+    # =================================================================
+
+    def on_kernel_changed(self, idx):
+        u"""Handle kernel dropdown change \u2192 lock radius type + refresh."""
+        if not self._current_node:
+            return
+        core.lock_radius_type(self._current_node)
+        self._emit_radius_state()
+
+    def on_radius_type_changed(self, idx):
+        u"""Handle radius-type dropdown change \u2192 recompute radius."""
+        if not self._current_node:
+            return
+        core.compute_radius(self._current_node)
+        self._emit_radius_state()
+
+    def on_radius_edited(self, value):
+        """User manually edits the radius (Custom type only)."""
+        if not self._current_node:
+            return
+        core.set_node_attr(self._current_node, "radius", value)
+        core.update_evaluation(self._current_node)
+
+    def _emit_radius_state(self):
+        """Read current radius state and emit ``radiusUpdated``."""
+        shape = core.get_shape(self._current_node)
+        if not shape or not cmds.objExists(shape):
+            return
+        radius_val   = core.safe_get(shape + ".radius",     0.0)
+        radius_type  = core.safe_get(shape + ".radiusType",  0)
+        kernel       = core.safe_get(shape + ".kernel",      1)
+        self.radiusUpdated.emit(
+            radius_val,
+            radius_type == 3,         # radius spinbox enabled
+            kernel != 0,              # radius-type combo enabled
+        )
+
+    # =================================================================
+    #  4. Attribute filter persistence
+    # =================================================================
+
+    def get_filters(self, role):
+        """Return persisted filter dict for *role*."""
+        return core.get_all_filters(role)
+
+    def set_filter(self, role, key, value):
+        """Persist one filter toggle."""
+        core.set_filter_state(role, key, value)
+
+    def list_attributes(self, node, filters):
+        """Return filtered attribute names for *node*."""
+        return core.list_filtered_attributes(node, filters)
+
+    # =================================================================
+    #  5. Pose editor -- load from node
+    # =================================================================
+
+    def _load_editor(self):
+        """Populate the pose model from the current node's data."""
+        self._pose_model.clear()
+
+        node = self._current_node
+        if not node:
+            self.editorLoaded.emit()
+            return
+
+        shape = core.get_shape(node)
+        if not shape or not cmds.objExists(shape):
+            self.editorLoaded.emit()
+            return
+
+        if core.safe_get(shape + ".type", 0) != 1:
+            self.editorLoaded.emit()
+            return
+
+        # M_P0_LOAD_EDITOR_MULTI (2026-04-30): use multi-source
+        # readers to match main_window._gather_role_info's flatten
+        # contract. The DEPRECATED legacy single-source readers
+        # truncated to driverSource[0] only, causing
+        # pose_model.n_inputs to mismatch the view layer (e.g. 4 vs
+        # 8 with 2 driver sources), which produced two cascading
+        # symptoms reported by the user:
+        #   - read_all_poses returns rows with the FULL multi-
+        #     source dimension (e.g. 8 inputs across 2 driverSource
+        #     entries), but setup_columns was configured with the
+        #     truncated single-source count (4). The first
+        #     pose_model.add_pose raised "Input dimension mismatch:
+        #     expected 4, got 8", _load_editor aborted before
+        #     editorLoaded.emit, and the view-side cascade never
+        #     fired -- pose grid stayed blank ("?? RBF ???
+        #     pose ??????").
+        #   - After the partial abort, pose_model.n_inputs retained
+        #     the previous node's truncated value. The next UI
+        #     add_pose (which already walks the multi readers via
+        #     _gather_role_info) then compared its 8-attr count
+        #     against the stale n_inputs=4 and rejected with
+        #     "Driver attribute count (8) differs from existing
+        #     poses (4)" -- the verbatim warning the user saw.
+        # Path A fix: read via the multi-source helpers and flat-
+        # concat their attrs. Dimensions exactly match what
+        # read_all_poses produces and what main_window
+        # _gather_role_info hands the controller's add_pose path.
+        # Complementary to M_P0_NODE_SWITCH_POSE_GRID (41f3e47):
+        # that commit closed the editorLoaded -> _refresh_pose_grid
+        # leg in the view layer; this commit closes the data-
+        # shape leg in the controller. Both are necessary.
+        # NOTE: alias-path callsites at line 1218 / 1292 (and a
+        # handful of others -- 826 / 838 / 931 / 932 / 1757) still
+        # use the legacy single-source readers. They are recorded
+        # technical debt; deferring to an independent
+        # M_ALIAS_MULTI_AWARE sub-task keeps this commit's blast
+        # radius scoped to the user-reported failure.
+        try:
+            drv_sources = list(
+                core.read_driver_info_multi(node))
+        except Exception:
+            drv_sources = []
+        try:
+            dvn_sources = list(
+                core.read_driven_info_multi(node))
+        except Exception:
+            dvn_sources = []
+        driver_node = drv_sources[0].node if drv_sources else ""
+        driven_node = dvn_sources[0].node if dvn_sources else ""
+        driver_attrs = [a for src in drv_sources for a in src.attrs]
+        driven_attrs = [a for src in dvn_sources for a in src.attrs]
+
+        # Configure columns (resets model)
+        self._pose_model.setup_columns(driver_attrs, driven_attrs)
+
+        # Load poses -- M_P0_POSE_GRID_DEEP_FIX (2026-04-30):
+        # per-pose try/except so a single malformed pose (e.g. a
+        # v5-pre-multi node with 4-dim poseInput vs the now 8-dim
+        # setup_columns) does NOT abort the whole loop and leave
+        # editorLoaded.emit unfired. The view-side cascade
+        # (41f3e47's _refresh_pose_grid + driver / driven tab
+        # rebuilds wired at 1249 / 1270) hard-depends on the
+        # signal landing -- without it the user sees a blank pose
+        # grid AND blank driver/driven tabs even though
+        # _pose_model.setup_columns succeeded above. Per-pose
+        # warnings make the partial-load visible in the Script
+        # Editor so the TD knows to re-Apply on the current
+        # multi-source schema.
+        poses = core.read_all_poses(node)
+        skipped = 0
+        for p in poses:
+            try:
+                self._pose_model.add_pose(p)
+            except ValueError as exc:
+                cmds.warning(
+                    "_load_editor: skipping malformed pose "
+                    "{!r}: {}".format(
+                        getattr(p, "index", "?"), exc))
+                skipped += 1
+        if skipped:
+            cmds.warning(
+                "_load_editor: {} pose(s) skipped due to "
+                u"dimension mismatch \u2014 node may need re-Apply on "
+                "the current multi-source schema.".format(skipped))
+
+        self.editorLoaded.emit()
+
+        # Return info for the view to populate text fields
+        return driver_node, driver_attrs, driven_node, driven_attrs
+
+    def reload_editor(self):
+        """Public wrapper for _load_editor (Reload button)."""
+        return self._load_editor()
+
+    # =================================================================
+    #  6. Pose CRUD
+    # =================================================================
+
+    # ------------------------------------------------------------------
+    # M_ADDPOSE_MULTI_DRIVEN (2026-04-29) helpers -- multi-source aware
+    # snapshot. Single-source path of caller (driver_node, driver_attrs)
+    # is the legacy fallback when the multi-source array is empty. For
+    # multi-source nodes (joint1/joint2/joint3 each with 9 attrs) the
+    # legacy `read_current_values(driver_node="joint1",
+    # driver_attrs=27_attrs_concat_with_dups)` read joint1's 9 attrs
+    # THREE times -- driven sources came back as triple-duplicate values
+    # in every pose row. The multi helpers iterate the actual source
+    # list and stitch per-source attrs into a contiguous outputs vector
+    # whose length equals sum(len(s.attrs)) -- matching shape.input[] /
+    # shape.output[] subscript order produced by add_*_source.
+    # ------------------------------------------------------------------
+
+    def _capture_multi_inputs(self, fallback_node, fallback_attrs):
+        """Snapshot driver values across ALL driver sources. Falls
+        back to the legacy single-source read if the controller has
+        not yet been wired with a multi-source list."""
+        try:
+            sources = list(self.read_driver_sources())
+        except Exception:
+            sources = []
+        if not sources:
+            return core.read_current_values(
+                fallback_node, fallback_attrs)
+        out = []
+        for src in sources:
+            if not src.node or not src.attrs:
+                continue
+            out.extend(core.read_current_values(
+                src.node, list(src.attrs)))
+        # Defensive: empty multi-source return falls back too.
+        if not out:
+            return core.read_current_values(
+                fallback_node, fallback_attrs)
+        return out
+
+    def _capture_multi_outputs(self, fallback_node, fallback_attrs):
+        """Driven mirror of :meth:`_capture_multi_inputs`."""
+        try:
+            sources = list(self.read_driven_sources())
+        except Exception:
+            sources = []
+        if not sources:
+            return core.read_current_values(
+                fallback_node, fallback_attrs)
+        out = []
+        for src in sources:
+            if not src.node or not src.attrs:
+                continue
+            out.extend(core.read_current_values(
+                src.node, list(src.attrs)))
+        if not out:
+            return core.read_current_values(
+                fallback_node, fallback_attrs)
+        return out
+
+    def add_pose(self, driver_node, driven_node,
+                 driver_attrs, driven_attrs):
+        """Capture current scene values and append a new pose.
+
+        Handles BlendShape auto-fill logic when :attr:`auto_fill` is on.
+
+        M_ADDPOSE_MULTI_DRIVEN (2026-04-29): driver_node /
+        driven_node parameters retained for backcompat with the
+        single-source AttributeList API; the actual snapshot now
+        walks read_driver_sources() / read_driven_sources()
+        internally so multi-source nodes record per-source values
+        instead of triple-duplicating the first source's values.
+        """
+        if not driver_node or not driven_node:
+            cmds.warning("Please set both driver and driven nodes.")
+            return None
+        if not driver_attrs or not driven_attrs:
+            cmds.warning("Please select attributes for both driver and driven.")
+            return None
+
+        # Dimension consistency check
+        model = self._pose_model
+        if model.n_inputs and model.n_inputs != len(driver_attrs):
+            cmds.warning(
+                "Driver attribute count ({}) differs from existing "
+                "poses ({}).".format(len(driver_attrs), model.n_inputs))
+            return None
+        if model.n_outputs and model.n_outputs != len(driven_attrs):
+            cmds.warning(
+                "Driven attribute count ({}) differs from existing "
+                "poses ({}).".format(len(driven_attrs), model.n_outputs))
+            return None
+
+        # Set up columns on first pose
+        if model.rowCount() == 0:
+            model.setup_columns(driver_attrs, driven_attrs)
+
+        pid = model.next_pose_index()
+
+        # M_ADDPOSE_MULTI_DRIVEN: per-source snapshot.
+        inputs = self._capture_multi_inputs(driver_node, driver_attrs)
+        outputs = self._capture_multi_outputs(
+            driven_node, driven_attrs)
+
+        # ----- BlendShape auto-fill -----
+        # Vector generation is delegated to core (pure math, no UI).
+        if core.is_blendshape(driven_node) and self._auto_fill:
+            if pid == 0:
+                result = cmds.confirmDialog(
+                    title="RBF Tools",
+                    message="Add the first pose as the rest pose?",
+                    button=["OK", "Cancel"],
+                    defaultButton="OK", cancelButton="Cancel")
+                if result == "OK":
+                    outputs = core.generate_rest_outputs(len(driven_attrs))
+            else:
+                outputs = core.generate_onehot_outputs(
+                    len(driven_attrs), pid, model.has_rest_pose())
+
+        pose = core.PoseData(pid, inputs, outputs)
+        model.add_pose(pose)
+        return pose
+
+    def update_pose(self, row, driver_node, driven_node,
+                    driver_attrs, driven_attrs):
+        """Re-capture current scene values into an existing pose row.
+
+        M_ADDPOSE_MULTI_DRIVEN: same multi-source snapshot as
+        :meth:`add_pose`.
+
+        M_P0_POSE_DITHER_AND_UPDATE_FIX Part C (2026-05-12) -- write
+        the captured viewport state straight into the Maya
+        ``shape.poses[row]`` plugs so the RBF kernel sees the new
+        values without waiting for the next Apply (user-reported bug:
+        the per-row "Update" button had no visible effect until Apply
+        was clicked, because only the in-memory pose_model was
+        updated). The plug write only fires if the active node
+        already exists -- the legacy model-only fallback covers the
+        case where the Update button is clicked before Apply has
+        materialised the node.
+        """
+        if not driver_node or not driven_node:
+            return
+        inputs = self._capture_multi_inputs(driver_node, driver_attrs)
+        outputs = self._capture_multi_outputs(
+            driven_node, driven_attrs)
+        self._pose_model.update_pose_values(row, inputs, outputs)
+
+        # M_P0_POSE_DITHER_AND_UPDATE_FIX Part C plug write.
+        node = self._current_node
+        if node and cmds.objExists(node):
+            try:
+                shape = core.get_shape(node)
+                core.write_pose_inputs_to_node(
+                    shape, int(row), inputs)
+                core.write_pose_values_to_node(
+                    shape, int(row), outputs)
+            except Exception as exc:
+                cmds.warning(
+                    "update_pose: plug write failed at row {}: "
+                    "{}".format(row, exc))
+
+    def delete_pose(self, row):
+        """Remove a pose from the model (does NOT touch the node yet)."""
+        self._pose_model.remove_pose(row)
+
+    # =================================================================
+    #  6b. Per-pose sigma + BasePose live-edit (Commit 3 wires)
+    # =================================================================
+
+    def set_pose_radius(self, row, new_radius):
+        u"""Commit 3 (M_PER_POSE_SIGMA): green Radius spin live-edit
+        path. Writes ``shape.poseRadius[i]`` (closing the loop with
+        the C++ Commit 0 vectorised \u03c3 math) AND updates the
+        in-memory PoseData.radius so the next Apply / JSON export
+        round-trips the new value."""
+        if self._current_node is None:
+            return
+        try:
+            pose = self._pose_model.get_pose(int(row))
+        except (AttributeError, Exception):
+            pose = None
+        if pose is None:
+            return
+        radius = float(new_radius)
+        if radius <= 0.0:
+            radius = core.DEFAULT_POSE_RADIUS
+        pose.radius = radius
+        self._pose_model.update_pose_radius(int(row), radius)
+        # Plug write -- sequential_idx == row in the packed-array
+        # layout core.apply_poses produces.
+        shape = core.get_shape(self._current_node)
+        try:
+            cmds.setAttr(
+                "{}.poseRadius[{}]".format(shape, int(row)), radius)
+        except Exception as exc:
+            cmds.warning(
+                "set_pose_radius: plug write failed at row {}: "
+                "{}".format(row, exc))
+
+    # -- M_P0_POSE_DITHER_AND_UPDATE_FIX Part A+B+C-bis controller ---
+
+    def dither_driver_poses(self, magnitude=0.005, seed=42):
+        """M_P0_POSE_DITHER_AND_UPDATE_FIX Part A.3 (2026-05-12) --
+        forward to :func:`core.dither_driver_poses` for the active
+        node. Returns the count of perturbed (pose, slot) plugs so
+        the UI can surface "N channels dithered" feedback.
+        """
+        if not self._current_node:
+            cmds.warning("dither_driver_poses: no active node")
+            return 0
+        try:
+            n = core.dither_driver_poses(
+                self._current_node,
+                base_pose_index=0,
+                magnitude=magnitude,
+                seed=seed)
+        except Exception as exc:
+            cmds.warning(
+                "dither_driver_poses failed: {}".format(exc))
+            return 0
+        try:
+            from RBFtools.ui.i18n import tr
+            if n > 0:
+                self.statusMessage.emit(
+                    tr("dither_driver_done").format(n))
+            else:
+                self.statusMessage.emit(
+                    tr("dither_driver_no_cluster"))
+        except Exception:
+            pass
+        return n
+
+    def dither_driven_poses(self, magnitude=0.005, seed=42):
+        """M_P0_POSE_DITHER_AND_UPDATE_FIX Part B.3 (2026-05-12) --
+        driven-side dither dispatch. The caller (main_window)
+        surfaces the warning dialog before invoking this method
+        because driven-side dither injects noise into the training
+        target and can visibly degrade inference accuracy.
+        """
+        if not self._current_node:
+            cmds.warning("dither_driven_poses: no active node")
+            return 0
+        try:
+            n = core.dither_driven_poses(
+                self._current_node,
+                base_pose_index=0,
+                magnitude=magnitude,
+                seed=seed)
+        except Exception as exc:
+            cmds.warning(
+                "dither_driven_poses failed: {}".format(exc))
+            return 0
+        try:
+            from RBFtools.ui.i18n import tr
+            if n > 0:
+                self.statusMessage.emit(
+                    tr("dither_driven_done").format(n))
+            else:
+                self.statusMessage.emit(
+                    tr("dither_driven_no_cluster"))
+        except Exception:
+            pass
+        return n
+
+    def set_all_poses_radius(self, radius):
+        """M_P0_POSE_DITHER_AND_UPDATE_FIX Part C-bis.3 (2026-05-12)
+        -- bulk apply ``radius`` to every pose of the active node.
+
+        Two-step: (1) plug write via :func:`core.set_all_poses_radius`
+        so the kernel sees the new sigma; (2) sync pose_model rows so
+        the UI radius column refreshes immediately.
+
+        Values <= 0 are clamped by the core helper to
+        DEFAULT_POSE_RADIUS so a stray spinbox value cannot poison
+        the kernel.
+        """
+        if not self._current_node:
+            cmds.warning("set_all_poses_radius: no active node")
+            return 0
+        try:
+            n = core.set_all_poses_radius(
+                self._current_node, float(radius))
+        except Exception as exc:
+            cmds.warning(
+                "set_all_poses_radius failed: {}".format(exc))
+            return 0
+        # Sync pose_model rows so the UI radius column refreshes.
+        effective_radius = float(radius)
+        if effective_radius <= 0.0:
+            effective_radius = core.DEFAULT_POSE_RADIUS
+        try:
+            row_count = self._pose_model.rowCount()
+        except Exception:
+            row_count = 0
+        for row in range(row_count):
+            try:
+                self._pose_model.update_pose_radius(
+                    int(row), effective_radius)
+            except Exception:
+                pass
+        try:
+            from RBFtools.ui.i18n import tr
+            self.statusMessage.emit(
+                tr("global_radius_done").format(n, effective_radius))
+        except Exception:
+            pass
+        return n
+
+    def read_base_pose_values(self):
+        """Commit 3 (M_BASE_POSE): pass-through to
+        :func:`core.read_base_pose_values` so main_window stays
+        controller-MVC-compliant (no direct core access from the UI
+        layer)."""
+        if self._current_node is None:
+            return []
+        return core.read_base_pose_values(self._current_node)
+
+    # -- M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) -------
+
+    # Signals -- emitted after a per-pose hierarchy / mask write so
+    # the UI can refresh the pose grid columns without a full reload.
+    # Declared on the class via QtCore.Signal in __init__ siblings;
+    # surface them as class-level attributes so MainController stays
+    # picklable / introspectable.
+    poseParentIndexChanged = QtCore.Signal(int, int)        # row, parent
+    poseDriverMaskChanged  = QtCore.Signal(int, list)       # row, mask
+
+    def set_pose_parent_index(self, row, parent_index):
+        """M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
+        write the per-pose poseParentIndex plug. -1 = "this pose is
+        a base"; >= 0 = "this pose is a delta of the pose at that
+        logical index". Phase 16 commit 2 added the plug; this
+        method is the controller-MVC-clean writer used by the pose
+        grid's Parent QComboBox column.
+
+        Hard-cap-2 layering (brief Stage 1.1): if the user picks a
+        parent that itself has parent != -1, the C++ training stage
+        will demote this pose back to base with a warn -- this
+        controller method does NOT enforce the cap, the plugin
+        does. UI just stores what the user typed.
+
+        On success emits :attr:`poseParentIndexChanged` so any
+        listeners (the pose grid currently) can refresh.
+        """
+        if not self._current_node:
+            cmds.warning(
+                "set_pose_parent_index: no active node")
+            return False
+        try:
+            shape = core.get_shape(self._current_node)
+            # M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): the
+            # plug is now a child of the poses[] compound
+            # (poses[row].poseParentIndex), not a parallel top-level
+            # multi. Same row -> logical pose index mapping as before.
+            cmds.setAttr(
+                "{}.poses[{}].poseParentIndex".format(
+                    shape, int(row)),
+                int(parent_index))
+        except Exception as exc:
+            cmds.warning(
+                "set_pose_parent_index: plug write failed at row "
+                "{}: {}".format(row, exc))
+            return False
+        try:
+            self.poseParentIndexChanged.emit(
+                int(row), int(parent_index))
+        except Exception:
+            pass
+        return True
+
+    def set_pose_driver_mask(self, row, mask):
+        """M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 (2026-05-18) --
+        write the per-pose poseDriverMask plug. *mask* is a list of
+        flat-driver-vector indices; the empty list (default) means
+        "this pose cares about all drivers" (backward compatible
+        with Phase 15). Phase 16 commit 2 added the plug; this
+        method is the writer used by the pose grid's Driver Mask
+        popup column.
+
+        On success emits :attr:`poseDriverMaskChanged` so any
+        listeners can refresh.
+        """
+        if not self._current_node:
+            cmds.warning(
+                "set_pose_driver_mask: no active node")
+            return False
+        sanitized = []
+        for v in (mask or []):
+            try:
+                sanitized.append(int(v))
+            except Exception:
+                continue
+        try:
+            shape = core.get_shape(self._current_node)
+            # SUBATTR_REFACTOR (2026-05-28): poseDriverMask is now a
+            # child of poses[] (poses[row].poseDriverMask).
+            # M_P0_INT32ARRAY_SETATTR_FIX (2026-05-28): the payload MUST
+            # be one list argument -- the MEL-style count-prefixed form
+            # (plug, len, *values) silently stores [len] instead
+            # (verified live on mayapy 2022 + 2025). Empty list writes
+            # an empty array = "all drivers" (backward compat).
+            cmds.setAttr(
+                plug, sanitized, type="Int32Array")
+        except Exception as exc:
+            cmds.warning(
+                "set_pose_driver_mask: plug write failed at row "
+                "{}: {}".format(row, exc))
+            return False
+        try:
+            self.poseDriverMaskChanged.emit(
+                int(row), list(sanitized))
+        except Exception:
+            pass
+        return True
+
+    def get_pose_parent_index(self, row):
+        """M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28) -- read
+        back ``poses[row].poseParentIndex``. Returns -1 (base pose) for
+        a legacy node, an unset element, or no active node, so callers
+        can treat the result as "this is a base pose" without special-
+        casing the failure path."""
+        if not self._current_node:
+            return -1
+        try:
+            shape = core.get_shape(self._current_node)
+            return int(cmds.getAttr(
+                "{}.poses[{}].poseParentIndex".format(
+                    shape, int(row))))
+        except Exception:
+            return -1
+
+    def get_pose_driver_mask(self, row):
+        """M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28) -- read
+        back ``poses[row].poseDriverMask`` as a flat list[int]. Empty
+        list = all drivers (the backward-compatible default). Tolerates
+        the flat / singly-nested shapes ``cmds.getAttr`` returns for a
+        kIntArray across Maya versions."""
+        if not self._current_node:
+            return []
+        try:
+            shape = core.get_shape(self._current_node)
+            raw = cmds.getAttr(
+                "{}.poses[{}].poseDriverMask".format(
+                    shape, int(row)))
+        except Exception:
+            return []
+        if not raw:
+            return []
+        if isinstance(raw[0], (list, tuple)):
+            return [int(x) for x in raw[0]]
+        return [int(x) for x in raw]
+
+    def set_base_pose_value(self, channel_idx, new_value):
+        """Commit 3 (M_BASE_POSE): per-output baseline live-edit. Reads
+        the current array, expands it if the user is editing a higher
+        index than currently stored, and pushes the modified vector
+        back through :func:`core.write_base_pose_values`."""
+        if self._current_node is None:
+            return
+        idx = int(channel_idx)
+        if idx < 0:
+            return
+        cur = list(core.read_base_pose_values(self._current_node))
+        if len(cur) <= idx:
+            cur.extend([0.0] * (idx + 1 - len(cur)))
+        cur[idx] = float(new_value)
+        core.write_base_pose_values(self._current_node, cur)
+
+    def recall_base_pose(self):
+        """Commit 3 (M_BASE_POSE) + M_ADDPOSE_MULTI_DRIVEN
+        (2026-04-29): apply the baseline to the active driven
+        attrs. Multi-source aware: each (source.node,
+        source.attrs[i]) pair receives the corresponding slice of
+        ``base_pose_values``. Falls back to the legacy single-
+        source ``read_driven_info`` path when no multi-source list
+        is wired."""
+        if self._current_node is None:
+            return
+        baseline = list(core.read_base_pose_values(self._current_node))
+        try:
+            dvn_sources = list(self.read_driven_sources())
+        except Exception:
+            dvn_sources = []
+        if dvn_sources:
+            # Pad baseline to total expected length.
+            total = sum(len(s.attrs) for s in dvn_sources)
+            if len(baseline) < total:
+                baseline.extend([0.0] * (total - len(baseline)))
+            with core.undo_chunk("RBFtools: recall base pose"):
+                cursor = 0
+                for src in dvn_sources:
+                    if not src.node:
+                        cursor += len(src.attrs)
+                        continue
+                    for j, attr in enumerate(src.attrs):
+                        if cursor + j >= len(baseline):
+                            break
+                        try:
+                            cmds.setAttr(
+                                "{}.{}".format(src.node, attr),
+                                float(baseline[cursor + j]))
+                        except Exception:
+                            pass
+                    cursor += len(src.attrs)
+            return
+        # Legacy single-source fallback.
+        dvn_node, dvn_attrs = core.read_driven_info(
+            self._current_node)
+        if not dvn_node or not dvn_attrs:
+            return
+        if len(baseline) < len(dvn_attrs):
+            baseline.extend([0.0] * (len(dvn_attrs) - len(baseline)))
+        with core.undo_chunk("RBFtools: recall base pose"):
+            for attr, val in zip(dvn_attrs, baseline):
+                try:
+                    cmds.setAttr(
+                        "{}.{}".format(dvn_node, attr), float(val))
+                except Exception:
+                    pass
+
+    def recall_pose(self, row, driver_node, driven_node,
+                    driver_attrs, driven_attrs):
+        u"""Restore a saved pose to the scene.
+
+        M_ADDPOSE_MULTI_DRIVEN (2026-04-29): the legacy single-
+        source recall path went through :func:`core.recall_pose`
+        which writes every attr in ``driven_attrs`` to
+        ``driven_node``. With multi-source nodes that stitched
+        the FIRST source's name onto every position in the
+        flat-concat attr list \u2014 same triple-write bug as
+        :meth:`add_pose`. We now splay PoseData.inputs /
+        PoseData.values back to each (source.node,
+        source.attrs[i]) pair and fall back to the legacy single-
+        source ``core.recall_pose`` when no multi-source list is
+        wired.
+        """
+        pose = self._pose_model.get_pose(row)
+        if pose is None:
+            return
+        try:
+            drv_sources = list(self.read_driver_sources())
+        except Exception:
+            drv_sources = []
+        try:
+            dvn_sources = list(self.read_driven_sources())
+        except Exception:
+            dvn_sources = []
+        if not drv_sources and not dvn_sources:
+            # Pure single-source legacy path -- preserve the
+            # original recall behaviour bit-for-bit.
+            core.recall_pose(driver_node, driven_node,
+                             driver_attrs, driven_attrs, pose)
+            return
+        # Multi-source splay: write PoseData.inputs / .values back
+        # to each (source.node, attr) pair in their stitched order.
+        with core.undo_chunk("RBFtools: recall pose"):
+            cursor = 0
+            for src in (drv_sources or []):
+                if not src.node:
+                    cursor += len(src.attrs)
+                    continue
+                for j, attr in enumerate(src.attrs):
+                    if cursor + j >= len(pose.inputs):
+                        break
+                    plug = "{}.{}".format(src.node, attr)
+                    val = float(pose.inputs[cursor + j])
+                    self._set_attr_break_then_restore(plug, val)
+                cursor += len(src.attrs)
+            cursor = 0
+            for src in (dvn_sources or []):
+                if not src.node:
+                    cursor += len(src.attrs)
+                    continue
+                for j, attr in enumerate(src.attrs):
+                    if cursor + j >= len(pose.values):
+                        break
+                    plug = "{}.{}".format(src.node, attr)
+                    val = float(pose.values[cursor + j])
+                    self._set_attr_break_then_restore(plug, val)
+                cursor += len(src.attrs)
+
+    def _set_attr_break_then_restore(self, plug, value):
+        """Helper used by recall_pose: temporarily break the
+        incoming connection on ``plug``, write ``value`` via
+        setAttr, then re-connect. Mirrors the "preview pose"
+        contract of :func:`core.recall_pose` without going
+        through the deprecated single-source API."""
+        kept = core._safe_disconnect_incoming(plug)
+        try:
+            cmds.setAttr(plug, value)
+        except Exception as exc:
+            cmds.warning(
+                "_set_attr_break_then_restore: setAttr {} failed: "
+                "{}".format(plug, exc))
+        if kept is not None:
+            try:
+                cmds.connectAttr(kept[0], kept[1], force=True)
+            except Exception:
+                pass
+
+    # =================================================================
+    #  7. Apply / Connect
+    # =================================================================
+
+    def apply_poses(self, driver_node, driven_node,
+                    driver_attrs, driven_attrs):
+        u"""Apply button \u2014 write all model poses to the solver node.
+
+        Flow
+        ----
+        1. Create or reuse the current ``RBFtools`` node.
+        2. Call ``core.apply_poses`` with data from the model.
+        3. Refresh the node selector and reload settings.
+        """
+        if not self._validate_apply_args(
+                driver_node, driven_node, driver_attrs, driven_attrs):
+            return
+
+        node = self._current_node
+        if not node or not cmds.objExists(node):
+            core.ensure_plugin()
+            node = core.create_node()
+            core.set_node_attr(node, "type", 1)
+
+        poses = self._pose_model.all_poses()
+
+        # M_P0_DUPLICATE_POSE_DETECT (2026-05-01): dedup pre-check
+        # before C++ kernel sees a singular K matrix. MQB / IMQB
+        # kernel math cannot handle duplicate pose inputs even with
+        # lambda regularization; Gaussian masks via lambda but still
+        # fails on exact duplicates. Surface to the user (which pair)
+        # before the opaque C++ "RBF decomposition failed".
+        duplicates = core._detect_duplicate_pose_inputs(poses)
+        if duplicates:
+            from RBFtools.ui.i18n import tr
+            pair_lines = [
+                "  Pose {} = Pose {} (inputs identical)".format(a, b)
+                for a, b in duplicates]
+            summary = "\n".join(
+                [tr("duplicate_pose_warning_header"), ""]
+                + pair_lines
+                + ["", tr("duplicate_pose_warning_action")])
+            proceed = self.ask_confirm(
+                title=tr("title_duplicate_poses"),
+                summary=summary,
+                preview_text="",
+                action_id="apply_with_duplicate_poses")
+            if not proceed:
+                cmds.warning(
+                    u"apply_poses: aborted by user \u2014 fix duplicate "
+                    "poses first.")
+                return
+            cmds.warning(
+                u"apply_poses: continuing with duplicates \u2014 MQB / "
+                "IMQB kernels may fail RBF decomposition.")
+
+        core.apply_poses(
+            node, driver_node, driven_node,
+            driver_attrs, driven_attrs, poses)
+
+        self._current_node = core.get_transform(core.get_shape(node))
+        self.refresh_nodes()
+        self._load_settings()
+        # Do NOT reload editor -- it would discard the user's pose rows.
+        # The node may compact indices.  User clicks Reload when ready.
+
+        self.statusMessage.emit("RBF data applied.")
+
+    def apply_poses_routed(self, driver_targets, driven_targets):
+        """M_P0_DRIVER_CONNECT_UX_REVAMP Part F.3 (2026-05-12) --
+        multi-driver-aware Apply that preserves input[] / output[]
+        wiring across the call.
+
+        Mirrors :meth:`apply_poses` for the duplicate-pose pre-check
+        and node-creation lifecycle, but routes through
+        :func:`core.apply_poses_routed` which calls
+        :func:`core._clear_poses_only` instead of
+        :func:`core.clear_node_data` -- the user's multi-driver
+        ``add_driver_source`` wiring survives the Apply storm.
+
+        Use this for any multi-driver scenario (>1 driver source OR
+        any source with >1 attr). Single-driver legacy Apply keeps
+        routing through :meth:`apply_poses` so its behaviour is
+        bit-identical to the pre-Phase-13 path.
+        """
+        if not self._validate_apply_args_routed(
+                driver_targets, driven_targets):
+            return
+
+        node = self._current_node
+        if not node or not cmds.objExists(node):
+            core.ensure_plugin()
+            node = core.create_node()
+            core.set_node_attr(node, "type", 1)
+
+        poses = self._pose_model.all_poses()
+
+        # M_P0_DUPLICATE_POSE_DETECT mirror -- routed Apply must
+        # surface the same pre-check so MQB / IMQB kernel singular
+        # failures are explained to the user, not buried.
+        duplicates = core._detect_duplicate_pose_inputs(poses)
+        if duplicates:
+            from RBFtools.ui.i18n import tr
+            pair_lines = [
+                "  Pose {} = Pose {} (inputs identical)".format(a, b)
+                for a, b in duplicates]
+            summary = "\n".join(
+                [tr("duplicate_pose_warning_header"), ""]
+                + pair_lines
+                + ["", tr("duplicate_pose_warning_action")])
+            proceed = self.ask_confirm(
+                title=tr("title_duplicate_poses"),
+                summary=summary,
+                preview_text="",
+                action_id="apply_with_duplicate_poses")
+            if not proceed:
+                cmds.warning(
+                    "apply_poses_routed: aborted by user -- fix "
+                    "duplicate poses first.")
+                return
+            cmds.warning(
+                "apply_poses_routed: continuing with duplicates -- "
+                "MQB / IMQB kernels may fail RBF decomposition.")
+
+        core.apply_poses_routed(
+            node, driver_targets, driven_targets, poses)
+
+        self._current_node = core.get_transform(core.get_shape(node))
+        self.refresh_nodes()
+        self._load_settings()
+
+        self.statusMessage.emit("RBF data applied (multi-driver).")
+
+    def _validate_apply_args_routed(self, driver_targets,
+                                    driven_targets):
+        """Common validation for the routed Apply path. Mirrors
+        :meth:`_validate_apply_args` but operates on the multi-source
+        ``[(node, [attrs]), ...]`` shape."""
+        if not driver_targets or not driven_targets:
+            cmds.warning(
+                "apply_poses_routed: empty driver/driven targets.")
+            return False
+        # At least one driver node + one driver attr required.
+        any_drv_attr = any(
+            attrs for _node, attrs in driver_targets)
+        any_dvn_attr = any(
+            attrs for _node, attrs in driven_targets)
+        if not any_drv_attr or not any_dvn_attr:
+            cmds.warning(
+                "apply_poses_routed: no driver / driven attrs in any "
+                "target.")
+            return False
+        return True
+
+    def connect_poses(self, driver_node, driven_node,
+                      driver_attrs, driven_attrs):
+        u"""Connect button \u2014 wire driver inputs and driven outputs."""
+        if not self._validate_apply_args(
+                driver_node, driven_node, driver_attrs, driven_attrs):
+            return
+
+        node = self._current_node
+        if not node or not cmds.objExists(node):
+            cmds.warning("No active RBFtools node. Apply poses first.")
+            return
+
+        core.connect_node(
+            node, driver_node, driven_node,
+            driver_attrs, driven_attrs)
+
+        self._current_node = core.get_transform(core.get_shape(node))
+        self._load_settings()
+
+        self.statusMessage.emit("Connections established.")
+
+    def disconnect_outputs(self):
+        u"""Disconnect button \u2014 break output connections to driven node."""
+        node = self._current_node
+        if not node or not cmds.objExists(node):
+            cmds.warning("No active RBFtools node.")
+            return
+        core.disconnect_outputs(node)
+        self.statusMessage.emit("Output connections disconnected.")
+
+    # =================================================================
+    #  7b. M_BATCH_ROUTING -- tab-aware Connect / Disconnect (2026-04-28)
+    # =================================================================
+
+    def connect_routed(self, driver_targets, driven_targets):
+        """Tab-aware Connect: ``[(node, [attr, ...]), ...]`` for each
+        side. Scope is decided in main_window via the panel-level
+        Batch checkboxes; here we just forward to core."""
+        node = self._current_node
+        if not node or not cmds.objExists(node):
+            cmds.warning(
+                u"connect_routed: no active RBFtools node \u2014 apply "
+                "poses first.")
+            return
+        if not driver_targets and not driven_targets:
+            cmds.warning(
+                "connect_routed: empty scope on both sides; "
+                "nothing to connect.")
+            return
+        core.connect_routed(node, driver_targets, driven_targets)
+        self.statusMessage.emit("Routed connect complete.")
+
+    def disconnect_routed(self, driver_targets, driven_targets):
+        u"""Tab-aware Disconnect \u2014 Scene A/B/C dispatch.
+
+        Returns ``{"disconnected_count": int}`` straight from
+        :func:`core.disconnect_routed` so main_window can surface a
+        Scene-C UI dialog when the scope produced zero disconnects."""
+        node = self._current_node
+        if not node or not cmds.objExists(node):
+            cmds.warning(
+                "disconnect_routed: no active RBFtools node.")
+            return {"disconnected_count": 0}
+        if not driver_targets and not driven_targets:
+            cmds.warning(
+                "disconnect_routed: empty scope on both sides; "
+                "nothing to disconnect.")
+            return {"disconnected_count": 0}
+        result = core.disconnect_routed(
+            node, driver_targets, driven_targets)
+        self.statusMessage.emit("Routed disconnect complete.")
+        return result
+
+    def _validate_apply_args(self, driver_node, driven_node,
+                             driver_attrs, driven_attrs):
+        """Common validation for apply / connect."""
+        if not driver_node or not driven_node:
+            cmds.warning("Please set both driver and driven nodes.")
+            return False
+        if not driver_attrs or not driven_attrs:
+            cmds.warning("Please select driver and driven attributes.")
+            return False
+        return True
+
+    # =================================================================
+    #  8. Auto-fill toggle
+    # =================================================================
+
+    def set_auto_fill(self, checked):
+        self._auto_fill = bool(checked)
+        cmds.optionVar(iv=(AUTO_FILL_OPT_VAR, int(self._auto_fill)))

@@ -1,0 +1,5874 @@
+# -*- coding: utf-8 -*-
+u"""
+Core business layer \u2014 scene topology, RBF builder, pose management.
+
+Phase breakdown
+---------------
+* **Phase 1** \u2014 :func:`undo_chunk` context manager.
+* **Phase 2a** \u2014 plugin env, DAG topology, attribute filtering,
+  connection tracing, node CRUD, driver/driven wiring, radius math.
+* **Phase 2b** \u2014 :class:`PoseData` dataclass, multi-instance attribute
+  CRUD (read / write / recall / delete), ``apply_poses``,
+  ``connect_poses``, floating-point tolerance utility.
+
+Design contracts
+----------------
+* **Zero UI imports** \u2014 runs in ``mayapy`` headless mode.
+* Every scene-mutating public function wrapped in :func:`undo_chunk`.
+* Defensive: all ``cmds.getAttr`` / ``connectAttr`` guarded.
+* **Float comparison** via :func:`float_eq` (``math.isclose``).
+"""
+
+from __future__ import absolute_import
+
+
+# M_P0_MAYA_2022_FROM_SCRATCH R4: py2 unicode / py3 str dual
+# accept tuple. Auto-injected by tools/sync_2022_from_2025.py.
+try:
+    _STR_TYPES = (str, unicode)  # noqa: F821 -- py2-only name
+except NameError:
+    _STR_TYPES = (str,)
+
+
+import contextlib
+import math
+import re
+import warnings
+
+import maya.cmds as cmds
+
+
+# =====================================================================
+#  M_B24a2-1 -- Multi-source driver public API
+# =====================================================================
+
+# Module-level per-session flag for legacy migration warning. Reset to
+# False at module reload; first migration sets True so subsequent
+# legacy-node loads stay quiet. Pure-python tests reset via monkeypatch.
+_MIGRATION_WARNING_ISSUED = False
+
+
+class DriverSource(object):
+    u"""Per-driver companion metadata for the M_B24 multi-source schema.
+
+    Mirrors C++ ``driverSource[d]`` compound (see RBFtools.h M_B24a1).
+    Frozen-style: fields exposed as read-only properties; equality +
+    hash + repr defined explicitly. ``attrs`` is a tuple (not list)
+    to satisfy immutability \u2014 construct from a list via
+    ``tuple(attrs_list)``.
+
+    encoding values match inputEncoding enum:
+        0 = Raw, 1 = Quaternion, 2 = BendRoll, 3 = ExpMap, 4 = SwingTwist
+
+    M_P0_PY2_COMPAT (2026-05-01): rewritten from @dataclass(frozen=True)
+    to a hand-written ``__slots__`` class so the module imports under
+    Maya 2022's optional py2 runtime (mayapy2). The dataclasses module
+    is py3.7+ only. DrivenSource (below) has used the same hand-rolled
+    pattern since M_DRIVEN_MULTI; this aligns DriverSource with it.
+    """
+
+    __slots__ = ("_node", "_attrs", "_weight", "_encoding")
+
+    def __init__(self, node, attrs, weight=1.0, encoding=0):
+        if not isinstance(node, _STR_TYPES):
+            raise TypeError(
+                "DriverSource.node must be a str, got {!r}".format(
+                    type(node).__name__))
+        weight = float(weight)
+        encoding = int(encoding)
+        if weight < 0.0:
+            raise ValueError(
+                "DriverSource.weight must be >= 0, got {}".format(
+                    weight))
+        if encoding not in (0, 1, 2, 3, 4):
+            raise ValueError(
+                "DriverSource.encoding must be 0..4, got {}".format(
+                    encoding))
+        # Bypass __setattr__ guard for the initial assignment.
+        object.__setattr__(self, "_node", node)
+        object.__setattr__(self, "_attrs", tuple(attrs))
+        object.__setattr__(self, "_weight", weight)
+        object.__setattr__(self, "_encoding", encoding)
+
+    # --- read-only field accessors --------------------------------
+
+    @property
+    def node(self):
+        return self._node
+
+    @property
+    def attrs(self):
+        return self._attrs
+
+    @property
+    def weight(self):
+        return self._weight
+
+    @property
+    def encoding(self):
+        return self._encoding
+
+    # --- frozen guard ---------------------------------------------
+
+    def __setattr__(self, name, value):
+        # Allow internal slot writes from __init__; reject everything
+        # else (matches @dataclass(frozen=True) behaviour, which
+        # raises FrozenInstanceError -- a subclass of AttributeError).
+        raise AttributeError(
+            "cannot assign to field {!r}: DriverSource is frozen"
+            .format(name))
+
+    # --- equality / hash / repr -----------------------------------
+
+    def __eq__(self, other):
+        if not isinstance(other, DriverSource):
+            return NotImplemented
+        return (
+            self._node == other._node
+            and self._attrs == other._attrs
+            and self._weight == other._weight
+            and self._encoding == other._encoding)
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self):
+        return hash(
+            (self._node, self._attrs, self._weight, self._encoding))
+
+    def __repr__(self):
+        return (
+            "DriverSource(node={!r}, attrs={!r}, weight={!r}, "
+            "encoding={!r})").format(
+                self._node, list(self._attrs),
+                self._weight, self._encoding)
+
+from RBFtools.constants import (
+    PLUGIN_NAME,
+    NODE_TYPE,
+    FILTER_DEFAULTS,
+    FILTER_VAR_TEMPLATE,
+    SCALE_ATTR_NAMES,
+    DEFAULT_POSE_RADIUS,
+)
+
+
+# =====================================================================
+#  Phase 1 -- undo infrastructure  (reviewed & approved)
+# =====================================================================
+
+@contextlib.contextmanager
+def undo_chunk(name="RBFtools"):
+    u"""Context manager that groups enclosed scene edits into one undo.
+
+    Usage::
+
+        with undo_chunk("RBFtools: create node"):
+            cmds.createNode("RBFtools")
+            cmds.setAttr("RBFtools1.type", 1)
+
+    Parameters
+    ----------
+    name : str
+        Label for Maya *Edit \u25b8 Undo* menu.
+
+    Notes
+    -----
+    * ``finally`` guarantees ``closeChunk`` even on exception.
+    * Re-entrant safe: Maya collapses nested chunks into the outermost.
+    """
+    cmds.undoInfo(openChunk=True, chunkName=name)
+    try:
+        yield
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+# =====================================================================
+#  1. Plugin & environment
+# =====================================================================
+
+def ensure_plugin():
+    u"""Load the RBFtools plugin if it is not already loaded.
+
+    Safe to call repeatedly \u2014 short-circuits when the plugin is active.
+    """
+    if not cmds.pluginInfo(PLUGIN_NAME, query=True, loaded=True):
+        cmds.loadPlugin(PLUGIN_NAME)
+
+
+# =====================================================================
+#  2. DAG topology helpers
+# =====================================================================
+
+def _exists(node):
+    """Return *True* if *node* is a non-empty string that exists in the scene."""
+    return bool(node) and cmds.objExists(node)
+
+
+def get_shape(node):
+    u"""Resolve *node* to its shape.
+
+    * If *node* is already a shape \u2192 return as-is.
+    * If *node* is a transform \u2192 return its first child shape.
+    * If *node* does not exist \u2192 return the string unchanged
+      (caller will handle the missing-node case).
+
+    .. note::
+       RBFtools is a locator shape that lives under a transform.
+       The hierarchy is: ``transform  \u2192  RBFtoolsShape``.
+    """
+    if not _exists(node):
+        return node
+    if cmds.nodeType(node) == "transform":
+        shapes = cmds.listRelatives(node, shapes=True, fullPath=False) or []
+        if shapes:
+            return shapes[0]
+    return node
+
+
+def get_transform(node):
+    u"""Resolve *node* to its parent transform.
+
+    * If *node* is a ``RBFtools`` shape \u2192 return its parent.
+    * Otherwise \u2192 return as-is.
+    """
+    if not _exists(node):
+        return node
+    if cmds.nodeType(node) == NODE_TYPE:
+        parents = cmds.listRelatives(node, parent=True, fullPath=False) or []
+        if parents:
+            return parents[0]
+    return node
+
+
+def list_all_nodes():
+    """Return the transform names of every ``RBFtools`` node in the scene.
+
+    Duplicate-safe **and** order-stable: uses ``dict.fromkeys()`` which
+    is insertion-ordered in Python 3.7+ (and CPython 3.6+).
+    ``cmds.ls`` returns a deterministic scene-order, and
+    ``dict.fromkeys`` preserves that order while eliminating duplicates
+    caused by multiple shapes under the same transform.
+    """
+    ensure_plugin()
+    shapes = cmds.ls(type=NODE_TYPE) or []
+    return list(dict.fromkeys(get_transform(s) for s in shapes))
+
+
+# =====================================================================
+#  3. Safe attribute access
+# =====================================================================
+
+def safe_get(attr_path, default=0):
+    """``cmds.getAttr`` with a fallback.
+
+    Parameters
+    ----------
+    attr_path : str
+        Fully qualified plug, e.g. ``"RBFtools1.type"``.
+    default
+        Returned if the attribute does not exist or the query fails.
+    """
+    try:
+        return cmds.getAttr(attr_path)
+    except Exception:
+        return default
+
+
+def set_node_attr(node, attr, value):
+    """Set a single scalar attribute on the **shape** under *node*.
+
+    Wraps the operation in an :func:`undo_chunk` so the user can
+    revert individual slider drags.
+
+    Parameters
+    ----------
+    node : str
+        Transform **or** shape name.
+    attr : str
+        Short attribute name (e.g. ``"type"``, ``"angle"``).
+    value
+        The new value (bool / int / float).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    plug = "{}.{}".format(shape, attr)
+    with undo_chunk("RBFtools: set {}".format(attr)):
+        try:
+            cmds.setAttr(plug, value)
+        except Exception as exc:
+            cmds.warning("Cannot set {}: {}".format(plug, exc))
+
+
+def set_node_multi_attr(node, attr, list_values, max_length=10000):
+    u"""Transactional write to a Maya multi-instance attribute on *node*.
+
+    Strategy (v5 addendum \u00a7M2.4a \u2014 refinement 2):
+
+    1. Wrap in :func:`undo_chunk` so a partial-write failure rolls back
+       cleanly via Ctrl+Z.
+    2. **Clear all existing indices first** (``removeMultiInstance``),
+       then write new values in order. Avoids the half-old / half-new
+       hybrid that destination-only ``setAttr`` would leave on failure.
+    3. Length cap (default 10000) prevents an oversized list from
+       deadlocking the DG; emit warning + truncate.
+    4. Per-index ``setAttr`` failure issues a warning but does NOT
+       attempt partial recovery \u2014 the surrounding ``undo_chunk`` is
+       the canonical rollback.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape name.
+    attr : str
+        Short multi-attr name (e.g. ``"outputQuaternionGroupStart"``,
+        ``"driverInputRotateOrder"``).
+    list_values : list
+        Ordered values to write at indices 0..len-1. Empty list is
+        equivalent to clearing the multi.
+    max_length : int
+        Safety cap. Lists longer than this are truncated with a warning.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+
+    if not isinstance(list_values, (list, tuple)):
+        cmds.warning(
+            "set_node_multi_attr: list_values must be list/tuple; "
+            "got {}".format(type(list_values).__name__))
+        return
+
+    if len(list_values) > max_length:
+        cmds.warning(
+            "set_node_multi_attr: {} values exceeds cap {}; truncating. "
+            "If this is legitimate, raise max_length explicitly.".format(
+                len(list_values), max_length))
+        list_values = list(list_values)[:max_length]
+
+    base = "{}.{}".format(shape, attr)
+    with undo_chunk("RBFtools: set multi {}".format(attr)):
+        # Step 1: clear existing indices.
+        try:
+            existing = cmds.getAttr(base, multiIndices=True) or []
+        except Exception:
+            existing = []
+        for idx in existing:
+            try:
+                cmds.removeMultiInstance("{}[{}]".format(base, idx), b=True)
+            except Exception as exc:
+                cmds.warning(
+                    "set_node_multi_attr: removeMultiInstance "
+                    "{}[{}] failed: {}".format(base, idx, exc))
+
+        # Step 2: write new values 0..len-1.
+        for i, v in enumerate(list_values):
+            plug = "{}[{}]".format(base, i)
+            try:
+                cmds.setAttr(plug, v)
+            except Exception as exc:
+                cmds.warning(
+                    "set_node_multi_attr: setAttr {} failed: {}; "
+                    "undo_chunk will roll back.".format(plug, exc))
+
+
+def get_all_settings(node):
+    u"""Bulk-read every UI-relevant attribute from *node* \u2192 ``dict``.
+
+    Returns ``None`` when the node is empty or does not exist so the
+    UI layer can skip population.
+
+    The returned dict keys match the C++ short attribute names exactly.
+    """
+    if not _exists(node):
+        return None
+    shape = get_shape(node)
+    if not _exists(shape):
+        return None
+
+    g = safe_get  # local alias for readability
+
+    return {
+        # General
+        "active":               g(shape + ".active",               True),
+        "type":                 g(shape + ".type",                 0),
+        "iconSize":             g(shape + ".iconSize",             1.0),
+        # Vector Angle
+        "direction":            g(shape + ".direction",            0),
+        "invert":               g(shape + ".invert",               False),
+        "useRotate":            g(shape + ".useRotate",            True),
+        "angle":                g(shape + ".angle",                45.0),
+        "centerAngle":          g(shape + ".centerAngle",          0.0),
+        "twist":                g(shape + ".twist",                False),
+        "twistAngle":           g(shape + ".twistAngle",           90.0),
+        "useTranslate":         g(shape + ".useTranslate",         False),
+        "grow":                 g(shape + ".grow",                 False),
+        "translateMin":         g(shape + ".translateMin",         0.0),
+        "translateMax":         g(shape + ".translateMax",         0.0),
+        "interpolation":        g(shape + ".interpolation",        0),
+        "drawCone":             g(shape + ".drawCone",             True),
+        "drawCenterCone":       g(shape + ".drawCenterCone",       False),
+        "drawWeight":           g(shape + ".drawWeight",           False),
+        # RBF
+        "kernel":               g(shape + ".kernel",               1),
+        "radiusType":           g(shape + ".radiusType",           0),
+        "radius":               g(shape + ".radius",               0.0),
+        "allowNegativeWeights": g(shape + ".allowNegativeWeights", True),
+        "scale":                g(shape + ".scale",                1.0),
+        "rbfMode":              g(shape + ".rbfMode",              0),
+        "distanceType":         g(shape + ".distanceType",         0),
+        "twistAxis":            g(shape + ".twistAxis",            0),
+        # Solver display
+        "drawOrigin":           g(shape + ".drawOrigin",           False),
+        "drawPoses":            g(shape + ".drawPoses",            False),
+        "poseLength":           g(shape + ".poseLength",           1.0),
+        "drawIndices":          g(shape + ".drawIndices",          False),
+        "indexDistance":         g(shape + ".indexDistance",         0.0),
+        "drawTwist":            g(shape + ".drawTwist",            False),
+        "opposite":             g(shape + ".opposite",             False),
+        "driverIndex":          g(shape + ".driverIndex",          0),
+        # M_P1_ENC_COMBO_FIX (2026-04-29) -- 7 M2.x fields previously
+        # absent from the UI reload dict. Their absence forced
+        # rbf_section.load() to fall back to data.get(<key>, default)
+        # for every reload, surfacing as the "inputEncoding combo
+        # bounces back to Raw after pick" repro once enc-1
+        # (M_ENC_AUTOPIPE) added a post-write _load_settings cascade
+        # -- and as the latent "node-switch shows wrong combo value"
+        # bug for every other M2.x field listed here.
+        # Keys mirror the C++ short attr names exactly (same
+        # convention as the rest of this dict). Defaults match each
+        # attribute's C++ schema default at RBFtools.cpp.
+        "inputEncoding":        g(shape + ".inputEncoding",        0),
+        "clampEnabled":         g(shape + ".clampEnabled",         False),
+        "clampInflation":       g(shape + ".clampInflation",       0.0),
+        # M_P0_RBF_ANTI_OVERSHOOT Part A (2026-05-17): output-side
+        # clamp settings. Default true mirrors the C++ schema default
+        # (Houdini-aligned). When the plug cannot be read on a legacy
+        # node missing the attribute the UI falls back to the
+        # industry default, which keeps the safer behaviour visible.
+        "outputClampEnabled":   g(shape + ".outputClampEnabled",   True),
+        "outputClampInflation": g(shape + ".outputClampInflation", 0.0),
+        # M_P0_CREATE_NODE_REGULARIZATION (2026-05-10): UI fallback
+        # default mirrors the new create-time write -- 1e-4 is more
+        # rigging-friendly than the historical 1e-8 (Chad Vernon
+        # reference). This fallback only fires when the node attr
+        # cannot be read (corrupt scene / missing schema); the
+        # authoritative value is always the node attribute.
+        "regularization":       g(shape + ".regularization",       1.0e-8),
+        "solverMethod":         g(shape + ".solverMethod",         0),
+        "driverInputRotateOrder":
+            read_driver_rotate_orders(node) or [],
+        "outputQuaternionGroupStart":
+            read_quat_group_starts(node) or [],
+    }
+
+
+# =====================================================================
+#  4. Attribute filtering (for pose-editor lists)
+# =====================================================================
+
+def _filter_var_name(role, key):
+    """Expand the optionVar name template.
+
+    >>> _filter_var_name("driver", "Keyable")
+    'RBFtools_filter_driver_Keyable'
+    """
+    return FILTER_VAR_TEMPLATE.format(role=role, key=key)
+
+
+def get_filter_state(role, key):
+    """Read one filter toggle from Maya optionVars.
+
+    Falls back to :data:`FILTER_DEFAULTS` when the var does not exist.
+    """
+    var = _filter_var_name(role, key)
+    if cmds.optionVar(exists=var):
+        return cmds.optionVar(query=var)
+    return FILTER_DEFAULTS.get(key, 0)
+
+
+def set_filter_state(role, key, value):
+    """Persist one filter toggle to Maya optionVars."""
+    cmds.optionVar(iv=(_filter_var_name(role, key), int(value)))
+
+
+# =====================================================================
+#  Confirm-dialog optionVar persistence -- Milestone 3.0
+# =====================================================================
+# Centralised here (alongside filter persistence) per addendum sec.M3.0
+# soft-suggestion: all optionVar persistence lives in core.py so the
+# i18n / MVC scanners always find a single owner. ConfirmDialog imports
+# these via lazy `from RBFtools import core` inside its classmethod.
+
+CONFIRM_OPT_VAR_TEMPLATE = "RBFtools_skip_confirm_{action_id}"
+
+
+def should_show_confirm_dialog(action_id):
+    u"""Return ``True`` iff the user has NOT silenced this action via
+    "Don't ask again". Pure function \u2014 testable through mocked
+    :func:`cmds.optionVar`.
+
+    Parameters
+    ----------
+    action_id : str
+        snake_case identifier of the action (e.g. ``"prune_poses"``).
+        Maps to optionVar ``RBFtools_skip_confirm_<action_id>`` per
+        addendum \u00a7M3.0 naming contract.
+    """
+    var = CONFIRM_OPT_VAR_TEMPLATE.format(action_id=action_id)
+    if not cmds.optionVar(exists=var):
+        return True
+    return not bool(cmds.optionVar(query=var))
+
+
+def set_skip_confirm(action_id, skip):
+    """Persist the "Don't ask again" preference for *action_id*."""
+    var = CONFIRM_OPT_VAR_TEMPLATE.format(action_id=action_id)
+    cmds.optionVar(iv=(var, int(bool(skip))))
+
+
+def reset_all_skip_confirms():
+    u"""Clear every ``RBFtools_skip_confirm_*`` optionVar.
+
+    Backed by the ``Tools \u2192 Reset confirm dialogs`` menu item per
+    addendum \u00a7M3.0 (a one-click escape hatch \u2014 there is intentionally
+    no "are you sure" dialog because the act of selecting the menu
+    item already constitutes user intent).
+    """
+    prefix = "RBFtools_skip_confirm_"
+    names = cmds.optionVar(list=True) or []
+    for name in names:
+        if name.startswith(prefix):
+            cmds.optionVar(remove=name)
+
+
+# =====================================================================
+#  Rig role selection -- Milestone 3.0
+# =====================================================================
+
+
+# =====================================================================
+#  Mirror Tool orchestrator -- Milestone 3.2
+# =====================================================================
+# Wires the pure mirror math (core_mirror) into actual node creation
+# under a single undo_chunk. Called by controller.mirror_current_node;
+# never imported by widgets directly (MVC red line).
+
+
+def mirror_node(source_node, target_name, mirror_axis,
+                naming_rule_index, custom_naming=None,
+                naming_direction="auto",
+                progress=None,
+                overwrite=False):
+    u"""Create a mirrored copy of *source_node* under *target_name*.
+
+    Behaviour (addendum \u00a7M3.2.4, \u00a7M3.2.9):
+
+    * Wraps the entire operation in one ``undo_chunk`` so a mid-flight
+      failure rolls back via Maya undo without leaving an orphan node.
+    * Resolves driver / driven node names via *naming_rule_index*.
+      Missing R-side targets emit warnings; the orchestrator continues
+      with the L-side names so the user can fix wiring after the fact.
+    * Mirrors every pose's driver inputs + driven values + M2.3
+      ``poseLocalTransform`` per the inputEncoding / Maya raw-attr rules.
+
+    Parameters
+    ----------
+    source_node : str
+        Source RBFtools transform name.
+    target_name : str
+        Desired target node name (caller has already resolved this
+        via ``apply_naming_rule``; passed in to avoid re-running the
+        regex inside the orchestrator).
+    mirror_axis : int
+        0=X (YZ plane), 1=Y, 2=Z.
+    naming_rule_index : int
+        Used to mirror driver/driven node names.
+    custom_naming : tuple[str, str] or None
+        Custom regex pair when naming_rule_index == CUSTOM_RULE_INDEX.
+    naming_direction : str
+        "auto" / "forward" / "reverse" \u2014 passed through to
+        ``apply_naming_rule`` for driver/driven name remap.
+    progress : StatusProgressController or None
+        Optional progress feedback (may be None in headless / test).
+    overwrite : bool
+        When True and target already exists, delete it first. The
+        controller is responsible for asking the user via path A
+        confirm dialog; the orchestrator only honours the flag.
+
+    Returns
+    -------
+    dict
+        ``{"target": str, "status": str, "warnings": list[str]}``.
+        ``status`` \u2208 {"created", "overwrote", "skipped", "failed"}.
+        Failures raise; never returned silently.
+    """
+    from RBFtools import core_mirror
+
+    warnings = []
+    source_shape = get_shape(source_node)
+    enc = safe_get(source_shape + ".inputEncoding", 0) \
+        if _exists(source_shape) else 0
+    twist_axis = safe_get(source_shape + ".twistAxis", 0) \
+        if _exists(source_shape) else 0
+
+    # M_B24c (Hardening 2): Matrix-mode multi-source mirror is DEFERRED
+    # to v5.x post-final M_B24c2. Hard guard at the engine entry so we
+    # never depend on the controller-layer dialog being honoured. See
+    # addendum sec.M_B24c.matrix-mode-still-deferred + sec.M_B24c2-stub.
+    # Probe wrapped in try/except: when safe_get is mocked to return
+    # non-int values in test fixtures we conservatively treat the node
+    # as non-Matrix (the Generic-mode mirror path is the legacy default).
+    try:
+        _src_is_matrix = (
+            _exists(source_shape) and _is_matrix_mode(source_shape))
+    except Exception:
+        _src_is_matrix = False
+    if _src_is_matrix:
+        _matrix_sources = read_driver_info_multi(source_node)
+        if len(_matrix_sources) > 1:
+            raise NotImplementedError(
+                "RBFtools: Matrix-mode multi-source mirror is DEFERRED "
+                "to v5.x post-final M_B24c2. Source node {!r} is in "
+                "Matrix mode (type=1 + rbfMode=1) and has {} driver "
+                "sources. Either: (1) reduce to single source via "
+                "remove_driver_source(), (2) switch node to Generic "
+                "mode (rbfMode=0), or (3) wait for M_B24c2. See "
+                u"addendum \u00a7M_B24c2-stub.".format(
+                    source_node, len(_matrix_sources)))
+
+    # Read source node's current state up-front so we don't mutate it.
+    source_settings = get_all_settings(source_node) or {}
+    source_poses = read_all_poses(source_node)
+    source_local_xforms = read_pose_local_transforms(source_node)
+
+    # Resolve multi-source driver list (M_B24c) + single driven via
+    # name remap. read_driver_info_multi returns >= 1 entries when the
+    # node has ANY wiring (legacy single-driver auto-migrates to a
+    # 1-source list via _migrate_legacy_single_driver).
+    sources = read_driver_info_multi(source_node)
+    src_driven, src_driven_attrs = read_driven_info(source_node)
+
+    # Per-source naming remap with F.1 fallback (source keeps original
+    # name + warning; mirror does NOT abort).
+    remapped = []   # list of (DriverSource, new_name)
+    for s in sources:
+        if not s.node:
+            remapped.append((s, ""))
+            continue
+        new_name, dr_status = core_mirror.apply_naming_rule(
+            s.node, naming_rule_index, custom_naming, naming_direction)
+        if dr_status not in ("ok", "both_match"):
+            warnings.append(
+                "Driver name remap failed for source {!r} ({}): using "
+                "original name".format(s.node, dr_status))
+            new_name = s.node
+        if dr_status == "both_match":
+            warnings.append(
+                u"Driver name {!r} matches BOTH directions \u2014 using "
+                "forward".format(s.node))
+        remapped.append((s, new_name))
+
+    new_driven_name, dn_status = (
+        core_mirror.apply_naming_rule(
+            src_driven, naming_rule_index, custom_naming,
+            naming_direction)
+        if src_driven else (src_driven, "no_match"))
+    if src_driven and dn_status not in ("ok", "both_match"):
+        warnings.append(
+            "Driven name remap failed ({}): using source name {!r}".format(
+                dn_status, src_driven))
+        new_driven_name = src_driven
+
+    # Flat concat of all sources' attrs - matches the
+    # input[base+i]/poseInput[i] order produced by add_driver_source
+    # appends. Used by apply_poses for auto_alias_outputs slot
+    # alignment (single-source legacy case yields the same flat list).
+    flat_driver_attrs = []
+    for s in sources:
+        flat_driver_attrs.extend(s.attrs)
+
+    # Mirror each pose. For Generic mode multi-source we slice
+    # pose.inputs by each source's attr count and run
+    # mirror_driver_inputs per source so each source's encoding is
+    # honoured (M_B24c (A.3) source-by-source semantic).
+    mirrored_poses = []
+    for pose in source_poses:
+        new_inputs = []
+        cursor = 0
+        for s, _new_name in remapped:
+            n_slot = len(s.attrs)
+            slice_in = list(pose.inputs[cursor:cursor + n_slot])
+            slice_out, in_status = core_mirror.mirror_driver_inputs(
+                slice_in, int(s.encoding), mirror_axis,
+                driver_attrs=list(s.attrs))
+            new_inputs.extend(slice_out)
+            cursor += n_slot
+            if in_status.get("unsupported_encoding"):
+                warnings.append(
+                    "BendRoll inputEncoding on source {!r}: driver "
+                    u"inputs NOT mirrored (addendum \u00a7M3.2 (E)). User "
+                    "must verify pose data.".format(s.node))
+            for nm in in_status.get("unrecognized_attrs", []):
+                warnings.append(
+                    u"Unrecognized driver attr {!r} on source {!r} \u2014 "
+                    "passed through unchanged".format(nm, s.node))
+        # Tail beyond known sources (defensive: if pose.inputs is
+        # longer than the concat of source.attrs, preserve the tail
+        # untouched so we never silently lose data).
+        if cursor < len(pose.inputs):
+            new_inputs.extend(pose.inputs[cursor:])
+        new_values, unrec = core_mirror.mirror_driven_values(
+            list(pose.values), src_driven_attrs, mirror_axis)
+        for nm in unrec:
+            warnings.append(u"Unrecognized driven attr {!r} \u2014 passed "
+                            "through unchanged".format(nm))
+        # Commit 1: mirroring preserves per-pose sigma (independent of
+        # axis flips on the driven side).
+        new_pose = PoseData(pose.index, new_inputs, new_values,
+                            radius=getattr(pose, "radius",
+                                           DEFAULT_POSE_RADIUS))
+        mirrored_poses.append(new_pose)
+
+    # Mirror per-pose local Transforms (M2.3 contract).
+    mirrored_local_xforms = [
+        core_mirror.mirror_pose_local_transform(xf, mirror_axis)
+        for xf in source_local_xforms
+    ]
+
+    # Begin orchestration under undo_chunk. Failure mid-way rolls back.
+    if progress is not None:
+        progress.begin("Mirror: starting...")
+    overwrote = False
+    with undo_chunk("RBFtools: mirror node"):
+        try:
+            # Step 1: handle target conflict.
+            if _exists(target_name):
+                if not overwrite:
+                    raise RuntimeError(
+                        "Target node {!r} already exists and overwrite "
+                        "flag is False".format(target_name))
+                delete_node(target_name)
+                overwrote = True
+
+            # Step 2: create target.
+            if progress is not None:
+                progress.step(1, 4, "Mirror: creating target node")
+            target = create_node()
+            target = cmds.rename(target, target_name)
+
+            # Step 3: copy source attrs (kernel / radius / etc.) onto
+            # target, EXCLUDING driver/driven wiring (re-done in step 4).
+            if progress is not None:
+                progress.step(2, 4, "Mirror: copying node settings")
+            _copy_node_settings(source_settings, target)
+
+            # Step 4: write mirrored poses. Driver-side wiring is
+            # handled per-source via add_driver_source in Step 6
+            # (M_B24c (E.3) write-side reuse), so we pass an empty
+            # driver_node here. apply_poses still uses
+            # flat_driver_attrs for input[]/poseInput[i] slot
+            # alignment + auto_alias_outputs.
+            if progress is not None:
+                progress.step(3, 4, "Mirror: writing poses")
+            new_dn_attrs = (
+                list(src_driven_attrs) if src_driven_attrs else [])
+
+            apply_poses(target, "", new_driven_name,
+                        list(flat_driver_attrs), new_dn_attrs,
+                        mirrored_poses)
+
+            # Step 5: write mirrored local-Transform snapshots
+            # (apply_poses already calls capture_per_pose_local_transforms
+            # via replay; that overwrites whatever we passed in. We
+            # explicitly RE-write the mirrored versions here so the
+            # M2.3 double-storage stays consistent with the mirrored
+            # poseValue rather than with whatever the live driven_node
+            # state was at apply-time).
+            from RBFtools import core as _self_core   # noqa: F401
+            try:
+                write_pose_local_transforms(target, mirrored_local_xforms)
+            except Exception as exc:
+                warnings.append(
+                    "poseLocalTransform mirror write failed: {}".format(exc))
+
+            # Step 6 (M_B24c (E.3)): wire driven side + iterate per-
+            # source add_driver_source on driver side. Reuses the
+            # M_B24d / M_B24d_matrix_followup atomic + mode-exclusion
+            # + worldMatrix wiring rather than re-implementing
+            # legacy connect_node single-driver path.
+            if new_driven_name and _exists(new_driven_name):
+                wire_driven_outputs(target, new_driven_name, new_dn_attrs)
+            else:
+                warnings.append(
+                    "Target driven {!r} not found in scene; "
+                    "node created without driven connections.".format(
+                        new_driven_name))
+            wired_any_driver = False
+            for s, new_name in remapped:
+                if not new_name:
+                    continue
+                if not _exists(new_name):
+                    warnings.append(
+                        "Target driver source {!r} not found in scene; "
+                        "skipped wiring.".format(new_name))
+                    continue
+                try:
+                    add_driver_source(target, new_name, list(s.attrs),
+                                      float(s.weight), int(s.encoding))
+                    wired_any_driver = True
+                except Exception as exc:
+                    warnings.append(
+                        "add_driver_source failed for {!r}: {}".format(
+                            new_name, exc))
+            if not wired_any_driver and remapped:
+                warnings.append(
+                    "No driver sources wired on target; node created "
+                    "without driver connections.")
+
+            if progress is not None:
+                progress.step(4, 4, "Mirror: done")
+
+            return {
+                "target": target,
+                "status": "overwrote" if overwrote else "created",
+                "warnings": warnings,
+            }
+        except Exception as exc:
+            if progress is not None:
+                progress.end(u"Mirror: failed \u2014 {}".format(exc))
+            raise
+
+
+def _copy_node_settings(source_settings, target):
+    """Copy non-pose attrs from a settings dict onto *target*.
+
+    Skips attrs that the apply_poses pipeline manages (poses, baseline,
+    poseLocalTransform compound, driver/driven multis). Used by
+    :func:`mirror_node` to clone kernel / radius / encoding / clamp
+    config from the source node.
+    """
+    skip = {
+        "type", "rbfMode", "evaluate",     # mode + trigger
+        # Pose-pipeline attrs are handled by apply_poses / mirror code:
+        # poses[], baseValue[], outputIsScale[], poseLocalTransform[],
+        # outputQuaternionGroupStart[].
+    }
+    for k, v in (source_settings or {}).items():
+        if k in skip:
+            continue
+        try:
+            set_node_attr(target, k, v)
+        except Exception:
+            # Non-fatal -- settings the target's schema doesn't know
+            # about (e.g. a future v6 attr) just get dropped.
+            pass
+
+
+def select_rig_for_node(node, role):
+    u"""Select the driver or driven scene object connected to *node*.
+
+    Composes the existing :func:`read_driver_info` /
+    :func:`read_driven_info` helpers with ``cmds.select`` \u2014 M3.x tools
+    (Mirror, Profiler, etc.) need this one-step "show me the rig" UX
+    primitive without each tool re-implementing the connection lookup.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of an RBFtools node.
+    role : str
+        ``"driver"`` or ``"driven"``. Anything else emits a warning
+        and no-ops.
+    """
+    if role == "driver":
+        target, _attrs = read_driver_info(node)
+    elif role == "driven":
+        target, _attrs = read_driven_info(node)
+    else:
+        cmds.warning(
+            "select_rig_for_node: invalid role {!r}".format(role))
+        return
+    if target and _exists(target):
+        cmds.select(target, replace=True)
+
+
+def get_all_filters(role):
+    """Return the complete filter dict for *role* (``'driver'`` / ``'driven'``)."""
+    return {k: get_filter_state(role, k) for k in FILTER_DEFAULTS}
+
+
+def list_filtered_attributes(node, filters):
+    u"""Return attribute names from *node* respecting the *filters* dict.
+
+    Parameters
+    ----------
+    node : str
+        Scene node to query (e.g. ``"pSphere1"``).
+    filters : dict
+        ``{filter_key: 0|1}`` \u2014 same structure as :data:`FILTER_DEFAULTS`.
+
+    Returns
+    -------
+    list[str]
+        Clean attribute names.  Indexed multi entries (``attr[0]``) and
+        compound children (``translate.translateX``) are stripped.
+
+    .. warning::
+       **Never** pass ``multi=True`` to ``cmds.listAttr``.
+       It expands indexed multi-instance plugs and produces thousands of
+       entries on complex nodes (deformers, blend shapes), causing Maya
+       to freeze.  See historical bug report in the project summary.
+    """
+    if not _exists(node):
+        return []
+
+    f_keyable    = filters.get("Keyable",    1)
+    f_nonkeyable = filters.get("NonKeyable", 0)
+    f_readable   = filters.get("Readable",   1)
+    f_writable   = filters.get("Writable",   1)
+    f_connected  = filters.get("Connected",  0)
+    f_hidden     = filters.get("Hidden",     0)
+    f_userdef    = filters.get("UserDefined", 0)
+
+    # ----- Build listAttr keyword flags -----
+    kw = {}
+    if f_keyable and not f_nonkeyable:
+        kw["keyable"] = True
+    if f_readable:
+        kw["read"] = True
+    if f_writable:
+        kw["write"] = True
+    if f_hidden:
+        kw["hidden"] = True
+    if f_userdef:
+        kw["userDefined"] = True
+
+    raw = cmds.listAttr(node, **kw) or []
+
+    # ----- Strip multi-indices and compound children -----
+    # "weight[0]" -> skip (indexed multi)
+    # "translate.translateX" -> skip (compound child path)
+    attrs = [a for a in raw if "[" not in a and "." not in a]
+
+    # ----- Post-filter: connected only -----
+    if f_connected:
+        conns = cmds.listConnections(
+            node, plugs=True, connections=True,
+            skipConversionNodes=True) or []
+        connected = set()
+        for i in range(0, len(conns), 2):
+            connected.add(conns[i].split(".")[-1])
+        attrs = [a for a in attrs if a in connected]
+
+    # ----- Post-filter: non-keyable (exclude keyable) -----
+    if f_nonkeyable and not f_keyable:
+        keyable_set = set(cmds.listAttr(node, keyable=True) or [])
+        attrs = [a for a in attrs if a not in keyable_set]
+
+    return attrs
+
+
+# =====================================================================
+#  5. Connection tracing -- driver / driven discovery
+# =====================================================================
+
+def _read_legacy_input_connections(node):
+    u"""Internal: trace <shape>.input[i] connections, single-driver
+    legacy semantics. Returns (first_driver, [attrs]) \u2014 same shape as
+    the legacy read_driver_info."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return "", []
+    conns = cmds.listConnections(
+        shape + ".input",
+        source=True, destination=False,
+        plugs=True, connections=True,
+        skipConversionNodes=True,
+    ) or []
+    driver = ""
+    attrs = []
+    for i in range(0, len(conns), 2):
+        src_plug = conns[i + 1]
+        parts = src_plug.split(".")
+        if not driver:
+            driver = parts[0]
+        if len(parts) > 1:
+            attrs.append(parts[1])
+    return driver, attrs
+
+
+def _migrate_legacy_single_driver(node):
+    u"""Detect a v5.0-pre-M_B24 single-driver node and migrate it to the
+    M_B24 multi-source schema (write driverSource[0] from existing
+    input[] connections). Fail-soft per addendum \u52a0\u56fa 4: returns the
+    legacy tuple even if the migration write fails, so callers never
+    break. Best-effort.
+
+    Returns
+    -------
+    (str, list[str])
+        Legacy tuple \u2014 same shape as :func:`read_driver_info`.
+    """
+    global _MIGRATION_WARNING_ISSUED
+    try:
+        legacy_node, legacy_attrs = _read_legacy_input_connections(node)
+        if not legacy_node:
+            return ("", [])
+        shape = get_shape(node)
+        if not _exists(shape):
+            return (legacy_node, legacy_attrs)
+        # Detect: has the migration already run? Check if
+        # driverSource[0].driverSource_node has an incoming connection
+        # OR driverSource_attrs default differs from empty.
+        already = False
+        try:
+            srcs = cmds.listConnections(
+                shape + ".driverSource[0].driverSource_node",
+                source=True, destination=False) or []
+            already = bool(srcs)
+        except Exception:
+            already = False
+        if already:
+            return (legacy_node, legacy_attrs)
+        # Best-effort migration write.
+        try:
+            cmds.connectAttr(
+                legacy_node + ".message",
+                shape + ".driverSource[0].driverSource_node",
+                force=True)
+            cmds.setAttr(
+                shape + ".driverSource[0].driverSource_attrs",
+                len(legacy_attrs), *legacy_attrs, type="stringArray")
+            cmds.setAttr(
+                shape + ".driverSource[0].driverSource_weight", 1.0)
+            cmds.setAttr(
+                shape + ".driverSource[0].driverSource_encoding", 0)
+            if not _MIGRATION_WARNING_ISSUED:
+                cmds.warning(
+                    "RBFtools: Legacy single-driver schema detected on "
+                    "'{}'. Migrated to multi-source driverSource[0]. "
+                    "See addendum #M_B24a2.".format(node))
+                _MIGRATION_WARNING_ISSUED = True
+        except Exception as exc:
+            cmds.warning(
+                "RBFtools: Migration failed on '{}': {}. Continuing "
+                "with legacy schema.".format(node, exc))
+        return (legacy_node, legacy_attrs)
+    except Exception:
+        return ("", [])
+
+
+def read_driver_info_multi(node):
+    u"""Discover all drivers + per-source metadata on a M_B24 node.
+
+    Returns a list of :class:`DriverSource` objects. Empty list if no
+    drivers are connected. For legacy v5.0-pre-M_B24 nodes (no
+    driverSource[]), the function calls
+    :func:`_migrate_legacy_single_driver` so the read returns the
+    migrated single-element list seamlessly.
+
+    Connection topology (M_B24)::
+
+        driverSource[d].driverSource_node    <- driver.message
+        driverSource[d].driverSource_attrs    = [attr1, attr2, ...]
+        driverSource[d].driverSource_weight   = 1.0
+        driverSource[d].driverSource_encoding = 0..4
+
+    Legacy fallback topology::
+
+        driver.translateX -> RBFtoolsShape.input[0]
+        driver.translateY -> RBFtoolsShape.input[1]
+        ...
+
+    Mirror operations on multi-source nodes are CURRENTLY DEFERRED
+    to v5.x post-final M_B24c sub-task. See addendum
+    \u00a7M_B24b2.mirror-deferred-rationale for the controller-layer
+    migration plan and the 14 deprecated read_driver_info call-sites
+    (including 5 in mirror flow) preserved by M_B24a2-1 backcompat.
+
+    STATUS UPDATE (M_B24c): RESOLVED for Generic-mode multi-source
+    mirror; Matrix-mode multi-source mirror remains DEFERRED to
+    M_B24c2 (see addendum \u00a7M_B24c.matrix-mode-still-deferred +
+    \u00a7M_B24c2-stub). The pre-M_B24c "5 in mirror flow" callsite count
+    was empirically corrected to 2 (controller.py mirror_current_node
+    + core.py mirror_node) via verify-before-design 20th-use double-
+    grep; see \u00a7M_B24c.planner-error-correction. The 14-callsite
+    aggregate is unchanged - the other 12 (live-edit / alias / load-
+    editor / json / neutral / docs / tests) remain on the deprecated
+    wrapper per M_B24a2-1 backcompat.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    # Probe driverSource[]; if it has populated entries, prefer them.
+    indices = []
+    try:
+        indices = cmds.getAttr(shape + ".driverSource", multiIndices=True) or []
+    except Exception:
+        indices = []
+    sources = []
+    for d in indices:
+        node_plug = "{}.driverSource[{}].driverSource_node".format(shape, d)
+        srcs = cmds.listConnections(
+            node_plug, source=True, destination=False) or []
+        if not srcs:
+            continue
+        attrs_raw = cmds.getAttr(
+            "{}.driverSource[{}].driverSource_attrs".format(shape, d)) or []
+        weight = cmds.getAttr(
+            "{}.driverSource[{}].driverSource_weight".format(shape, d))
+        encoding = cmds.getAttr(
+            "{}.driverSource[{}].driverSource_encoding".format(shape, d))
+        try:
+            ds = DriverSource(
+                node=srcs[0],
+                attrs=tuple(attrs_raw),
+                weight=float(weight),
+                encoding=int(encoding))
+        except (ValueError, TypeError) as exc:
+            cmds.warning(
+                "RBFtools: skipping malformed driverSource[{}] on "
+                "'{}': {}".format(d, node, exc))
+            continue
+        sources.append(ds)
+    if sources:
+        return sources
+    # Legacy path -- migrate (fail-soft) and synthesize one entry.
+    legacy_node, legacy_attrs = _migrate_legacy_single_driver(node)
+    if not legacy_node:
+        return []
+    return [DriverSource(
+        node=legacy_node, attrs=tuple(legacy_attrs),
+        weight=1.0, encoding=0)]
+
+
+def _is_matrix_mode(shape):
+    """M_B24d: detect RBF Matrix mode (type=1 + rbfMode=1).
+
+    Generic mode  = type=1 + rbfMode=0 (input[i] flat scalar wiring).
+    Matrix mode   = type=1 + rbfMode=1 (driverList[d].driverInput
+                                         matrix wiring; DEFERRED to
+                                         M_B24d_matrix_followup).
+    Vector-Angle  = type=0 (input[i] flat scalar wiring).
+
+    Returns True only for the Matrix sub-mode."""
+    type_val = int(safe_get(shape + ".type", 0))
+    rbf_mode = int(safe_get(shape + ".rbfMode", 0))
+    return type_val == 1 and rbf_mode == 1
+
+
+def _count_existing_input_attrs(shape):
+    """M_B24d: count current `<shape>.input[]` populated indices.
+
+    Used as the base offset for appending new driver attrs in
+    add_driver_source (Generic mode). Returns 0 if input[] is empty
+    or if the multiIndices query fails."""
+    try:
+        indices = cmds.getAttr(shape + ".input", multiIndices=True) or []
+    except Exception:
+        indices = []
+    return (max(indices) + 1) if indices else 0
+
+
+def _count_existing_driver_list(shape):
+    """M_B24d_matrix_followup: next free `<shape>.driverList[]` index.
+
+    Matrix mode appends one driverList entry per add_driver_source
+    call (each entry holds one driver's worldMatrix). Returns 0 if
+    driverList[] is empty or if the multiIndices query fails."""
+    try:
+        indices = cmds.getAttr(shape + ".driverList", multiIndices=True) or []
+    except Exception:
+        indices = []
+    return (max(indices) + 1) if indices else 0
+
+
+def _has_generic_wiring(shape):
+    u"""M_B24d_matrix_followup: detect populated input[] indices on shape.
+
+    Used by add_driver_source mode-exclusion semantic to surface a
+    user-facing RuntimeError when the caller would mix Generic and
+    Matrix mode wiring on the same node. See addendum
+    \u00a7M_B24d_matrix_followup.mode-exclusion-semantic."""
+    try:
+        indices = cmds.getAttr(shape + ".input", multiIndices=True) or []
+    except Exception:
+        indices = []
+    return bool(indices)
+
+
+def _has_matrix_wiring(shape):
+    """M_B24d_matrix_followup: detect any driverList[d].driverInput
+    incoming connection on shape.
+
+    Counterpart to :func:`_has_generic_wiring`. Probes every
+    populated driverList[] index for an actual incoming connection
+    (legacy single-driver Matrix node has driverList[0] connected
+    too, so any populated index counts)."""
+    try:
+        dl_indices = cmds.getAttr(
+            shape + ".driverList", multiIndices=True) or []
+    except Exception:
+        dl_indices = []
+    for d in dl_indices:
+        plug = "{}.driverList[{}].driverInput".format(shape, d)
+        try:
+            conns = cmds.listConnections(
+                plug, source=True, destination=False) or []
+        except Exception:
+            conns = []
+        if conns:
+            return True
+    return False
+
+
+def _resolve_driver_rotate_order(shape, driver_node, idx):
+    """M_B24d_matrix_followup (Hardening 3): connect
+    driver_node.rotateOrder -> shape.driverInputRotateOrder[idx]
+    if the driver node carries a rotateOrder attribute. Standard
+    transform / joint nodes always do; falls back to the Maya
+    default xyz=0 for exotic node types lacking the attribute
+    (no setAttr needed since 0 is the array slot default)."""
+    plug = "{}.driverInputRotateOrder[{}]".format(shape, idx)
+    if cmds.attributeQuery("rotateOrder", node=driver_node, exists=True):
+        cmds.connectAttr(driver_node + ".rotateOrder", plug, force=True)
+
+
+def _wire_matrix_mode_data_path(shape, driver_node, idx):
+    u"""M_B24d_matrix_followup (Hardening 2): connect
+    driver_node.worldMatrix[0] -> shape.driverList[idx].driverInput.
+
+    worldMatrix[0] (NOT .matrix / local) is required by the C++
+    compute() math chain at RBFtools.cpp:2113:
+
+        transMatDriver = driverMat * driverParentMatInv * jointOrientMatInv
+
+    The driverParentMatInv step is mathematically meaningful only
+    when driverMat is a world-space matrix; connecting the local
+    .matrix would make the parentInverse step a no-op-ish error.
+    See addendum \u00a7M_B24d_matrix_followup.matrix-vs-worldmatrix
+    for the verbatim derivation.
+
+    Post-connect verification is mandatory: cpp:2087-2093 has an
+    early-return guard on unconnected driverInput, so a silently
+    failed connectAttr would blind the entire RBF compute()."""
+    target = "{}.driverList[{}].driverInput".format(shape, idx)
+    cmds.connectAttr(driver_node + ".worldMatrix[0]", target, force=True)
+    incoming = cmds.listConnections(
+        target, source=True, destination=False) or []
+    if not incoming:
+        raise RuntimeError(
+            "RBFtools: driverList[{}].driverInput connectAttr appeared "
+            "to succeed but listConnections returned empty. C++ "
+            "compute() early-returns on unconnected driverInput "
+            "(RBFtools.cpp:2087-2093) - this would silently fail the "
+            "entire RBF compute. Aborting.".format(idx))
+
+
+def _unwire_matrix_mode_data_path(shape, driver_node, idx):
+    """M_B24d_matrix_followup: symmetric disconnect for
+    :func:`_wire_matrix_mode_data_path`. Best-effort - any failure
+    is swallowed since this runs from rollback / remove paths and
+    must never re-raise."""
+    target = "{}.driverList[{}].driverInput".format(shape, idx)
+    if driver_node:
+        try:
+            cmds.disconnectAttr(driver_node + ".worldMatrix[0]", target)
+        except Exception:
+            pass
+        rot_plug = "{}.driverInputRotateOrder[{}]".format(shape, idx)
+        try:
+            if cmds.attributeQuery(
+                    "rotateOrder", node=driver_node, exists=True):
+                cmds.disconnectAttr(driver_node + ".rotateOrder", rot_plug)
+        except Exception:
+            pass
+
+
+def add_driver_source(node, driver_node, driver_attrs,
+                      weight=1.0, encoding=0):
+    u"""Append a new :class:`DriverSource` to driverSource[].
+
+    Returns the index of the newly-added entry. Forms the
+    driverSource_node message connection from ``driver_node.message``
+    and writes the attrs / weight / encoding fields.
+
+    M_B24d data path: in addition to the metadata write, this
+    function also creates the actual data connections so RBF
+    compute() sees the new driver. For Generic mode (type=1,
+    rbfMode=0) this means appending each ``driver_node.<attr>``
+    to ``shape.input[base+i]`` where base is the current input[]
+    count. Matrix mode (type=1, rbfMode=1) wires
+    ``driver_node.worldMatrix[0]`` to
+    ``shape.driverList[idx].driverInput`` plus an optional
+    ``driver_node.rotateOrder`` -> ``driverInputRotateOrder[idx]``
+    sync (M_B24d_matrix_followup; see addendum
+    \u00a7M_B24d_matrix_followup.matrix-vs-worldmatrix for the math
+    chain that mandates worldMatrix over .matrix).
+
+    M_B24d_matrix_followup mode-exclusion semantic: callers must
+    not mix Generic and Matrix wiring on the same shape. If the
+    shape currently carries wiring of one kind and the caller
+    targets the other, a RuntimeError is raised with a user-facing
+    instruction (remove all driver sources first, then re-add).
+
+    Atomic fail-soft (Hardening 1): metadata write happens first,
+    then data path. If any data-path connectAttr fails, the
+    metadata is rolled back via removeMultiInstance so the node
+    never holds a half-state driverSource[idx].
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        raise RuntimeError(
+            "add_driver_source: shape not found for {!r}".format(node))
+    # M_B24d_matrix_followup (Hardening 1): mode-exclusion semantic.
+    # Detect existing wiring topology and reject the mismatched
+    # branch before any state is written. See addendum
+    # sec.M_B24d_matrix_followup.mode-exclusion-semantic.
+    is_matrix = _is_matrix_mode(shape)
+    if is_matrix and _has_generic_wiring(shape):
+        raise RuntimeError(
+            "RBFtools: cannot mix Matrix mode and Generic mode driver "
+            "sources on the same node. Existing sources are in Generic "
+            "mode (shape.input[] populated); current node is in Matrix "
+            "mode (type=1 + rbfMode=1). Remove all driver sources "
+            "first via remove_driver_source(), then re-add. See "
+            "addendum "
+            u"\u00a7M_B24d_matrix_followup.mode-exclusion-semantic.")
+    if (not is_matrix) and _has_matrix_wiring(shape):
+        raise RuntimeError(
+            "RBFtools: cannot mix Matrix mode and Generic mode driver "
+            "sources on the same node. Existing sources are in Matrix "
+            "mode (shape.driverList[].driverInput connected); current "
+            "node is in Generic mode (type=1 + rbfMode=0 or type=0). "
+            "Remove all driver sources first via "
+            "remove_driver_source(), then re-add. See addendum "
+            u"\u00a7M_B24d_matrix_followup.mode-exclusion-semantic.")
+    # Validate via dataclass (enforces weight >= 0, encoding 0..4).
+    DriverSource(node=driver_node, attrs=tuple(driver_attrs),
+                 weight=float(weight), encoding=int(encoding))
+    # Find next free index.
+    indices = cmds.getAttr(shape + ".driverSource", multiIndices=True) or []
+    next_idx = (max(indices) + 1) if indices else 0
+    base_plug = "{}.driverSource[{}]".format(shape, next_idx)
+    # ---- Step 1: write metadata (existing behavior) ----
+    cmds.connectAttr(driver_node + ".message",
+                     base_plug + ".driverSource_node", force=True)
+    cmds.setAttr(base_plug + ".driverSource_attrs",
+                 len(driver_attrs), *driver_attrs, type="stringArray")
+    cmds.setAttr(base_plug + ".driverSource_weight", float(weight))
+    cmds.setAttr(base_plug + ".driverSource_encoding", int(encoding))
+    # ---- Step 2: data path (atomic fail-soft) ----
+    if is_matrix:
+        # Matrix mode (M_B24d_matrix_followup): append one
+        # driverList[matrix_idx] entry per add_driver_source call.
+        # driver_attrs is metadata-only here (forward-compat M5+;
+        # decision D.2). Atomic try/except mirrors Generic branch.
+        matrix_idx = _count_existing_driver_list(shape)
+        wired_matrix = False
+        try:
+            _wire_matrix_mode_data_path(shape, driver_node, matrix_idx)
+            wired_matrix = True
+            _resolve_driver_rotate_order(shape, driver_node, matrix_idx)
+        except Exception as exc:
+            if wired_matrix:
+                _unwire_matrix_mode_data_path(
+                    shape, driver_node, matrix_idx)
+            try:
+                cmds.removeMultiInstance(base_plug, b=True)
+            except Exception:
+                pass
+            cmds.warning(
+                "add_driver_source: Matrix mode data path wiring "
+                "failed for {!r} ({}); rolled back metadata + "
+                "partial connections. Error: {}".format(
+                    driver_node, driver_attrs, exc))
+            raise
+        return next_idx
+    # Generic mode: append driver attrs to shape.input[base..base+n].
+    # base is the current count of populated input[] indices, so this
+    # respects existing single-driver wire_driver_inputs() output and
+    # any prior add_driver_source() appends.
+    input_base = _count_existing_input_attrs(shape)
+    connected = []
+    try:
+        for i, attr in enumerate(driver_attrs):
+            src = "{}.{}".format(driver_node, attr)
+            dst = "{}.input[{}]".format(shape, input_base + i)
+            cmds.connectAttr(src, dst, force=True)
+            connected.append((src, dst))
+    except Exception as exc:
+        # Hardening 1 atomic rollback: undo any partial input[]
+        # connections + remove the metadata entry. Inner try/except
+        # ensures rollback itself never raises.
+        for src, dst in connected:
+            try:
+                cmds.disconnectAttr(src, dst)
+            except Exception:
+                pass
+        try:
+            cmds.removeMultiInstance(base_plug, b=True)
+        except Exception:
+            pass
+        cmds.warning(
+            "add_driver_source: data path wiring failed for {!r} "
+            "({}); rolled back metadata + partial connections. "
+            "Error: {}".format(driver_node, driver_attrs, exc))
+        raise
+    return next_idx
+
+
+def remove_driver_source(node, index):
+    """Disconnect + remove driverSource[index]. No-op if the index does
+    not exist.
+
+    M_B24d data path: in addition to clearing the metadata via
+    removeMultiInstance, this function also disconnects the
+    corresponding ``shape.input[base..base+n]`` connections that
+    add_driver_source created. The base offset is recomputed by
+    summing attr counts of all driverSource[*] entries with logical
+    index < `index`.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    plug = "{}.driverSource[{}]".format(shape, index)
+    # M_B24d data path: also disconnect the input[base..base+n]
+    # connections that add_driver_source created. Compute base by
+    # summing attr counts of all driverSource[*] entries with
+    # logical index < `index`. Best-effort -- failures warn but do
+    # not block the metadata removal below.
+    try:
+        all_indices = cmds.getAttr(
+            shape + ".driverSource", multiIndices=True) or []
+    except Exception:
+        all_indices = []
+    if index in all_indices:
+        # Read this source's driver node from the message connection
+        # (shared by Generic + Matrix branches below).
+        try:
+            srcs = cmds.listConnections(
+                plug + ".driverSource_node",
+                source=True, destination=False) or []
+        except Exception:
+            srcs = []
+        drv_node = srcs[0] if srcs else ""
+        if _is_matrix_mode(shape):
+            # M_B24d_matrix_followup: Matrix mode appended one
+            # driverList[] entry per add_driver_source call. The
+            # logical position of `index` within the sorted
+            # driverSource[] indices yields the matching driverList
+            # offset (entries are appended in lockstep).
+            ordered = sorted(all_indices)
+            matrix_idx = ordered.index(index)
+            _unwire_matrix_mode_data_path(shape, drv_node, matrix_idx)
+        else:
+            # M_REBUILD_REFACTOR (2026-04-28): Bug A fix --
+            # the bare cmds.disconnectAttr loop with silent
+            # ``except: pass`` bypassed the M_UNITCONV_PURGE /
+            # M_REMOVE_MULTI / M_SWEEP_EMPTY atomic protocol,
+            # leaving unitConversion ghosts AND empty input[]
+            # subscripts behind. The new path routes every sever
+            # through ``_disconnect_or_purge`` (delete unitConv +
+            # removeMultiInstance + log) and follows up with
+            # ``_sweep_empty_subscripts`` to catch any orphans
+            # that the per-slot helper missed.
+            my_attrs = []
+            for prior in sorted(all_indices):
+                if prior == index:
+                    attrs_plug = (
+                        "{}.driverSource[{}]"
+                        ".driverSource_attrs".format(shape, prior))
+                    try:
+                        my_attrs = list(cmds.getAttr(attrs_plug)
+                                        or [])
+                    except Exception:
+                        my_attrs = []
+                    break
+            if drv_node:
+                for attr in my_attrs:
+                    plug = "{}.{}".format(drv_node, attr)
+                    sub_idx = _subscript_of_existing_input(
+                        plug, shape)
+                    if sub_idx is not None:
+                        _disconnect_or_purge(
+                            shape, "input", sub_idx, plug)
+            _sweep_empty_subscripts(shape, "input")
+    try:
+        cmds.removeMultiInstance(plug, b=True)
+    except Exception as exc:
+        cmds.warning(
+            "RBFtools: remove_driver_source({}, {}) failed: {}".format(
+                node, index, exc))
+
+
+def format_node_for_display(name, mode):
+    """Phase 3 (Header naming radio 2026-04-27): format a Maya node
+    name for display in the inspector per the active naming mode.
+
+      mode == "long"  -> long name with full DAG path
+      mode == "short" -> last-component short name
+      mode == "nice"  -> last-component name with leading
+                          namespace stripped
+
+    Pure string transformation - never queries Maya. Returns the
+    input name unchanged if the mode is unknown or transformation
+    fails.
+    """
+    if not name:
+        return ""
+    try:
+        if mode == "short":
+            # Last DAG component (everything after final '|').
+            return name.rsplit("|", 1)[-1]
+        if mode == "nice":
+            short = name.rsplit("|", 1)[-1]
+            return short.rsplit(":", 1)[-1]   # strip namespace
+        # default + "long"
+        return name
+    except Exception:
+        return name
+
+
+def cleanup_remove_connectionless_inputs(node):
+    """Phase 3 (Utility - cleanup tools): walk shape.input[] and
+    remove every multi-index whose plug has no incoming connection.
+
+    Returns the number of indices removed; 0 on no-op or failure.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+    try:
+        indices = cmds.getAttr(
+            shape + ".input", multiIndices=True) or []
+    except Exception:
+        return 0
+    removed = 0
+    for d in list(indices):
+        plug = "{}.input[{}]".format(shape, d)
+        try:
+            srcs = cmds.listConnections(
+                plug, source=True, destination=False) or []
+        except Exception:
+            srcs = []
+        if not srcs:
+            try:
+                cmds.removeMultiInstance(plug, b=True)
+                removed += 1
+            except Exception:
+                pass
+    return removed
+
+
+def cleanup_remove_connectionless_outputs(node):
+    """Phase 3: walk shape.output[] and remove every multi-index
+    whose plug has no outgoing connection."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+    try:
+        indices = cmds.getAttr(
+            shape + ".output", multiIndices=True) or []
+    except Exception:
+        return 0
+    removed = 0
+    for d in list(indices):
+        plug = "{}.output[{}]".format(shape, d)
+        try:
+            dests = cmds.listConnections(
+                plug, source=False, destination=True) or []
+        except Exception:
+            dests = []
+        if not dests:
+            try:
+                cmds.removeMultiInstance(plug, b=True)
+                removed += 1
+            except Exception:
+                pass
+    return removed
+
+
+def cleanup_remove_redundant_poses(node):
+    """Phase 3: walk shape.poses[] and remove poses whose inputs
+    AND values exactly match an earlier pose. This is the
+    'same pose data / same value in all poses' cleanup the
+    AnimaRbfSolver reference exposes."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+    poses = read_all_poses(node)
+    seen = []
+    to_remove = []
+    for p in poses:
+        sig = (tuple(p.inputs), tuple(p.values))
+        if sig in seen:
+            to_remove.append(p.index)
+        else:
+            seen.append(sig)
+    removed = 0
+    # High-to-low so logical indices stay valid as we go.
+    for idx in sorted(to_remove, reverse=True):
+        plug = "{}.poses[{}]".format(shape, idx)
+        try:
+            cmds.removeMultiInstance(plug, b=True)
+            removed += 1
+        except Exception:
+            pass
+    return removed
+
+
+def disconnect_driver_source_attrs(node, index, attrs=None):
+    u"""M_CONNECT_DISCONNECT_FIX Bug 2 (2026-04-28) \u2014 extended
+    signature accepts optional ``attrs`` list:
+
+      attrs=None    -> Scene B: disconnect the FULL set of currently-
+                       wired attrs and empty the driverSource_attrs
+                       MStringArray (legacy behavior).
+      attrs=[...]   -> Scene A: disconnect ONLY the listed attrs +
+                       remove them from driverSource_attrs while
+                       keeping the rest intact.
+
+    Atomic protocol reuse (\u52a0\u56fa 1): every sever routes through
+    :func:`_disconnect_or_purge` so a unitConversion ghost is
+    deleted, an empty multi subscript is removed via
+    ``cmds.removeMultiInstance(b=True)``, and the array stays
+    packed. Path A (this function) no longer bypasses the
+    M_BREAK_REBUILD / M_UNITCONV_PURGE / M_REMOVE_MULTI /
+    M_SWEEP_EMPTY protocols.
+
+    Original spec (M_DISCONNECT_FIX 2026-04-27): true
+
+    Why a dedicated function:
+      - The previous Disconnect path called
+        `set_driver_source_attrs(idx, [])` which goes through the
+        remove-all + re-add-all rebuild orchestrator. That has
+        unintended side effects (remove of driverSource[idx] itself
+        plus re-add of every OTHER source via add_driver_source,
+        which restores their wires correctly but is heavy and
+        depends on `cmds.setAttr(plug, 0, type="stringArray")`
+        round-tripping cleanly across Maya versions).
+      - User report 2026-04-27: under some scenes Disconnect was
+        observed to leave the source's selected attrs WIRED to
+        input[]. The direct-disconnect path eliminates that whole
+        class of failure.
+
+    Implementation:
+      1. Read current sources list (multi).
+      2. Resolve index'th source's node + attrs + base offset
+         (sum of attr counts for sources at logical index < idx).
+      3. For each (attr at offset i): cmds.disconnectAttr(
+           "<src>.<attr>", "<shape>.input[base+i]").
+      4. cmds.setAttr("<shape>.driverSource[idx].driverSource_attrs",
+                      0, type="stringArray").
+
+    Returns True on success, False on out-of-range / failure
+    (with cmds.warning surfacing the cause).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        cmds.warning(
+            "disconnect_driver_source_attrs: shape not found "
+            "for {!r}".format(node))
+        return False
+    sources = read_driver_info_multi(node)
+    if not sources:
+        cmds.warning(
+            "disconnect_driver_source_attrs: no driver sources "
+            "on {!r}".format(node))
+        return False
+    if index < 0 or index >= len(sources):
+        cmds.warning(
+            "disconnect_driver_source_attrs: index {} out of "
+            "range (0..{})".format(index, len(sources) - 1))
+        return False
+    target = sources[index]
+    existing_attrs = list(target.attrs)
+    if not existing_attrs:
+        # Already empty - nothing to disconnect. Still treat as
+        # success (idempotent) so the slot guards don't loop.
+        return True
+    src_node = target.node or ""
+    if not src_node:
+        return False
+    # Decide Scene A vs Scene B scope.
+    if attrs is None:
+        # Scene B: full source -- disconnect every currently-wired
+        # attr and empty the MStringArray.
+        attrs_to_clear = list(existing_attrs)
+        full_clear = True
+    else:
+        # Scene A: precise -- only the requested subset that is
+        # actually currently held by this source. Anything outside
+        # existing_attrs is silently dropped (cmds.warning trace).
+        requested = list(attrs)
+        attrs_to_clear = [a for a in requested if a in existing_attrs]
+        skipped = [a for a in requested if a not in existing_attrs]
+        if skipped:
+            cmds.warning(
+                "disconnect_driver_source_attrs: attrs {!r} not "
+                "currently bound to driverSource[{}]; "
+                "skipping".format(skipped, index))
+        full_clear = False
+    # M_CRASH_FIX defense 2 (2026-04-28 hotfix): the disconnect
+    # storm + cmds.delete(unitConv) inside _disconnect_or_purge
+    # MUST run while the solver's nodeState is HasNoEffect,
+    # otherwise mid-evaluate compute() against a half-broken
+    # input[] / unitConversion graph triggers CTD.
+    with undo_chunk("RBFtools: disconnect driver source attrs"), \
+         _node_state_frozen(shape):
+        # 1) Sever each requested wire via _disconnect_or_purge.
+        for attr in attrs_to_clear:
+            plug = "{}.{}".format(src_node, attr)
+            idx = _subscript_of_existing_input(plug, shape)
+            if idx is None:
+                cmds.warning(
+                    "disconnect_driver_source_attrs: {} reports "
+                    "no shape.input[] subscript; skipping".format(
+                        plug))
+                continue
+            _disconnect_or_purge(shape, "input", idx, plug)
+        # 2) Update driverSource_attrs MStringArray.
+        attrs_plug = "{}.driverSource[{}].driverSource_attrs".format(
+            shape, index)
+        try:
+            if full_clear:
+                cmds.setAttr(attrs_plug, 0, type="stringArray")
+            else:
+                kept = [a for a in existing_attrs
+                        if a not in set(attrs_to_clear)]
+                if kept:
+                    cmds.setAttr(
+                        attrs_plug, len(kept), *kept,
+                        type="stringArray")
+                else:
+                    cmds.setAttr(
+                        attrs_plug, 0, type="stringArray")
+        except Exception as exc:
+            cmds.warning(
+                "disconnect_driver_source_attrs: failed to clear "
+                "{}: {}".format(attrs_plug, exc))
+            return False
+        # 3) M_SWEEP_EMPTY chaser.
+        _sweep_empty_subscripts(shape, "input")
+    return True
+
+
+def set_driver_source_attrs(node, index, new_attrs):
+    """M_UIRECONCILE_PLUS (Item 4b) +
+    M_CONNECT_DISCONNECT_FIX Bug 1 (2026-04-28) +
+    M_P0_DRIVER_CONNECT_UX_REVAMP Part A (2026-05-12): replace the
+    attrs list of an existing driverSource[index] entry.
+
+    M_P0_DRIVER_CONNECT_UX_REVAMP Part A (atomic rewrite):
+      * Step 2 + 4 connectAttr exceptions are no longer swallowed
+        by cmds.warning -- they raise + trigger full rollback.
+      * Step 3 (driverSource_attrs metadata write) is moved AFTER
+        Step 2 + 4 so metadata is updated ONLY when every wire
+        landed successfully. Eliminates the metadata-vs-wire drift
+        that polluted the base offset of subsequent sources.
+      * Pre-snapshot of source[index..end] wires recorded BEFORE
+        Step 1 disconnect; on failure the snapshot drives the
+        restore loop that puts every wire back at its original
+        input[] subscript.
+      * All-or-nothing semantics: success returns True with
+        metadata + wires consistent; failure returns False and
+        the node returns to its pre-call state.
+
+    Returns True on full success, False if the index is out of
+    range or any wire/metadata mutation raised (with rollback
+    already applied). The honest-failure anchor is strengthened:
+    silent warn -> atomic raise + rollback.
+    """
+    shape = get_shape(node)
+    sources = read_driver_info_multi(node)
+    if not sources:
+        cmds.warning(
+            "set_driver_source_attrs: no driver sources on {!r}".format(
+                node))
+        return False
+    if index < 0 or index >= len(sources):
+        cmds.warning(
+            "set_driver_source_attrs: index {} out of range "
+            "(0..{})".format(index, len(sources) - 1))
+        return False
+    target = sources[index]
+    src_node = target.node
+    existing_attrs = list(target.attrs)
+    new_attrs_list = list(new_attrs)
+    # No-op short-circuit when the user re-clicks Connect with no
+    # actual change -- saves an entire DG storm.
+    if existing_attrs == new_attrs_list:
+        return True
+    removed = [a for a in existing_attrs if a not in new_attrs_list]
+    added = [a for a in new_attrs_list if a not in existing_attrs]
+    base = sum(len(s.attrs) for s in sources[:index])
+
+    # M_P0_DRIVER_CONNECT_UX_REVAMP Part A: pre-snapshot original
+    # wires of source[index..end]. Each tuple records (source_node,
+    # attr_name, original input[] subscript) so rollback can put
+    # the wire back at its original slot if Step 2 or Step 4 fails.
+    pre_wires = []
+    for i in range(index, len(sources)):
+        s = sources[i]
+        if not s.node:
+            continue
+        for attr in s.attrs:
+            plug = "{}.{}".format(s.node, attr)
+            sub_idx = _subscript_of_existing_input(plug, shape)
+            if sub_idx is not None:
+                pre_wires.append((s.node, attr, sub_idx))
+
+    with undo_chunk("RBFtools: set driver source attrs"), \
+         _node_state_frozen(shape):
+        # 1) Disconnect every existing wire of source[index..end].
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part A: drive the disconnect
+        # loop from the pre_wires snapshot so _subscript_of_existing
+        # _input is called exactly once per attr (the snapshot pass).
+        for src_node_w, attr_w, sub_idx in pre_wires:
+            plug = "{}.{}".format(src_node_w, attr_w)
+            _disconnect_or_purge(shape, "input", sub_idx, plug)
+
+        # M_P0_DRIVER_CONNECT_UX_REVAMP Part A: track every wire we
+        # create so rollback can disconnect them cleanly.
+        connected_step2 = []
+        connected_step4 = []
+
+        try:
+            # 2) Re-wire source[index] with new_attrs at
+            # input[base..base+len(new_attrs)-1]. ATOMIC: any
+            # connectAttr exception raises out of the loop and the
+            # except block rolls back everything.
+            if src_node and _exists(src_node):
+                for i, attr in enumerate(new_attrs_list):
+                    if not cmds.attributeQuery(
+                            attr, node=src_node, exists=True):
+                        raise RuntimeError(
+                            "set_driver_source_attrs: {}.{} does "
+                            "not exist".format(src_node, attr))
+                    src_plug = "{}.{}".format(src_node, attr)
+                    dst_plug = "{}.input[{}]".format(
+                        shape, base + i)
+                    cmds.connectAttr(
+                        src_plug, dst_plug, force=True)
+                    connected_step2.append((src_plug, dst_plug))
+
+            # 4) Re-wire source[i>index] with their EXISTING attrs
+            # at the shifted base. ATOMIC: same raise-and-rollback
+            # contract.
+            next_base = base + len(new_attrs_list)
+            for i in range(index + 1, len(sources)):
+                s = sources[i]
+                if not s.node or not _exists(s.node):
+                    next_base += len(s.attrs)
+                    continue
+                for j, attr in enumerate(s.attrs):
+                    if not cmds.attributeQuery(
+                            attr, node=s.node, exists=True):
+                        continue
+                    src_plug = "{}.{}".format(s.node, attr)
+                    dst_plug = "{}.input[{}]".format(
+                        shape, next_base + j)
+                    cmds.connectAttr(
+                        src_plug, dst_plug, force=True)
+                    connected_step4.append((src_plug, dst_plug))
+                next_base += len(s.attrs)
+
+            # 3) Metadata write -- ONLY now that every wire landed.
+            # Moved AFTER Step 2 + 4 per M_P0_DRIVER_CONNECT_UX_REVAMP
+            # Part A: ensures driverSource_attrs reflects the actual
+            # wire state and the base offset computation for the next
+            # call stays consistent.
+            attrs_plug = (
+                "{}.driverSource[{}].driverSource_attrs".format(
+                    shape, index))
+            if new_attrs_list:
+                cmds.setAttr(
+                    attrs_plug, len(new_attrs_list),
+                    *new_attrs_list, type="stringArray")
+            else:
+                cmds.setAttr(attrs_plug, 0, type="stringArray")
+
+        except Exception as exc:
+            # M_P0_DRIVER_CONNECT_UX_REVAMP Part A: rollback.
+            # Phase R1: disconnect everything we just connected.
+            for sp, dp in connected_step2 + connected_step4:
+                try:
+                    cmds.disconnectAttr(sp, dp)
+                except Exception:
+                    pass
+            # Phase R2: restore original wires from pre_wires
+            # snapshot. Each entry records the original subscript,
+            # so we can put every wire back exactly where it was.
+            for orig_node, orig_attr, orig_sub in pre_wires:
+                if not _exists(orig_node):
+                    continue
+                if not cmds.attributeQuery(
+                        orig_attr, node=orig_node, exists=True):
+                    continue
+                src_plug = "{}.{}".format(orig_node, orig_attr)
+                dst_plug = "{}.input[{}]".format(shape, orig_sub)
+                try:
+                    cmds.connectAttr(
+                        src_plug, dst_plug, force=True)
+                except Exception:
+                    # Best-effort restore -- if even the original
+                    # wire cannot be re-created the node is in a
+                    # disconnected state that the indicator will
+                    # surface as red/yellow.
+                    pass
+            cmds.warning(
+                "set_driver_source_attrs aborted + rolled back: "
+                "{}".format(exc))
+            return False
+
+        # 5) M_SWEEP_EMPTY chaser -- orphan subscripts left by the
+        # disconnect storm above are removed (idempotent).
+        _sweep_empty_subscripts(shape, "input")
+
+    if removed or added:
+        cmds.warning(
+            "set_driver_source_attrs (incremental diff): "
+            "removed {!r}, added {!r}, final={!r}".format(
+                removed, added, new_attrs_list))
+    return True
+
+
+def driver_source_connection_state(node, index):
+    """M_P0_DRIVER_CONNECT_UX_REVAMP Part A.2 (2026-05-12) -- query
+    the wiring state of driverSource[index] on *node*.
+
+    Compares the driverSource_attrs metadata (declared attrs) with
+    the live input[] connections (actual wires) so the UI can
+    distinguish three honest states:
+
+    Returns
+    -------
+    str
+        ``"connected"``    -- every declared attr has a matching
+                              live shape.input[base+i] wire from
+                              the recorded driver_node.
+        ``"partial"``      -- metadata declares N attrs but only
+                              k<N have live wires. THIS IS AN
+                              INCONSISTENT STATE (silent-failure
+                              residue or manual user disconnect).
+                              The UI surfaces it as a yellow dot
+                              and the next "Connect" click forces
+                              an atomic re-wire.
+        ``"disconnected"`` -- metadata exists but 0 attrs have
+                              wires, or the source node is missing
+                              / the source has 0 declared attrs.
+    """
+    if not _exists(node):
+        return "disconnected"
+    shape = get_shape(node)
+    if not _exists(shape):
+        return "disconnected"
+    sources = read_driver_info_multi(node)
+    if index < 0 or index >= len(sources):
+        return "disconnected"
+    target = sources[index]
+    if not target.node or not _exists(target.node):
+        return "disconnected"
+    n_attrs = len(target.attrs)
+    if n_attrs == 0:
+        return "disconnected"
+    wired = 0
+    for attr in target.attrs:
+        plug = "{}.{}".format(target.node, attr)
+        if _subscript_of_existing_input(plug, shape) is not None:
+            wired += 1
+    if wired == 0:
+        return "disconnected"
+    if wired == n_attrs:
+        return "connected"
+    return "partial"
+
+
+def read_driver_info(node):
+    """DEPRECATED. Use :func:`read_driver_info_multi` for new code.
+
+    Legacy single-driver wrapper that returns the first driver's
+    (node_name, attrs) tuple. Triggers :class:`DeprecationWarning` on
+    every call. The implementation routes through
+    :func:`read_driver_info_multi`, which auto-migrates legacy nodes.
+
+    Returns
+    -------
+    (str, list[str])
+        ``(driver_node_name, [attr_1, attr_2, ...])``.
+        Returns ``("", [])`` if nothing is connected.
+    """
+    warnings.warn(
+        "read_driver_info is deprecated; use read_driver_info_multi",
+        DeprecationWarning, stacklevel=2)
+    sources = read_driver_info_multi(node)
+    if not sources:
+        return "", []
+    first = sources[0]
+    return first.node, list(first.attrs)
+
+
+# =====================================================================
+#  M_DRIVEN_MULTI -- multi-driven source orchestrator (Item 4c)
+# =====================================================================
+#
+# The driven side has, until now, been single-target: `wire_driven_outputs`
+# wires `shape.output[i]` -> `<driven_node>.<attrs[i]>` for one node.
+# The Tekken 8 paradigm + the user's 2026-04-27 batch (Item 4c) calls for
+# multi-driven (multiple driven nodes, each with their own attribute slice).
+#
+# C++ `output` is a flat `MFnNumericData::kDouble` multi attribute - no
+# schema change is required. We split `output[]` by source: source 0
+# consumes output[0..n0-1], source 1 consumes output[n0..n0+n1-1], etc.
+#
+# Persistence uses a **dynamic compound attribute** added at runtime via
+# `cmds.addAttr` (rather than a C++ schema rebuild). The compound is
+# named `drivenSource` mirroring the M_B24a1 `driverSource` schema.
+# Migration: legacy single-driven nodes auto-migrate on first read into a
+# 1-source list, exactly like `_migrate_legacy_single_driver` does for
+# the driver side.
+
+class DrivenSource(object):
+    """Driven counterpart to :class:`DriverSource`. Frozen-style dataclass
+    that pairs a target node with its ordered attribute list."""
+
+    __slots__ = ("node", "attrs")
+
+    def __init__(self, node, attrs):
+        if not isinstance(node, _STR_TYPES):
+            raise TypeError(
+                "DrivenSource.node must be a str, got {!r}".format(
+                    type(node).__name__))
+        self.node  = node
+        self.attrs = tuple(attrs)
+
+    def __repr__(self):
+        return "DrivenSource(node={!r}, attrs={!r})".format(
+            self.node, list(self.attrs))
+
+    def __eq__(self, other):
+        if not isinstance(other, DrivenSource):
+            return NotImplemented
+        return self.node == other.node and self.attrs == other.attrs
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+
+def _ensure_driven_source_compound(shape):
+    """M_DRIVEN_MULTI: lazily create the `drivenSource` dynamic compound
+    attribute on the shape (parallel to the M_B24a1 driverSource C++
+    schema). Idempotent - skips if the attribute already exists."""
+    if cmds.attributeQuery("drivenSource", node=shape, exists=True):
+        return
+    cmds.addAttr(
+        shape, longName="drivenSource", attributeType="compound",
+        numberOfChildren=2, multi=True)
+    cmds.addAttr(
+        shape, longName="drivenSource_node",
+        attributeType="message", parent="drivenSource")
+    cmds.addAttr(
+        shape, longName="drivenSource_attrs",
+        dataType="stringArray", parent="drivenSource")
+
+
+def read_driven_info_multi(node):
+    """Read every driven source on *node* as a list[DrivenSource].
+
+    Mirrors :func:`read_driver_info_multi` for the driven side. If the
+    `drivenSource` dynamic compound has populated entries, return them;
+    otherwise fall back to the legacy single-driven shape via
+    :func:`read_driven_info` and synthesize a 1-source list.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    sources = []
+    if cmds.attributeQuery("drivenSource", node=shape, exists=True):
+        try:
+            indices = cmds.getAttr(
+                shape + ".drivenSource", multiIndices=True) or []
+        except Exception:
+            indices = []
+        for d in indices:
+            node_plug = "{}.drivenSource[{}].drivenSource_node".format(
+                shape, d)
+            try:
+                srcs = cmds.listConnections(
+                    node_plug, source=True, destination=False) or []
+            except Exception:
+                srcs = []
+            if not srcs:
+                continue
+            attrs_plug = (
+                "{}.drivenSource[{}].drivenSource_attrs".format(shape, d))
+            try:
+                attrs_raw = cmds.getAttr(attrs_plug) or []
+            except Exception:
+                attrs_raw = []
+            try:
+                sources.append(DrivenSource(
+                    node=srcs[0], attrs=tuple(attrs_raw)))
+            except (TypeError, ValueError) as exc:
+                cmds.warning(
+                    "RBFtools: skipping malformed drivenSource[{}] on "
+                    "'{}': {}".format(d, node, exc))
+        if sources:
+            return sources
+    # Legacy / fall-back: synthesize from existing output[] connections.
+    legacy_node, legacy_attrs = read_driven_info(node)
+    if not legacy_node:
+        return []
+    return [DrivenSource(node=legacy_node, attrs=tuple(legacy_attrs))]
+
+
+def _disconnect_all_outputs(shape):
+    u"""M_DRIVEN_MULTI helper \u2014 wholesale disconnect of every
+    ``shape.output[i]`` -> driven plug.
+
+    M_REBUILD_REFACTOR (2026-04-28): Bug A driven mirror \u2014 the
+    legacy bare ``cmds.disconnectAttr`` + ``except: pass`` was
+    bypassing the atomic protocol just like the driver-side
+    ``remove_driver_source``. Now routes through
+    ``_disconnect_or_purge`` (delete unitConv + removeMultiInstance
+    + cmds.warning trace) and follows up with
+    ``_sweep_empty_subscripts`` for any orphan subscripts."""
+    for idx, _bone, other_plug in _resolved_pairs_at(shape, "output"):
+        _disconnect_or_purge(shape, "output", idx, other_plug)
+    _sweep_empty_subscripts(shape, "output")
+
+
+def _wire_driven_sources(shape, sources):
+    """M_DRIVEN_MULTI: wire `shape.output[base..base+n]` to each driven
+    source's attrs in order. Cumulative base offset across all sources."""
+    base = 0
+    for src in sources:
+        if not src.node or not _exists(src.node):
+            base += len(src.attrs)
+            continue
+        for i, attr in enumerate(src.attrs):
+            src_plug = "{}.output[{}]".format(shape, base + i)
+            dst_plug = "{}.{}".format(src.node, attr)
+            try:
+                cmds.connectAttr(src_plug, dst_plug, force=True)
+            except Exception as exc:
+                cmds.warning(
+                    "_wire_driven_sources: {} -> {} failed: {}".format(
+                        src_plug, dst_plug, exc))
+        base += len(src.attrs)
+
+
+def add_driven_source(node, driven_node, driven_attrs):
+    """M_DRIVEN_MULTI (Item 4c): append a new DrivenSource entry on
+    *node*'s `drivenSource` compound + re-wire every driven source's
+    output[] connections so the new source slots in at the end.
+
+    Atomic fail-soft: on any wiring failure the new entry is rolled back
+    via removeMultiInstance (mirroring M_B24d Hardening 1 for the driver
+    side). Returns the index of the new entry.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        raise RuntimeError(
+            "add_driven_source: shape not found for {!r}".format(node))
+    _ensure_driven_source_compound(shape)
+    DrivenSource(node=driven_node, attrs=tuple(driven_attrs))   # validate
+    indices = cmds.getAttr(
+        shape + ".drivenSource", multiIndices=True) or []
+    next_idx = (max(indices) + 1) if indices else 0
+    base_plug = "{}.drivenSource[{}]".format(shape, next_idx)
+    cmds.connectAttr(driven_node + ".message",
+                     base_plug + ".drivenSource_node", force=True)
+    cmds.setAttr(base_plug + ".drivenSource_attrs",
+                 len(driven_attrs), *driven_attrs, type="stringArray")
+    try:
+        _disconnect_all_outputs(shape)
+        _wire_driven_sources(shape, read_driven_info_multi(node))
+    except Exception as exc:
+        try:
+            cmds.removeMultiInstance(base_plug, b=True)
+        except Exception:
+            pass
+        cmds.warning(
+            "add_driven_source: wiring failed for {!r} ({}); "
+            "rolled back metadata. Error: {}".format(
+                driven_node, driven_attrs, exc))
+        raise
+    return next_idx
+
+
+def remove_driven_source(node, index):
+    """M_DRIVEN_MULTI: remove `drivenSource[index]` + re-wire the
+    remaining sources so output[] indices stay contiguous from 0."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    plug = "{}.drivenSource[{}]".format(shape, index)
+    try:
+        existing = cmds.getAttr(
+            shape + ".drivenSource", multiIndices=True) or []
+    except Exception:
+        existing = []
+    if index not in existing:
+        return
+    _disconnect_all_outputs(shape)
+    try:
+        cmds.removeMultiInstance(plug, b=True)
+    except Exception as exc:
+        cmds.warning(
+            "remove_driven_source({}, {}) failed: {}".format(
+                node, index, exc))
+        return
+    _wire_driven_sources(shape, read_driven_info_multi(node))
+
+
+def disconnect_driven_source_attrs(node, index, attrs=None):
+    """M_CONNECT_DISCONNECT_FIX Bug 2 driven mirror of
+    :func:`disconnect_driver_source_attrs`. Same Scene A/B
+    semantics + atomic protocol reuse via
+    :func:`_disconnect_or_purge`."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        cmds.warning(
+            "disconnect_driven_source_attrs: shape not found "
+            "for {!r}".format(node))
+        return False
+    sources = read_driven_info_multi(node)
+    if not sources:
+        cmds.warning(
+            "disconnect_driven_source_attrs: no driven sources "
+            "on {!r}".format(node))
+        return False
+    if index < 0 or index >= len(sources):
+        cmds.warning(
+            "disconnect_driven_source_attrs: index {} out of "
+            "range (0..{})".format(index, len(sources) - 1))
+        return False
+    target = sources[index]
+    existing_attrs = list(target.attrs)
+    if not existing_attrs:
+        return True
+    dvn_node = target.node or ""
+    if not dvn_node:
+        return False
+    if attrs is None:
+        attrs_to_clear = list(existing_attrs)
+        full_clear = True
+    else:
+        requested = list(attrs)
+        attrs_to_clear = [a for a in requested if a in existing_attrs]
+        skipped = [a for a in requested if a not in existing_attrs]
+        if skipped:
+            cmds.warning(
+                "disconnect_driven_source_attrs: attrs {!r} not "
+                "currently bound to drivenSource[{}]; "
+                "skipping".format(skipped, index))
+        full_clear = False
+    # M_CRASH_FIX defense 2 driven mirror.
+    with undo_chunk("RBFtools: disconnect driven source attrs"), \
+         _node_state_frozen(shape):
+        for attr in attrs_to_clear:
+            dst_plug = "{}.{}".format(dvn_node, attr)
+            idx = _subscript_of_existing_output(shape, dst_plug)
+            if idx is None:
+                cmds.warning(
+                    "disconnect_driven_source_attrs: {} reports "
+                    "no shape.output[] subscript; skipping".format(
+                        dst_plug))
+                continue
+            _disconnect_or_purge(shape, "output", idx, dst_plug)
+        if cmds.attributeQuery(
+                "drivenSource", node=shape, exists=True):
+            attrs_plug = (
+                "{}.drivenSource[{}].drivenSource_attrs".format(
+                    shape, index))
+            try:
+                if full_clear:
+                    cmds.setAttr(attrs_plug, 0, type="stringArray")
+                else:
+                    kept = [a for a in existing_attrs
+                            if a not in set(attrs_to_clear)]
+                    if kept:
+                        cmds.setAttr(
+                            attrs_plug, len(kept), *kept,
+                            type="stringArray")
+                    else:
+                        cmds.setAttr(
+                            attrs_plug, 0, type="stringArray")
+            except Exception as exc:
+                cmds.warning(
+                    "disconnect_driven_source_attrs: failed to "
+                    "clear {}: {}".format(attrs_plug, exc))
+                return False
+        _sweep_empty_subscripts(shape, "output")
+    return True
+
+
+def set_driven_source_attrs(node, index, new_attrs):
+    u"""M_DRIVEN_MULTI + M_REBUILD_REFACTOR (2026-04-28) driven
+    mirror of :func:`set_driver_source_attrs` \u2014 incremental diff
+    instead of remove-all + re-add-all."""
+    shape = get_shape(node)
+    sources = read_driven_info_multi(node)
+    if not sources:
+        cmds.warning(
+            "set_driven_source_attrs: no driven sources on {!r}".format(
+                node))
+        return False
+    if index < 0 or index >= len(sources):
+        cmds.warning(
+            "set_driven_source_attrs: index {} out of range "
+            "(0..{})".format(index, len(sources) - 1))
+        return False
+    target = sources[index]
+    dvn_node = target.node
+    existing_attrs = list(target.attrs)
+    new_attrs_list = list(new_attrs)
+    if existing_attrs == new_attrs_list:
+        return True
+    removed = [a for a in existing_attrs if a not in new_attrs_list]
+    added = [a for a in new_attrs_list if a not in existing_attrs]
+    base = sum(len(s.attrs) for s in sources[:index])
+    with undo_chunk("RBFtools: set driven source attrs"), \
+         _node_state_frozen(shape):
+        # 1) Disconnect every wire of source[index..end].
+        for i in range(index, len(sources)):
+            s = sources[i]
+            if not s.node:
+                continue
+            for attr in s.attrs:
+                plug = "{}.{}".format(s.node, attr)
+                sub_idx = _subscript_of_existing_output(shape, plug)
+                if sub_idx is not None:
+                    _disconnect_or_purge(
+                        shape, "output", sub_idx, plug)
+        # 2) Reconnect source[index] with new_attrs at base.
+        if dvn_node and _exists(dvn_node):
+            for i, attr in enumerate(new_attrs_list):
+                if not cmds.attributeQuery(
+                        attr, node=dvn_node, exists=True):
+                    cmds.warning(
+                        "set_driven_source_attrs: {}.{} does not "
+                        "exist; skipping".format(dvn_node, attr))
+                    continue
+                src_plug = "{}.output[{}]".format(shape, base + i)
+                dst_plug = "{}.{}".format(dvn_node, attr)
+                try:
+                    cmds.connectAttr(
+                        src_plug, dst_plug, force=True)
+                except Exception as exc:
+                    cmds.warning(
+                        "set_driven_source_attrs: {} -> {} "
+                        "failed: {}".format(
+                            src_plug, dst_plug, exc))
+        # 3) Update drivenSource_attrs metadata.
+        if cmds.attributeQuery(
+                "drivenSource", node=shape, exists=True):
+            attrs_plug = (
+                "{}.drivenSource[{}].drivenSource_attrs".format(
+                    shape, index))
+            try:
+                if new_attrs_list:
+                    cmds.setAttr(
+                        attrs_plug, len(new_attrs_list),
+                        *new_attrs_list, type="stringArray")
+                else:
+                    cmds.setAttr(
+                        attrs_plug, 0, type="stringArray")
+            except Exception as exc:
+                cmds.warning(
+                    "set_driven_source_attrs: failed to update "
+                    "{}: {}".format(attrs_plug, exc))
+                return False
+        # 4) Re-wire source[i>index] at the shifted base.
+        next_base = base + len(new_attrs_list)
+        for i in range(index + 1, len(sources)):
+            s = sources[i]
+            if not s.node or not _exists(s.node):
+                next_base += len(s.attrs)
+                continue
+            for j, attr in enumerate(s.attrs):
+                if not cmds.attributeQuery(
+                        attr, node=s.node, exists=True):
+                    continue
+                src_plug = "{}.output[{}]".format(
+                    shape, next_base + j)
+                dst_plug = "{}.{}".format(s.node, attr)
+                try:
+                    cmds.connectAttr(
+                        src_plug, dst_plug, force=True)
+                except Exception as exc:
+                    cmds.warning(
+                        "set_driven_source_attrs: shift {} -> {} "
+                        "failed: {}".format(
+                            src_plug, dst_plug, exc))
+            next_base += len(s.attrs)
+        # 5) M_SWEEP_EMPTY chaser.
+        _sweep_empty_subscripts(shape, "output")
+    if removed or added:
+        cmds.warning(
+            "set_driven_source_attrs (incremental diff): "
+            "removed {!r}, added {!r}, final={!r}".format(
+                removed, added, new_attrs_list))
+    return True
+
+
+def read_driven_info(node):
+    u"""Discover which node and attributes are driven by the *output[]* array.
+
+    Symmetric counterpart to :func:`read_driver_info`.
+
+    Connection topology::
+
+        RBFtoolsShape.output[0]  \u2192  blendShape1.brow_up
+        RBFtoolsShape.output[1]  \u2192  blendShape1.brow_down
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return "", []
+
+    conns = cmds.listConnections(
+        shape + ".output",
+        source=False, destination=True,
+        plugs=True, connections=True,
+        skipConversionNodes=True,
+    ) or []
+
+    driven = ""
+    attrs = []
+    for i in range(0, len(conns), 2):
+        dst_plug = conns[i + 1]
+        parts = dst_plug.split(".")
+        if not driven:
+            driven = parts[0]
+        if len(parts) > 1:
+            attrs.append(parts[1])
+
+    return driven, attrs
+
+
+# =====================================================================
+#  6. Node CRUD
+# =====================================================================
+
+def create_node():
+    """Create a new ``RBFtools`` shape and return its **transform** name.
+
+    Preserves the user's current selection (createNode side-effect).
+
+    M_QUICKWINS (Item 3, 2026-04-27): the C++ schema default for
+    `.type` is 0 (Vector-Angle); in the v5 era multi-source workflow
+    the RBF mode is the expected default - new nodes are created
+    with `type = 1` so the GeneralSection defaults to RBF without
+    the TD having to switch the combo every time.
+    """
+    ensure_plugin()
+    with undo_chunk("RBFtools: create node"):
+        sel = cmds.ls(selection=True) or []
+        shape = cmds.createNode(NODE_TYPE)
+        transform = get_transform(shape)
+        transform = cmds.rename(transform, "RBFnode#")
+        # M_QUICKWINS Item 3: default to RBF mode (type=1). Wrapped
+        # in try/except so a future schema rename never blocks node
+        # creation - the existing GeneralSection combo can correct
+        # the value if the setAttr fails.
+        try:
+            cmds.setAttr(get_shape(transform) + ".type", 1)
+        except Exception as exc:
+            cmds.warning(
+                "create_node: defaulting .type to RBF failed: {} "
+                "(node still created)".format(exc))
+        # M_P0_CREATE_NODE_REGULARIZATION (2026-05-10): override C++
+        # schema default 1e-8 with a more rigging-friendly 1e-4.
+        #
+        # Background: C++ default 1e-8 (cpp:532) follows Chad Vernon's
+        # reference solver, which targets sparse, well-distributed
+        # pose sets. Production rigging workflows (face / muscle /
+        # corrective) routinely have HIGHLY redundant pose sets where
+        # multiple poses share identical (or near-identical) driver
+        # blocks for several drivers. Under 1e-8, the K matrix becomes
+        # numerically singular -> both Cholesky probe and GE fallback
+        # fail -> "RBF decomposition failed" -> driver does not drive
+        # driven, with no obvious fix path for the TD.
+        #
+        # 1e-4 is the threshold empirically validated against the
+        # quaternion-encoded N=3 driver shoulder rig that triggered
+        # this fix: it tolerates the per-block quat distance
+        # collapsing toward zero without visibly biasing the solved
+        # weights for well-distributed pose sets. Users who need
+        # tighter regularization (e.g. 1e-8 / 0) can override via
+        # the UI spinbox or `set_attribute("regularization", x)`.
+        try:
+            cmds.setAttr(get_shape(transform) + ".regularization", 1.0e-8)
+        except Exception as exc:
+            cmds.warning(
+                "create_node: setting regularization=1e-3 default "
+                u"failed: {} (using C++ schema default 1e-8 \u2014 be "
+                "aware the K matrix may be ill-conditioned for "
+                "redundant pose sets)".format(exc))
+        # M_BLOCKING_DEFAULT (2026-04-29): force shape.nodeState=2
+        # (Blocking) on creation so the freshly-wired driven node
+        # is NOT immediately driven by an untrained RBF compute()
+        # -- without this, connecting driver/driven attrs before
+        # registering a single pose would let the solver write
+        # garbage initial values into the driven channels.
+        # AnimaRbfSolver reference behavior: out-of-the-box
+        # nodeState=2; first pose Apply flips it to 0 (Normal)
+        # via apply_poses below. cmds.warning surfaces the
+        # informational notice once per creation.
+        try:
+            cmds.setAttr(get_shape(transform) + ".nodeState", 2)
+            cmds.warning(
+                "RBFtools: new node created with nodeState=2 "
+                "(Blocking). Driven outputs are inactive until "
+                "the first pose is registered + Apply is "
+                "clicked, at which point the node auto-flips "
+                "to nodeState=0 (Normal).")
+        except Exception as exc:
+            cmds.warning(
+                "create_node: failed to set nodeState=2 "
+                u"(Blocking): {} (node still created \u2014 TD must "
+                "set Blocking manually until first Apply)".format(
+                    exc))
+        if sel:
+            cmds.select(sel, replace=True)
+    return transform
+
+
+def delete_node(node):
+    """Delete the transform (and its child shapes) for *node*.
+
+    No-op if *node* does not exist.
+    """
+    if not _exists(node):
+        return
+    with undo_chunk("RBFtools: delete node"):
+        cmds.delete(node)
+
+
+def clear_node_data(node):
+    """Remove all multi-instance data (``input``, ``poses``, ``output``)
+    from the shape under *node*.
+
+    This resets the solver to a blank state without destroying the node,
+    allowing in-place re-application of new pose data.
+
+    Returns
+    -------
+    str
+        The transform name (for call-chaining).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return get_transform(node)
+
+    with undo_chunk("RBFtools: clear node data"):
+        for attr in ("input", "poses", "output", "baseValue", "outputIsScale"):
+            try:
+                indices = cmds.getAttr(
+                    "{}.{}".format(shape, attr), multiIndices=True) or []
+            except Exception:
+                indices = []
+            for idx in indices:
+                try:
+                    cmds.removeMultiInstance(
+                        "{}.{}[{}]".format(shape, attr, idx), b=True)
+                except Exception as exc:
+                    cmds.warning("clear_node_data: removeMultiInstance "
+                                 "{}.{}[{}] failed: {}".format(
+                                     shape, attr, idx, exc))
+
+    return get_transform(shape)
+
+
+def _clear_poses_only(node):
+    """M_P0_DRIVER_CONNECT_UX_REVAMP Part F.2 (2026-05-12) -- clear
+    pose-related multi-instance data **only**.
+
+    Preserves ``shape.input[]`` and ``shape.output[]`` connections so
+    the user's multi-driver wiring stays alive across Apply. Clears
+    only the pose-specific multi attrs that Apply rewrites:
+
+        shape.poses[]          -- pose input/value samples
+        shape.baseValue[]      -- per-output baseline
+        shape.outputIsScale[]  -- per-output scale flag
+
+    Split out from :func:`clear_node_data` so the multi-driver Apply
+    path (:func:`apply_poses_routed`) doesn't destroy the user's
+    ``add_driver_source`` / ``set_driver_source_attrs`` wiring.
+
+    Returns
+    -------
+    str
+        The transform name (for call-chaining).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return get_transform(node)
+
+    with undo_chunk("RBFtools: clear poses only"):
+        for attr in ("poses", "baseValue", "outputIsScale"):
+            try:
+                indices = cmds.getAttr(
+                    "{}.{}".format(shape, attr), multiIndices=True) or []
+            except Exception:
+                indices = []
+            for idx in indices:
+                try:
+                    cmds.removeMultiInstance(
+                        "{}.{}[{}]".format(shape, attr, idx), b=True)
+                except Exception as exc:
+                    cmds.warning(
+                        "_clear_poses_only: removeMultiInstance "
+                        "{}.{}[{}] failed: {}".format(
+                            shape, attr, idx, exc))
+
+    return get_transform(shape)
+
+
+# =====================================================================
+#  7. RBF builder -- wiring & evaluation
+# =====================================================================
+
+def wire_driver_inputs(node, driver_node, driver_attrs):
+    u"""Connect driver attributes into the solver's ``input[]`` array.
+
+    Creates the connections::
+
+        driver_node.attr_0  \u2192  shape.input[0]
+        driver_node.attr_1  \u2192  shape.input[1]
+        ...
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of the ``RBFtools``.
+    driver_node : str
+        The upstream scene object (e.g. ``"pSphere1"``).
+    driver_attrs : list[str]
+        Ordered attribute names to wire (e.g. ``["tx", "ty", "tz"]``).
+    """
+    shape = get_shape(node)
+    if not _exists(shape) or not _exists(driver_node):
+        return
+    for i, attr in enumerate(driver_attrs):
+        src = "{}.{}".format(driver_node, attr)
+        dst = "{}.input[{}]".format(shape, i)
+        try:
+            cmds.connectAttr(src, dst, force=True)
+        except Exception as exc:
+            cmds.warning(u"wire_driver_inputs: {} \u2192 {} failed: {}".format(
+                src, dst, exc))
+
+
+def wire_driven_outputs(node, driven_node, driven_attrs):
+    u"""Connect the solver's ``output[]`` array to the driven attributes.
+
+    Creates the connections::
+
+        shape.output[0]  \u2192  driven_node.attr_0
+        shape.output[1]  \u2192  driven_node.attr_1
+        ...
+    """
+    shape = get_shape(node)
+    if not _exists(shape) or not _exists(driven_node):
+        return
+    for i, attr in enumerate(driven_attrs):
+        src = "{}.output[{}]".format(shape, i)
+        dst = "{}.{}".format(driven_node, attr)
+        try:
+            cmds.connectAttr(src, dst, force=True)
+        except Exception as exc:
+            cmds.warning(u"wire_driven_outputs: {} \u2192 {} failed: {}".format(
+                src, dst, exc))
+
+
+def disconnect_outputs(node):
+    u"""Disconnect ALL connections between the RBF solver and external nodes.
+
+    Handles intermediate ``unitConversion`` nodes that Maya inserts
+    automatically for rotation attributes \u2014 these are disconnected
+    and deleted to leave a clean graph.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of the ``RBFtools`` node.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+
+    with undo_chunk("RBFtools: disconnect all"):
+        orphan_nodes = set()
+
+        # --- 1) Disconnect output[] -> driven (with unitConversion cleanup) ---
+        out_conns = cmds.listConnections(
+            shape + ".output", source=False, destination=True,
+            connections=True, plugs=True) or []
+        for i in range(0, len(out_conns), 2):
+            src_plug = out_conns[i]
+            dst_plug = out_conns[i + 1]
+
+            try:
+                cmds.disconnectAttr(src_plug, dst_plug)
+            except Exception:
+                pass
+
+            # If dst is a unitConversion, disconnect its outputs too
+            dst_node = dst_plug.split(".")[0]
+            if cmds.objExists(dst_node) and cmds.nodeType(dst_node) == "unitConversion":
+                _disconnect_and_collect_unit_conversion(dst_node, orphan_nodes)
+
+        # --- 2) Disconnect driver -> input[] ---
+        in_conns = cmds.listConnections(
+            shape + ".input", source=True, destination=False,
+            connections=True, plugs=True) or []
+        for i in range(0, len(in_conns), 2):
+            shape_plug = in_conns[i]
+            source_plug = in_conns[i + 1]
+
+            # If source is a unitConversion, disconnect it first
+            src_node = source_plug.split(".")[0]
+            if cmds.objExists(src_node) and cmds.nodeType(src_node) == "unitConversion":
+                _disconnect_and_collect_unit_conversion(src_node, orphan_nodes)
+
+            try:
+                cmds.disconnectAttr(source_plug, shape_plug)
+            except Exception:
+                pass
+
+        # --- 3) Fallback: scan ALL shape connections ---
+        all_conns = cmds.listConnections(
+            shape, connections=True, plugs=True) or []
+        for i in range(0, len(all_conns), 2):
+            shape_plug = all_conns[i]
+            other_plug = all_conns[i + 1]
+            plug_attr = shape_plug.split(".")[-1] if "." in shape_plug else ""
+            if not (plug_attr.startswith("output") or plug_attr.startswith("input")):
+                continue
+            is_src = cmds.connectionInfo(shape_plug, isSource=True)
+            try:
+                if is_src:
+                    cmds.disconnectAttr(shape_plug, other_plug)
+                else:
+                    cmds.disconnectAttr(other_plug, shape_plug)
+            except Exception:
+                pass
+
+        # --- 4) Delete orphaned unitConversion nodes ---
+        for uc_node in orphan_nodes:
+            if cmds.objExists(uc_node):
+                remaining = cmds.listConnections(uc_node) or []
+                if not remaining:
+                    try:
+                        cmds.delete(uc_node)
+                    except Exception:
+                        pass
+
+
+def _disconnect_and_collect_unit_conversion(uc_node, orphan_set):
+    """Disconnect all connections on a unitConversion node and mark for deletion.
+
+    Parameters
+    ----------
+    uc_node : str
+        The unitConversion node name.
+    orphan_set : set
+        Collects node names to be deleted later.
+    """
+    # Disconnect its outputs (unitConversion.output -> driven.attr)
+    uc_out = cmds.listConnections(
+        uc_node + ".output", source=False, destination=True,
+        connections=True, plugs=True) or []
+    for j in range(0, len(uc_out), 2):
+        try:
+            cmds.disconnectAttr(uc_out[j], uc_out[j + 1])
+        except Exception:
+            pass
+
+    # Disconnect its inputs (source -> unitConversion.input)
+    uc_in = cmds.listConnections(
+        uc_node + ".input", source=True, destination=False,
+        connections=True, plugs=True) or []
+    for j in range(0, len(uc_in), 2):
+        try:
+            cmds.disconnectAttr(uc_in[j + 1], uc_in[j])
+        except Exception:
+            pass
+
+    orphan_set.add(uc_node)
+
+
+def trigger_evaluation(node):
+    u"""Force the solver to recompute by toggling the ``evaluate`` plug.
+
+    The C++ node watches ``evaluate`` transitions::
+
+        evaluate = 0  \u2192  1   # triggers a full solve
+        evaluate = 1  \u2192  0   # resets the flag
+
+    A ``cmds.refresh()`` between each step ensures the DG propagates
+    the new value before the next ``setAttr``.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    cmds.setAttr(shape + ".evaluate", 1)
+    cmds.refresh()
+    cmds.setAttr(shape + ".evaluate", 0)
+    cmds.refresh()
+
+
+def update_evaluation(node):
+    u"""Alias for :func:`trigger_evaluation` \u2014 matches legacy MEL naming."""
+    trigger_evaluation(node)
+
+
+def compute_radius(node):
+    r"""Compute and lock the radius value based on the current ``radiusType``.
+
+    The radius feeds into the RBF kernel as a normalisation factor.
+    Depending on the ``radiusType`` enum, it is derived from the
+    solver's internal statistics:
+
+    +---------+---------------------+--------------------------------------------+
+    | Index   | radiusType          | Formula                                    |
+    +=========+=====================+============================================+
+    | 0       | Mean Distance       | :math:`r = \bar{d}`                        |
+    +---------+---------------------+--------------------------------------------+
+    | 1       | Variance            | :math:`r = \sigma^{2}`                     |
+    +---------+---------------------+--------------------------------------------+
+    | 2       | Standard Deviation  | :math:`r = \sqrt{\sigma^{2}}`              |
+    +---------+---------------------+--------------------------------------------+
+    | 3       | Custom              | User-editable, no automatic computation.   |
+    +---------+---------------------+--------------------------------------------+
+
+    Where :math:`\bar{d}` = ``meanDistance`` attribute and
+    :math:`\sigma^{2}` = ``variance`` attribute, both computed
+    internally by the C++ solver.
+
+    The radius plug is **locked** for types 0-2 to prevent accidental
+    manual edits, and **unlocked** for type 3 (Custom).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+
+    with undo_chunk("RBFtools: compute radius"):
+        # Unlock first so we can write
+        cmds.setAttr(shape + ".radius", lock=False)
+
+        rtype = safe_get(shape + ".radiusType", 0)
+
+        if rtype == 0:
+            # r = meanDistance
+            val = safe_get(shape + ".meanDistance", 0.0)
+            cmds.setAttr(shape + ".radius", val)
+            cmds.setAttr(shape + ".radius", lock=True)
+        elif rtype == 1:
+            # r = variance  (sigma^2)
+            val = safe_get(shape + ".variance", 0.0)
+            cmds.setAttr(shape + ".radius", val)
+            cmds.setAttr(shape + ".radius", lock=True)
+        elif rtype == 2:
+            # r = sqrtvariance  (sigma)
+            var = safe_get(shape + ".variance", 0.0)
+            cmds.setAttr(shape + ".radius", math.sqrt(max(var, 0.0)))
+            cmds.setAttr(shape + ".radius", lock=True)
+        # type 3 = Custom -> leave unlocked, user edits directly
+
+    trigger_evaluation(node)
+
+
+def lock_radius_type(node):
+    """Lock or unlock the ``radiusType`` based on the active kernel.
+
+    When ``kernel == 0`` (Linear), the radius concept does not apply
+    to the solver, so ``radiusType`` is locked to prevent confusion.
+    For all other kernels (Gaussian, Thin Plate, etc.) it is unlocked.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+
+    with undo_chunk("RBFtools: lock radius type"):
+        is_linear_kernel = (safe_get(shape + ".kernel", 1) == 0)
+        cmds.setAttr(shape + ".radiusType", lock=is_linear_kernel)
+
+    trigger_evaluation(node)
+
+
+def read_current_values(node, attrs):
+    """Read the current scene values for a list of attributes.
+
+    Used to capture a "snapshot" of the driver / driven state when
+    the user clicks *Add Pose*.
+
+    Parameters
+    ----------
+    node : str
+        The scene object.
+    attrs : list[str]
+        Attribute short names.
+
+    Returns
+    -------
+    list[float]
+        One value per attribute, defaulting to 0.0 on failure.
+    """
+    if not _exists(node):
+        return [0.0] * len(attrs)
+    return [safe_get("{}.{}".format(node, a), 0.0) for a in attrs]
+
+
+# =====================================================================
+#  Phase 2b -- Pose data structure & management
+# =====================================================================
+# =====================================================================
+#  8. Floating-point tolerance
+# =====================================================================
+
+# Default absolute tolerance for comparing Maya attribute values.
+# Maya's internal double precision stores ~15 significant digits,
+# but roundtrip through getAttr/setAttr introduces noise in the
+# last 5-6 digits.  1e-6 provides a comfortable safety margin.
+FLOAT_ABS_TOL = 1e-6
+
+
+def float_eq(a, b, abs_tol=FLOAT_ABS_TOL):
+    """Tolerance-based floating-point equality.
+
+    **Never use** ``a == b`` for Maya attribute values.
+
+    Uses :func:`math.isclose` with *abs_tol* only (no relative
+    tolerance) because RBF pose values can legitimately be zero,
+    and a relative comparison to zero is meaningless.
+
+    Parameters
+    ----------
+    a, b : float
+        Values to compare.
+    abs_tol : float
+        Absolute tolerance.  Default :data:`FLOAT_ABS_TOL` = 1e-6.
+
+    Examples
+    --------
+    >>> float_eq(0.0, 1e-8)
+    True
+    >>> float_eq(1.0, 1.0 + 1e-4)
+    False
+    """
+    return math.isclose(a, b, abs_tol=abs_tol, rel_tol=0.0)
+
+
+def vector_eq(vec_a, vec_b, abs_tol=FLOAT_ABS_TOL):
+    """Element-wise :func:`float_eq` for two equal-length float lists.
+
+    Returns ``False`` immediately if lengths differ (short-circuit).
+    """
+    if len(vec_a) != len(vec_b):
+        return False
+    return all(float_eq(a, b, abs_tol) for a, b in zip(vec_a, vec_b))
+
+
+# =====================================================================
+#  9. PoseData -- typed transport object
+# =====================================================================
+
+class PoseData(object):
+    u"""Typed transport object representing one RBF pose.
+
+    Using ``__slots__`` for memory efficiency and attribute-access safety
+    (prevents accidental typo-based attribute creation).
+
+    Attributes
+    ----------
+    index : int
+        Pose index in the ``poses[]`` multi-instance array.
+    inputs : list[float]
+        Driver attribute snapshot (one value per ``input[i]``).
+    values : list[float]
+        Driven attribute snapshot (one value per ``output[i]``).
+    radius : float
+        Commit 1 (M_PER_POSE_SIGMA): per-pose RBF kernel \u03c3. Default
+        ``DEFAULT_POSE_RADIUS`` (5.0) for newly-created poses; legacy
+        nodes (no ``poseRadius[]`` plug populated) round-trip through
+        the same default. Constructors taking only ``(index, inputs,
+        values)`` remain valid \u2014 radius is keyword-only with default.
+    parent_index : int
+        M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): -1
+        (default) = this is a *base* pose; >= 0 = this is a *delta*
+        pose layered on the base pose at that logical index. Persisted
+        to ``poses[p].poseParentIndex`` (a child of the poses[]
+        compound, not a parallel top-level multi).
+    driver_mask : list[int]
+        Subset of flat-driver-vector indices this pose responds to.
+        Empty list (default) = all drivers (backward compat with
+        Phase 15). Persisted to ``poses[p].poseDriverMask``.
+
+    Design note
+    -----------
+    This is a **transport object** \u2014 it carries data between core
+    functions and the UI layer.  It is intentionally not a ``dict``
+    so that misspelled keys become immediate ``AttributeError`` s
+    rather than silent ``KeyError`` / ``None`` bugs.
+    """
+
+    __slots__ = ("index", "inputs", "values", "radius",
+                 "parent_index", "driver_mask")
+
+    def __init__(self, index, inputs, values, radius=None,
+                 parent_index=-1, driver_mask=None):
+        self.index  = int(index)
+        self.inputs = list(inputs)
+        self.values = list(values)
+        # Commit 1: positional-compat -- None => DEFAULT_POSE_RADIUS so
+        # all 6 historical PoseData(idx, in, val) callsites keep working.
+        self.radius = (DEFAULT_POSE_RADIUS
+                       if radius is None
+                       else float(radius))
+        # M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR: hierarchy fields are
+        # keyword-only with backward-compatible defaults (-1 / []), so
+        # every legacy PoseData(idx, in, val[, radius]) callsite keeps
+        # producing a plain base pose with no driver subset.
+        self.parent_index = int(parent_index)
+        self.driver_mask = ([] if not driver_mask
+                            else [int(x) for x in driver_mask])
+
+    def __repr__(self):
+        return ("PoseData(index={}, inputs={}, values={}, "
+                "radius={}, parent_index={}, driver_mask={})").format(
+                    self.index, self.inputs, self.values, self.radius,
+                    self.parent_index, self.driver_mask)
+
+    def __eq__(self, other):
+        """Tolerance-based equality (see :func:`float_eq`).
+
+        Commit 1: radius participates in equality but uses
+        :func:`float_eq` so legacy poses (radius == DEFAULT) compare
+        bit-equal to JSON-deserialised ones. SUBATTR_REFACTOR: the
+        hierarchy fields use exact int / list equality (they are
+        discrete indices, not floats); two legacy poses both default
+        to (-1, []) so they still compare equal."""
+        if not isinstance(other, PoseData):
+            return NotImplemented
+        return (self.index == other.index
+                and vector_eq(self.inputs, other.inputs)
+                and vector_eq(self.values, other.values)
+                and float_eq(self.radius, other.radius)
+                and self.parent_index == other.parent_index
+                and list(self.driver_mask) == list(other.driver_mask))
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+
+# =====================================================================
+#  10. Pose CRUD -- reading from the RBFtools node
+# =====================================================================
+
+def _multi_indices(shape, attr):
+    u"""Return the existing multi-instance indices for *attr*, or ``[]``.
+
+    Maya's multi-instance arrays can be **sparse** \u2014 e.g. indices
+    ``[0, 2, 5]`` with gaps.  Always iterate over the actual index
+    list, never assume contiguous ``range(n)``.
+
+    Parameters
+    ----------
+    shape : str
+        The ``RBFtools`` shape node.
+    attr : str
+        Top-level multi attr name (``"poses"``, ``"input"``, ``"output"``).
+    """
+    try:
+        return cmds.getAttr("{}.{}".format(shape, attr),
+                            multiIndices=True) or []
+    except Exception:
+        return []
+
+
+def read_all_poses(node):
+    u"""Read every pose stored on the ``RBFtools`` node.
+
+    Each pose lives in the multi-instance compound::
+
+        shape.poses[p].poseInput[i]   \u2014 driver snapshot values
+        shape.poses[p].poseValue[i]   \u2014 driven snapshot values
+
+    The input/output **sizes** (number of driver / driven attrs)
+    are inferred from the ``input`` and ``output`` multi-attr sizes,
+    which reflect how many driver/driven attributes are wired.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape name.
+
+    Returns
+    -------
+    list[PoseData]
+        Ordered by pose index.  Empty list if the node has no poses
+        or is not in RBF mode.
+
+    Sparse-array safety
+    -------------------
+    ``multiIndices=True`` returns only *existing* indices \u2014 we never
+    assume contiguous ``range(n)``.  Each ``poseInput[i]`` read is
+    individually guarded by :func:`safe_get`.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+
+    # Only meaningful in RBF mode (type == 1)
+    if safe_get(shape + ".type", 0) != 1:
+        return []
+
+    # Determine dimensionality from the wired input/output arrays
+    try:
+        n_inputs = cmds.getAttr(shape + ".input", size=True)
+    except Exception:
+        n_inputs = 0
+    try:
+        n_outputs = cmds.getAttr(shape + ".output", size=True)
+    except Exception:
+        n_outputs = 0
+
+    # M_P0_POSE_GRID_DEEP_FIX (2026-04-30): fallback to multi-source
+    # metadata when wiring arrays are absent. shape.output[] is only
+    # populated when the user clicks Connect -- an "Applied but not
+    # Connected" node has shape.poses[] populated AND the pose data
+    # is structurally sound, but ``cmds.getAttr(shape+".output",
+    # size=True)`` returns 0. The pre-fix early-return rejected
+    # such nodes as "no poses" and was the core read-side mechanism
+    # behind the user's "?? RBF ?? pose ??????" report
+    # (compounding 41f3e47 + 5799958 fixes which only addressed
+    # the view-timing and controller-data-shape legs).
+    #
+    # driverSource[] / drivenSource[] metadata always carries the
+    # intended attr count regardless of wiring state -- read its
+    # flat-concat length as the reliable n_inputs / n_outputs when
+    # the input / output multi sizes are zero. Symmetric on both
+    # sides: an Applied-only node has populated driverSource[] but
+    # may have unwired output; a Connected-but-not-Applied node is
+    # the legitimate empty case.
+    if n_inputs == 0:
+        try:
+            drv_sources = read_driver_info_multi(node)
+            n_inputs = sum(len(s.attrs) for s in drv_sources)
+        except Exception:
+            n_inputs = 0
+    if n_outputs == 0:
+        try:
+            dvn_sources = read_driven_info_multi(node)
+            n_outputs = sum(len(s.attrs) for s in dvn_sources)
+        except Exception:
+            n_outputs = 0
+
+    if n_inputs == 0 or n_outputs == 0:
+        # True empty node -- neither wiring nor metadata exists.
+        # Legitimate "node created but never configured" case.
+        return []
+
+    pose_indices = _multi_indices(shape, "poses")
+
+    # If pose[0] is missing, synthesise a virtual zero-valued rest pose
+    # in the returned list WITHOUT writing to the scene.
+    prepend_rest = (pose_indices and pose_indices[0] != 0)
+
+    poses = []
+    if prepend_rest:
+        # Commit 1: synthetic rest pose uses default sigma; never written
+        # back to scene unless the user explicitly creates pose 0.
+        poses.append(PoseData(0,
+                              [0.0] * n_inputs,
+                              [0.0] * n_outputs,
+                              radius=DEFAULT_POSE_RADIUS))
+
+    for pid in pose_indices:
+        inputs = [
+            safe_get("{}.poses[{}].poseInput[{}]".format(shape, pid, i), 0.0)
+            for i in range(n_inputs)
+        ]
+        values = [
+            safe_get("{}.poses[{}].poseValue[{}]".format(shape, pid, i), 0.0)
+            for i in range(n_outputs)
+        ]
+        # Commit 1 (M_PER_POSE_SIGMA): per-pose sigma lives at the
+        # top-level multi attr ``shape.poseRadius[pid]`` (parallel
+        # array, NOT a child of poses[]). Legacy v5-pre-M_PERPOSE
+        # nodes have no slot at this index -- safe_get returns the
+        # fallback (DEFAULT_POSE_RADIUS) so old scenes round-trip
+        # unchanged.
+        radius = safe_get("{}.poseRadius[{}]".format(shape, pid),
+                          DEFAULT_POSE_RADIUS)
+        if not radius or radius <= 0.0:
+            radius = DEFAULT_POSE_RADIUS
+        # M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): read the
+        # per-pose hierarchy sub-attributes from the poses[] compound.
+        # Legacy nodes (no sub-attr at this element) fall back to the
+        # base-pose / all-drivers default via the guards below, so old
+        # scenes round-trip unchanged. This read-back is the missing
+        # half of the round-trip the user reported broken: the writer
+        # set poses[p].poseParentIndex but read_all_poses never read it
+        # back into PoseData, so the UI always showed -1 after reload.
+        parent_index = int(safe_get(
+            "{}.poses[{}].poseParentIndex".format(shape, pid), -1))
+        driver_mask = _read_pose_driver_mask(shape, pid)
+        poses.append(PoseData(pid, inputs, values, radius=radius,
+                              parent_index=parent_index,
+                              driver_mask=driver_mask))
+
+    return poses
+
+
+def _read_pose_driver_mask(shape, pid):
+    """Read ``shape.poses[pid].poseDriverMask`` as a flat list[int].
+
+    The plug is a kIntArray child of poses[]; ``cmds.getAttr`` returns
+    it either flat (``[0, 2]``) or singly-nested (``[[0, 2]]``)
+    depending on Maya version. Empty / missing / legacy nodes yield
+    ``[]`` (= all drivers, backward compat)."""
+    try:
+        raw = cmds.getAttr(
+            "{}.poses[{}].poseDriverMask".format(shape, pid))
+    except Exception:
+        return []
+    if not raw:
+        return []
+    if isinstance(raw[0], (list, tuple)):
+        return [int(x) for x in raw[0]]
+    return [int(x) for x in raw]
+
+
+# =====================================================================
+#  10b. Base pose values -- Commit 1 (M_BASE_POSE)
+# =====================================================================
+
+
+def read_base_pose_values(node):
+    """Read ``shape.basePoseValue[]`` as a flat list[float].
+
+    Commit 1 (M_BASE_POSE): per-output additive baseline applied at
+    plugin ``setOutputValues`` time. Empty plug / legacy node returns
+    ``[]``; the plugin treats absent indices as 0.0 (bit-identical to
+    pre-M_BASE_POSE behaviour).
+
+    Sparse-array safety: ``multiIndices=True`` skips holes. Returned
+    list is **dense**, indexed by output channel; missing indices are
+    filled with 0.0 up to ``output[]`` size. Returns ``[]`` when the
+    plug has never been written so callers can distinguish "no
+    baseline configured" from "all-zero baseline".
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        n_outputs = cmds.getAttr(shape + ".output", size=True)
+    except Exception:
+        n_outputs = 0
+    indices = _multi_indices(shape, "basePoseValue")
+    if not indices:
+        return []
+    result = [0.0] * max(n_outputs, max(indices) + 1)
+    for idx in indices:
+        result[idx] = safe_get(
+            "{}.basePoseValue[{}]".format(shape, idx), 0.0)
+    return result
+
+
+def write_base_pose_values(node, values):
+    u"""Write ``shape.basePoseValue[i] = values[i]`` for each i.
+
+    Commit 1 (M_BASE_POSE): does NOT clear higher indices; callers
+    that shrink the baseline must pass a full-length list and rely on
+    the plugin's sparse-array semantics for trailing absent indices
+    (which evaluate to 0.0 \u2014 same as pre-M_BASE_POSE behaviour).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    with undo_chunk("RBFtools: write basePoseValue"):
+        for i, v in enumerate(values or []):
+            try:
+                cmds.setAttr(
+                    "{}.basePoseValue[{}]".format(shape, i), float(v))
+            except Exception as exc:
+                cmds.warning(
+                    "write_base_pose_values: index {} failed: {}".format(
+                        i, exc))
+
+
+# =====================================================================
+#  11. Pose CRUD -- writing to the RBFtools node
+# =====================================================================
+
+def _write_pose_to_node(shape, sequential_idx, pose):
+    u"""Write one :class:`PoseData` into ``shape.poses[sequential_idx]``.
+
+    Parameters
+    ----------
+    shape : str
+        The ``RBFtools`` shape node.
+    sequential_idx : int
+        **Contiguous** array slot on the node (0, 1, 2, \u2026).
+        This is distinct from ``pose.index`` which is the UI-facing
+        identifier.  The node stores poses in a packed array; the UI
+        may use arbitrary indices (e.g. after deletions).
+    pose : PoseData
+        Source data.
+
+    Multi-instance attribute layout::
+
+        poses[p].poseInput[0]  =  driver_attr_0_value
+        poses[p].poseInput[1]  =  driver_attr_1_value
+        ...
+        poses[p].poseValue[0]  =  driven_attr_0_value
+        poses[p].poseValue[1]  =  driven_attr_1_value
+    """
+    for i, v in enumerate(pose.inputs):
+        try:
+            cmds.setAttr(
+                "{}.poses[{}].poseInput[{}]".format(shape, sequential_idx, i), v)
+        except Exception as exc:
+            cmds.warning("_write_pose_to_node: poseInput[{}][{}] failed: {}".format(
+                sequential_idx, i, exc))
+    for i, v in enumerate(pose.values):
+        try:
+            cmds.setAttr(
+                "{}.poses[{}].poseValue[{}]".format(shape, sequential_idx, i), v)
+        except Exception as exc:
+            cmds.warning("_write_pose_to_node: poseValue[{}][{}] failed: {}".format(
+                sequential_idx, i, exc))
+    # Commit 1 (M_PER_POSE_SIGMA): write per-pose sigma. Indexed parallel
+    # to poses[sequential_idx]. Failure non-fatal -- legacy plugins
+    # without the poseRadius attr just emit a warning and the caller
+    # gets pre-M_PERPOSE behaviour (global radius for all poses).
+    try:
+        radius = float(getattr(pose, "radius", DEFAULT_POSE_RADIUS))
+        if radius <= 0.0:
+            radius = DEFAULT_POSE_RADIUS
+        cmds.setAttr(
+            "{}.poseRadius[{}]".format(shape, sequential_idx), radius)
+    except Exception as exc:
+        cmds.warning(
+            "_write_pose_to_node: poseRadius[{}] failed (legacy "
+            u"plugin without per-pose \u03c3?): {}".format(
+                sequential_idx, exc))
+    # M_P0_RBF_HIERARCHICAL_SUBATTR_REFACTOR (2026-05-28): write the
+    # per-pose hierarchy sub-attributes. These are children of the
+    # poses[] compound now (poses[p].poseParentIndex /
+    # poses[p].poseDriverMask), so they share the same packed slot as
+    # poseInput / poseValue and round-trip cleanly. Each write is
+    # independently guarded + non-fatal: a legacy .mll without the
+    # sub-attrs just warns, and the caller falls back to Phase 15
+    # single-layer behaviour (parent=-1 / all-drivers).
+    try:
+        parent = int(getattr(pose, "parent_index", -1))
+        cmds.setAttr(
+            "{}.poses[{}].poseParentIndex".format(shape, sequential_idx),
+            parent)
+    except Exception as exc:
+        cmds.warning(
+            "_write_pose_to_node: poses[{}].poseParentIndex failed "
+            "(legacy plugin without hierarchy sub-attr?): {}".format(
+                sequential_idx, exc))
+    try:
+        mask = [int(x) for x in (getattr(pose, "driver_mask", []) or [])]
+        # M_P0_INT32ARRAY_SETATTR_FIX (2026-05-28): Maya's Python
+        # setAttr expects the Int32Array payload as ONE list argument
+        # (cmds.setAttr(plug, [0, 2], type="Int32Array")). The MEL-style
+        # count-prefixed form (plug, len, *values) silently stores
+        # [len] instead -- verified live on mayapy 2022 + 2025. The
+        # empty list writes an empty array (getAttr returns None,
+        # normalized to [] by _read_pose_driver_mask).
+        cmds.setAttr(
+            "{}.poses[{}].poseDriverMask".format(shape, sequential_idx),
+            mask, type="Int32Array")
+    except Exception as exc:
+        cmds.warning(
+            "_write_pose_to_node: poses[{}].poseDriverMask failed "
+            "(legacy plugin without hierarchy sub-attr?): {}".format(
+                sequential_idx, exc))
+
+
+def write_pose_inputs_to_node(shape, sequential_idx, inputs):
+    """M_P0_POSE_DITHER_AND_UPDATE_FIX Part C (2026-05-12) -- write
+    only the ``poseInput[]`` slice of one packed pose row.
+
+    Granular counterpart of :func:`_write_pose_to_node` so the Update
+    button path can refresh driver values without re-touching driven
+    or radius slots. Skips connection-purge (callers that re-apply
+    the same Update on a live-driven pose row are expected to have
+    cleared the driver wires upstream).
+    """
+    for i, v in enumerate(inputs):
+        try:
+            cmds.setAttr(
+                "{}.poses[{}].poseInput[{}]".format(
+                    shape, int(sequential_idx), i),
+                float(v))
+        except Exception as exc:
+            cmds.warning(
+                "write_pose_inputs_to_node: poseInput[{}][{}] "
+                "failed: {}".format(sequential_idx, i, exc))
+
+
+def write_pose_values_to_node(shape, sequential_idx, values):
+    """M_P0_POSE_DITHER_AND_UPDATE_FIX Part C (2026-05-12) -- write
+    only the ``poseValue[]`` slice of one packed pose row. Driven-
+    side sibling of :func:`write_pose_inputs_to_node`.
+    """
+    for i, v in enumerate(values):
+        try:
+            cmds.setAttr(
+                "{}.poses[{}].poseValue[{}]".format(
+                    shape, int(sequential_idx), i),
+                float(v))
+        except Exception as exc:
+            cmds.warning(
+                "write_pose_values_to_node: poseValue[{}][{}] "
+                "failed: {}".format(sequential_idx, i, exc))
+
+
+# =====================================================================
+#  11c. Pose dither + global radius -- Phase 14 UI helpers
+# =====================================================================
+#
+# M_P0_POSE_DITHER_AND_UPDATE_FIX (2026-05-12) -- pose-data
+# preprocessing helpers that the UI exposes as buttons in the pose
+# panel. Dither adds a small uniform random perturbation to channels
+# whose values cluster across poses, breaking the augmented matrix's
+# rank deficiency for MQB / IMQB / TPS / Linear kernels without
+# disturbing the user's overall pose intent (magnitude defaults to
+# 0.005 ~= 0.29 degrees on a rotation channel; visually imperceptible).
+#
+# Math basis (Stabilized RBF Interpolation, J. Comp. Appl. Math. 432,
+# 2023): augmented condition number scales like 1/lambda + 1/epsilon
+# where epsilon is the inter-pose channel spread. Adding ~epsilon=5e-3
+# noise to clustered channels keeps cond ~10^5 in double precision.
+#
+# Dither is NEVER auto-applied -- the user clicks the button when the
+# kFailure surface shows up. See PATCH_BRIEF_M_P0_POSE_DITHER_AND_
+# UPDATE_FIX.md sec.1 for the full derivation.
+
+
+def dither_driver_poses(node, base_pose_index=0,
+                        magnitude=0.005, seed=42):
+    """M_P0_POSE_DITHER_AND_UPDATE_FIX Part A (2026-05-12) -- add a
+    small uniform random perturbation to clustered driver-pose
+    channels on *node*'s shape.
+
+    Two non-base poses are considered to share a *cluster* in input
+    slot ``i`` when ``abs(v_p - v_q) < 1e-6``. Every such (pose, slot)
+    pair is dithered with ``random.uniform(-magnitude, +magnitude)``.
+
+    The base pose (``base_pose_index``, default 0 = rest pose) is
+    NEVER touched -- it anchors the rig's identity transform.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of the RBFtools node.
+    base_pose_index : int
+        Pose subscript to leave untouched. Default 0.
+    magnitude : float
+        Half-width of the uniform perturbation. Default 0.005.
+    seed : int or None
+        Seed for the perturbation RNG. ``None`` -> system entropy.
+        Default 42 (deterministic for tests).
+
+    Returns
+    -------
+    int
+        Count of ``(pose, slot)`` plugs that were perturbed.
+    """
+    import random as _random
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+
+    rng = _random.Random(seed)
+    pose_indices = cmds.getAttr(
+        shape + ".poses", multiIndices=True) or []
+
+    # 1. Collect driver values for every non-base pose.
+    pose_data = {}
+    for p in pose_indices:
+        if int(p) == int(base_pose_index):
+            continue
+        try:
+            input_indices = cmds.getAttr(
+                "{}.poses[{}].poseInput".format(shape, p),
+                multiIndices=True) or []
+        except Exception:
+            input_indices = []
+        row = []
+        for ii in input_indices:
+            try:
+                v = cmds.getAttr(
+                    "{}.poses[{}].poseInput[{}]".format(
+                        shape, p, ii))
+                row.append((int(ii), float(v)))
+            except Exception:
+                continue
+        pose_data[int(p)] = row
+
+    # 2. Detect clusters across non-base poses (pairwise).
+    EPS = 1e-6
+    to_perturb = set()
+    pose_list = sorted(pose_data.keys())
+    for a in range(len(pose_list)):
+        for b in range(a + 1, len(pose_list)):
+            p1, p2 = pose_list[a], pose_list[b]
+            for (slot, v1) in pose_data[p1]:
+                v2 = next(
+                    (vv for ss, vv in pose_data[p2] if ss == slot),
+                    None)
+                if v2 is None:
+                    continue
+                if abs(v1 - v2) < EPS:
+                    to_perturb.add((p1, slot))
+                    to_perturb.add((p2, slot))
+
+    # 3. Apply the perturbation. Driver inputs are usually live-
+    # connected from a rig control, so disconnect the upstream
+    # source first or the setAttr is silently overwritten on the
+    # next DG cycle.
+    perturbed = 0
+    with undo_chunk("RBFtools: dither driver poses"):
+        for (pose_idx, slot) in sorted(to_perturb):
+            plug = "{}.poses[{}].poseInput[{}]".format(
+                shape, pose_idx, slot)
+            try:
+                old_v = float(cmds.getAttr(plug))
+            except Exception:
+                continue
+            delta = rng.uniform(-magnitude, +magnitude)
+            new_v = old_v + delta
+            incoming = []
+            try:
+                incoming = cmds.listConnections(
+                    plug, source=True, destination=False,
+                    plugs=True) or []
+            except Exception:
+                incoming = []
+            for src in incoming:
+                try:
+                    cmds.disconnectAttr(src, plug)
+                except Exception:
+                    pass
+            try:
+                cmds.setAttr(plug, new_v)
+                perturbed += 1
+            except Exception as exc:
+                cmds.warning(
+                    "dither_driver_poses: setAttr {} = {} failed: "
+                    "{}".format(plug, new_v, exc))
+    return perturbed
+
+
+def dither_driven_poses(node, base_pose_index=0,
+                        magnitude=0.005, seed=42):
+    """M_P0_POSE_DITHER_AND_UPDATE_FIX Part B (2026-05-12) -- mirror
+    of :func:`dither_driver_poses` but operates on ``poseValue[]``
+    (the driven / output channel) instead of ``poseInput[]``.
+
+    The UI button MUST surface a confirmation dialog before invoking
+    this helper -- dithering the training target is mathematically
+    less benign than driver-side dither (it injects noise into the
+    label set, which the trained weights then learn). Use only when
+    driver-side dither alone cannot resolve the rank deficiency.
+    """
+    import random as _random
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+
+    rng = _random.Random(seed)
+    pose_indices = cmds.getAttr(
+        shape + ".poses", multiIndices=True) or []
+
+    pose_data = {}
+    for p in pose_indices:
+        if int(p) == int(base_pose_index):
+            continue
+        try:
+            value_indices = cmds.getAttr(
+                "{}.poses[{}].poseValue".format(shape, p),
+                multiIndices=True) or []
+        except Exception:
+            value_indices = []
+        row = []
+        for ii in value_indices:
+            try:
+                v = cmds.getAttr(
+                    "{}.poses[{}].poseValue[{}]".format(
+                        shape, p, ii))
+                row.append((int(ii), float(v)))
+            except Exception:
+                continue
+        pose_data[int(p)] = row
+
+    EPS = 1e-6
+    to_perturb = set()
+    pose_list = sorted(pose_data.keys())
+    for a in range(len(pose_list)):
+        for b in range(a + 1, len(pose_list)):
+            p1, p2 = pose_list[a], pose_list[b]
+            for (slot, v1) in pose_data[p1]:
+                v2 = next(
+                    (vv for ss, vv in pose_data[p2] if ss == slot),
+                    None)
+                if v2 is None:
+                    continue
+                if abs(v1 - v2) < EPS:
+                    to_perturb.add((p1, slot))
+                    to_perturb.add((p2, slot))
+
+    perturbed = 0
+    with undo_chunk("RBFtools: dither driven poses"):
+        for (pose_idx, slot) in sorted(to_perturb):
+            plug = "{}.poses[{}].poseValue[{}]".format(
+                shape, pose_idx, slot)
+            try:
+                old_v = float(cmds.getAttr(plug))
+            except Exception:
+                continue
+            delta = rng.uniform(-magnitude, +magnitude)
+            new_v = old_v + delta
+            incoming = []
+            try:
+                incoming = cmds.listConnections(
+                    plug, source=True, destination=False,
+                    plugs=True) or []
+            except Exception:
+                incoming = []
+            for src in incoming:
+                try:
+                    cmds.disconnectAttr(src, plug)
+                except Exception:
+                    pass
+            try:
+                cmds.setAttr(plug, new_v)
+                perturbed += 1
+            except Exception as exc:
+                cmds.warning(
+                    "dither_driven_poses: setAttr {} = {} failed: "
+                    "{}".format(plug, new_v, exc))
+    return perturbed
+
+
+def set_all_poses_radius(node, radius):
+    """M_P0_POSE_DITHER_AND_UPDATE_FIX Part C-bis (2026-05-12) -- bulk
+    set the ``shape.poseRadius[i]`` plug across every pose of *node*.
+
+    UI calls this from the "Apply Radius to All" button beside the
+    dither controls. Values <= 0 are clamped to
+    :data:`DEFAULT_POSE_RADIUS` so a stray spinbox value cannot break
+    the kernel's sigma vector.
+
+    Returns
+    -------
+    int
+        Count of pose subscripts whose poseRadius plug was written.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return 0
+    r = float(radius)
+    if r <= 0.0:
+        r = DEFAULT_POSE_RADIUS
+    pose_indices = cmds.getAttr(
+        shape + ".poses", multiIndices=True) or []
+    written = 0
+    with undo_chunk("RBFtools: set all poses radius"):
+        for p in pose_indices:
+            plug = "{}.poseRadius[{}]".format(shape, int(p))
+            try:
+                cmds.setAttr(plug, r)
+                written += 1
+            except Exception as exc:
+                cmds.warning(
+                    "set_all_poses_radius: setAttr {} = {} failed: "
+                    "{}".format(plug, r, exc))
+    return written
+
+
+# =====================================================================
+#  11b. Output baselines -- Milestone 1.2 (v5 PART C.2.4 / ?? B6)
+# =====================================================================
+
+
+def _is_scale_attr(attr_name):
+    """Return ``True`` if *attr_name* names a Maya scale channel.
+
+    Matches exact long (``scaleX/Y/Z``) and short (``sx/sy/sz``) names.
+    Used to force a 1.0 training baseline on scale outputs so a
+    transient driven.scale == 0 at Apply time cannot silently poison
+    the solver and collapse the mesh on t-pose recall.
+    """
+    return attr_name in SCALE_ATTR_NAMES
+
+
+def capture_output_baselines(driven_node, driven_attrs, poses=None):
+    u"""Collect per-output ``(base_value, is_scale)`` for the driven attrs.
+
+    Source priority (v5 addendum 2026-04-24 \u00a7M1.2):
+
+    1. If *poses* is provided AND ``poses[0]`` has all driver inputs
+       \u2248 0 (the rest pose by convention), use ``poses[0].values[i]``
+       as the baseline. Deterministic, reproducible from stored data.
+    2. Otherwise fall back to the current scene value at
+       ``driven_node.attr``. Emits ``cmds.warning`` because this
+       depends on the user having the rig in rest pose at Apply time.
+
+    **Scale channels always override the source to 1.0** regardless of
+    captured value, as a defense against pose[0] / scene being at 0.
+
+    Parameters
+    ----------
+    driven_node : str
+        The node whose attributes are driven by ``output[]``.
+    driven_attrs : list[str]
+        Ordered attribute names (same order as the node's ``output[]``).
+    poses : list[PoseData] or None, optional
+        Full pose list. When provided and ``poses[0]`` is a rest pose,
+        ``poses[0].values`` acts as the baseline source.
+
+    Returns
+    -------
+    list[tuple[float, bool]]
+        ``[(base_value, is_scale), ...]`` indexed by ``driven_attrs``.
+    """
+    # M_P0_REST_POSE_TOL_LOOSEN (2026-05-11): rest-pose detection
+    # uses 1e-3 tolerance (~= 0.057 deg in radians, visually
+    # indistinguishable from rest), NOT the global FLOAT_ABS_TOL=1e-6.
+    # User-reported repro: pose 0 captured with driver at rest had
+    # input values in the 2.95e-06 / -5.37e-05 range (Maya channel-
+    # box / unitConversion float noise). With 1e-6 tolerance, the
+    # "all driver inputs ~= 0" test failed, baseline fell back to
+    # current scene state, and driven joints showed non-zero values
+    # at rest pose despite the user explicitly setting pose 0 values
+    # to 0,0,0,1,1,1.
+    #
+    # 1e-3 is the right threshold: it accommodates Maya's getAttr/
+    # setAttr roundtrip noise (1e-5 to 1e-6 range typical) AND
+    # joint-orient bake artifacts (1e-4 range), while still flagging
+    # intentional small rotations (e.g. 1 deg = 0.0175 rad ? 1e-3).
+    REST_POSE_INPUT_TOL = 1.0e-3
+    rest_from_pose0 = None
+    if poses and len(poses) > 0:
+        p0 = poses[0]
+        if p0.inputs and all(
+                abs(v) < REST_POSE_INPUT_TOL for v in p0.inputs):
+            rest_from_pose0 = list(p0.values)
+
+    if rest_from_pose0 is None and _exists(driven_node):
+        cmds.warning(
+            "capture_output_baselines: no rest-pose row found in pose[0]; "
+            u"falling back to current scene value on '{}' \u2014 ensure the rig "
+            "is in rest pose before Apply.".format(driven_node))
+
+    baselines = []
+    for i, attr in enumerate(driven_attrs):
+        is_scale = _is_scale_attr(attr)
+        if is_scale:
+            base_value = 1.0
+        elif rest_from_pose0 is not None and i < len(rest_from_pose0):
+            base_value = float(rest_from_pose0[i])
+        else:
+            plug = "{}.{}".format(driven_node, attr)
+            try:
+                base_value = float(cmds.getAttr(plug))
+            except Exception as exc:
+                cmds.warning(
+                    "capture_output_baselines: getAttr {} failed: {}; "
+                    "using 0.0".format(plug, exc))
+                base_value = 0.0
+        baselines.append((base_value, is_scale))
+    return baselines
+
+
+def write_output_baselines(node, baselines):
+    """Write ``(base_value, is_scale)`` pairs onto the solver node.
+
+    Fills ``shape.baseValue[i]`` and ``shape.outputIsScale[i]`` for each
+    index *i* in *baselines*. No-op if the shape does not exist; each
+    per-index write is guarded so one failure does not abort the rest.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    for i, (bv, is_scale) in enumerate(baselines):
+        bv_plug = "{}.baseValue[{}]".format(shape, i)
+        is_plug = "{}.outputIsScale[{}]".format(shape, i)
+        try:
+            cmds.setAttr(bv_plug, float(bv))
+        except Exception as exc:
+            cmds.warning("write_output_baselines: setAttr {} failed: {}".format(
+                bv_plug, exc))
+        try:
+            cmds.setAttr(is_plug, bool(is_scale))
+        except Exception as exc:
+            cmds.warning("write_output_baselines: setAttr {} failed: {}".format(
+                is_plug, exc))
+
+
+def read_output_baselines(node):
+    """Read ``(base_value, is_scale)`` back from the node.
+
+    Returns
+    -------
+    list[tuple[float, bool]]
+        Empty list if the node has no ``baseValue`` / ``outputIsScale``
+        multi indices set (e.g., a v4 rig before its first v5 Apply).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        bv_ids = cmds.getAttr(shape + ".baseValue", multiIndices=True) or []
+    except Exception:
+        return []
+    try:
+        is_ids = cmds.getAttr(shape + ".outputIsScale", multiIndices=True) or []
+    except Exception:
+        is_ids = []
+    max_idx = max(list(bv_ids) + list(is_ids) + [-1])
+    if max_idx < 0:
+        return []
+    out = []
+    for i in range(max_idx + 1):
+        bv = 0.0
+        is_scale = False
+        if i in bv_ids:
+            try:
+                bv = float(cmds.getAttr("{}.baseValue[{}]".format(shape, i)))
+            except Exception:
+                pass
+        if i in is_ids:
+            try:
+                is_scale = bool(cmds.getAttr(
+                    "{}.outputIsScale[{}]".format(shape, i)))
+            except Exception:
+                pass
+        out.append((bv, is_scale))
+    return out
+
+
+def _node_has_baseline_schema(node):
+    """Return True when *node* already has a v5 baseline array written.
+
+    Used by :func:`apply_poses` to emit a one-time upgrade notice when
+    an old v4 node (poses present, no baseline array) is first applied
+    under v5.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return False
+    try:
+        ids = cmds.getAttr(shape + ".baseValue", multiIndices=True) or []
+    except Exception:
+        return False
+    return bool(ids)
+
+
+# =====================================================================
+#  11c. Local-Transform snapshot -- Milestone 2.3 (v5 PART D.5 / ?? B10)
+# =====================================================================
+
+
+def capture_per_pose_local_transforms(driven_node, driven_attrs, poses):
+    u"""Replay each pose through *driven_node* and snapshot its local Transform.
+
+    **Single-sever / single-restore lifecycle** (v5 addendum \u00a7M2.3 \u2014
+    refinement 1): incoming connections on ``driven_attrs`` are severed
+    ONCE before the loop and restored ONCE after. The replay loop only
+    runs ``setAttr`` and ``get_local_matrix`` \u2014 never disconnects nor
+    reconnects mid-loop. This avoids DG dirty-storms and short-lived
+    intermediate evaluation states that would corrupt downstream nodes.
+
+    **Non-driven-channel freeze contract** (addendum \u00a7M2.3 \u2014 refinement
+    2): transform channels NOT in ``driven_attrs`` keep their
+    Apply-time scene state throughout the replay. If the user left the
+    driven_node at a stale orientation at Apply time, that orientation
+    is baked into every pose's quaternion. Users should reset the
+    driven_node to rest before calling Apply; M3 UI will automate this.
+
+    Parameters
+    ----------
+    driven_node : str
+        Scene node whose local Transform is being captured.
+    driven_attrs : list[str]
+        Attributes to set per pose (typically a subset of transform
+        channels).
+    poses : list[PoseData]
+        Same ordering as the caller's ``poses`` \u2014 returned list aligns
+        element-wise.
+
+    Returns
+    -------
+    list[dict]
+        Per-pose ``{"translate":(3), "quat":(4), "scale":(3)}``.
+        Always the same length as *poses*. On ``driven_node`` missing
+        or ``is_blendshape(driven_node)`` or empty ``driven_attrs``
+        the list is filled with :data:`IDENTITY_LOCAL_TRANSFORM`.
+    """
+    n_poses = len(poses)
+    if not _exists(driven_node):
+        return [IDENTITY_LOCAL_TRANSFORM] * n_poses
+    if is_blendshape(driven_node):
+        # blendShape has no local Transform concept -- see addendum
+        # sec.M2.3 decision (C)?.
+        return [IDENTITY_LOCAL_TRANSFORM] * n_poses
+    if not driven_attrs:
+        cmds.warning(
+            "capture_per_pose_local_transforms: driven_attrs is empty; "
+            "skipping local Transform capture.")
+        return [IDENTITY_LOCAL_TRANSFORM] * n_poses
+
+    # === single sever (before loop) ===
+    saved_conns = []
+    saved_values = []
+    for attr in driven_attrs:
+        plug = "{}.{}".format(driven_node, attr)
+        conn = _safe_disconnect_incoming(plug)
+        saved_conns.append((plug, conn))
+        try:
+            saved_values.append(cmds.getAttr(plug))
+        except Exception:
+            saved_values.append(None)
+
+    results = []
+    try:
+        # === replay loop: only setAttr + read matrix, never disconnect ===
+        for pose in poses:
+            for i, attr in enumerate(driven_attrs):
+                if i >= len(pose.values):
+                    break
+                plug = "{}.{}".format(driven_node, attr)
+                try:
+                    cmds.setAttr(plug, pose.values[i])
+                except Exception as exc:
+                    cmds.warning(
+                        "capture_per_pose_local_transforms: setAttr {} "
+                        "failed: {}".format(plug, exc))
+            mat = get_local_matrix(driven_node)
+            results.append(decompose_matrix_quat(mat))
+    finally:
+        # === single restore (after loop, even on exception) ===
+        for (plug, conn), orig in zip(saved_conns, saved_values):
+            if orig is not None:
+                try:
+                    cmds.setAttr(plug, orig)
+                except Exception as exc:
+                    cmds.warning(
+                        "capture_per_pose_local_transforms: restore "
+                        "setAttr {} failed: {}".format(plug, exc))
+            if conn is not None:
+                try:
+                    cmds.connectAttr(conn[0], conn[1])
+                except Exception as exc:
+                    cmds.warning(
+                        "capture_per_pose_local_transforms: reconnect "
+                        "{} -> {} failed: {}".format(conn[0], conn[1], exc))
+
+    # Pad if the replay bailed early for any reason.
+    while len(results) < n_poses:
+        results.append(IDENTITY_LOCAL_TRANSFORM)
+    return results
+
+
+def write_pose_local_transforms(node, local_transforms):
+    """Write per-pose Transform snapshots to shape.poses[p].poseLocalTransform.*."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    for p, xf in enumerate(local_transforms):
+        t = xf.get("translate", IDENTITY_LOCAL_TRANSFORM["translate"])
+        q = xf.get("quat",      IDENTITY_LOCAL_TRANSFORM["quat"])
+        s = xf.get("scale",     IDENTITY_LOCAL_TRANSFORM["scale"])
+        try:
+            cmds.setAttr(
+                "{}.poses[{}].poseLocalTransform.poseLocalTranslate".format(shape, p),
+                float(t[0]), float(t[1]), float(t[2]), type="double3")
+        except Exception as exc:
+            cmds.warning("write_pose_local_transforms: translate[{}] "
+                         "failed: {}".format(p, exc))
+        try:
+            # double4 has no native compound setAttr -- set each child.
+            for i, v in enumerate(q):
+                cmds.setAttr(
+                    "{}.poses[{}].poseLocalTransform.poseLocalQuat{}".format(
+                        shape, p, i), float(v))
+        except Exception:
+            # Fall back: write as 4-tuple if Maya accepts it.
+            try:
+                cmds.setAttr(
+                    "{}.poses[{}].poseLocalTransform.poseLocalQuat".format(shape, p),
+                    float(q[0]), float(q[1]), float(q[2]), float(q[3]),
+                    type="double4")
+            except Exception as exc:
+                cmds.warning("write_pose_local_transforms: quat[{}] "
+                             "failed: {}".format(p, exc))
+        try:
+            cmds.setAttr(
+                "{}.poses[{}].poseLocalTransform.poseLocalScale".format(shape, p),
+                float(s[0]), float(s[1]), float(s[2]), type="double3")
+        except Exception as exc:
+            cmds.warning("write_pose_local_transforms: scale[{}] "
+                         "failed: {}".format(p, exc))
+
+
+def read_pose_local_transforms(node):
+    """Read back per-pose local Transforms. Returns empty list when the
+    node has no poseLocalTransform data (v4 rig / fresh node).
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        ids = cmds.getAttr(shape + ".poses", multiIndices=True) or []
+    except Exception:
+        return []
+    if not ids:
+        return []
+    out = []
+    for p in sorted(ids):
+        try:
+            t = cmds.getAttr(
+                "{}.poses[{}].poseLocalTransform.poseLocalTranslate".format(
+                    shape, p))[0]
+        except Exception:
+            t = IDENTITY_LOCAL_TRANSFORM["translate"]
+        try:
+            q = cmds.getAttr(
+                "{}.poses[{}].poseLocalTransform.poseLocalQuat".format(
+                    shape, p))[0]
+        except Exception:
+            q = IDENTITY_LOCAL_TRANSFORM["quat"]
+        try:
+            s = cmds.getAttr(
+                "{}.poses[{}].poseLocalTransform.poseLocalScale".format(
+                    shape, p))[0]
+        except Exception:
+            s = IDENTITY_LOCAL_TRANSFORM["scale"]
+        out.append({"translate": tuple(t), "quat": tuple(q),
+                    "scale": tuple(s)})
+    return out
+
+
+def read_driver_rotate_orders(node):
+    """Return ``driverInputRotateOrder[]`` as a dense list (M2.1a).
+
+    Sparse indices are densified by reading the highest existing
+    index + 1 and filling missing slots with 0 (xyz default).
+    Returns empty list when the multi has no entries.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        ids = cmds.getAttr(
+            shape + ".driverInputRotateOrder", multiIndices=True) or []
+    except Exception:
+        return []
+    if not ids:
+        return []
+    out = [0] * (max(ids) + 1)
+    for i in ids:
+        try:
+            out[i] = int(cmds.getAttr(
+                "{}.driverInputRotateOrder[{}]".format(shape, i)))
+        except Exception:
+            pass
+    return out
+
+
+def write_driver_rotate_orders(node, values):
+    u"""Write a dense list of rotate-order ints to the multi.
+
+    Reuses :func:`set_node_multi_attr` (transactional clear-then-write
+    per addendum \u00a7M2.4a)."""
+    set_node_multi_attr(node, "driverInputRotateOrder", list(values or []))
+
+
+# M_ENC_AUTOPIPE: encoding indices that consume per-driver-group
+# rotateOrder in C++ applyEncodingToBlock (RBFtools.cpp:2606-2624 +
+# encodeEulerToQuaternion at cpp:3135). Raw (0) bypasses encoding;
+# Quaternion (1) consumes pre-encoded 4-tuples and is rotateOrder-
+# independent. BendRoll (2) / ExpMap (3) / SwingTwist (4) all need
+# rotateOrder for the Euler->Quaternion preconversion.
+_ENCODINGS_NEED_ROTATE_ORDER = (2, 3, 4)
+
+
+def auto_resolve_generic_rotate_orders(node, encoding):
+    """M_ENC_AUTOPIPE: derive driverInputRotateOrder[] from currently
+    connected driverSource[] entries when the user switches Generic
+    inputEncoding to a rotateOrder-consuming mode.
+
+    Encoding semantics (mirrors C++ applyEncodingToBlock dispatch):
+
+      * ``encoding`` in ``{0, 1}`` (Raw / Quaternion) -> clear the
+        multi.  Raw bypasses encoding entirely; Quaternion consumes
+        pre-encoded 4-tuples and is rotateOrder-independent. The
+        clear keeps scene state honest so a later switch to ExpMap
+        rederives from the live driver topology rather than
+        re-using stale entries from a prior encoding.
+
+      * ``encoding`` in ``{2, 3, 4}`` (BendRoll / ExpMap / SwingTwist)
+        -> walk ``driverSource[]`` and connect each
+        ``driver_node.rotateOrder`` ->
+        ``shape.driverInputRotateOrder[idx]`` via the existing
+        :func:`_resolve_driver_rotate_order` helper. ``idx`` matches
+        the driverSource sparse multi index so per-source ordering is
+        preserved across re-derivations.
+
+    Matrix mode is left untouched: ``add_driver_source`` already
+    wires the rotateOrder at add time (cpp:1264) and the C++ math
+    chain for Matrix mode reads the same array.
+
+    No-op when the node has no driverSource entries or when the
+    shape cannot be resolved.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+    # Clear-on-bypass branch (encodings that don't consume rotateOrder).
+    if int(encoding) not in _ENCODINGS_NEED_ROTATE_ORDER:
+        try:
+            existing = cmds.getAttr(
+                shape + ".driverInputRotateOrder",
+                multiIndices=True) or []
+        except Exception:
+            existing = []
+        if not existing:
+            return
+        # Best-effort disconnect of upstream .rotateOrder feeders before
+        # the multi clear so the connection layer doesn't leak into the
+        # next derivation. write_driver_rotate_orders ([]) below is the
+        # transactional clear.
+        for i in existing:
+            plug = "{}.driverInputRotateOrder[{}]".format(shape, i)
+            try:
+                srcs = cmds.listConnections(
+                    plug, source=True, destination=False,
+                    plugs=True) or []
+            except Exception:
+                srcs = []
+            for src in srcs:
+                try:
+                    cmds.disconnectAttr(src, plug)
+                except Exception:
+                    pass
+        try:
+            write_driver_rotate_orders(node, [])
+        except Exception:
+            pass
+        return
+    # Auto-derive branch. Walk driverSource[] (sparse multi) and connect
+    # rotateOrder per source.
+    try:
+        ds_indices = cmds.getAttr(
+            shape + ".driverSource", multiIndices=True) or []
+    except Exception:
+        ds_indices = []
+    for d in ds_indices:
+        node_plug = "{}.driverSource[{}].driverSource_node".format(
+            shape, d)
+        try:
+            conns = cmds.listConnections(
+                node_plug, source=True, destination=False) or []
+        except Exception:
+            conns = []
+        if not conns:
+            continue
+        driver_node = conns[0]
+        try:
+            _resolve_driver_rotate_order(shape, driver_node, d)
+        except Exception as exc:
+            cmds.warning(
+                "auto_resolve_generic_rotate_orders: failed for "
+                "driverSource[{}] driver={!r}: {}".format(
+                    d, driver_node, exc))
+
+
+def read_quat_group_starts(node):
+    """Return ``outputQuaternionGroupStart[]`` as an ordered int list."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        ids = cmds.getAttr(
+            shape + ".outputQuaternionGroupStart",
+            multiIndices=True) or []
+    except Exception:
+        return []
+    out = []
+    for i in sorted(ids):
+        try:
+            out.append(int(cmds.getAttr(
+                "{}.outputQuaternionGroupStart[{}]".format(shape, i))))
+        except Exception:
+            pass
+    return out
+
+
+def write_quat_group_starts(node, starts):
+    """Write a list of quat-group leader indices to the multi."""
+    set_node_multi_attr(node, "outputQuaternionGroupStart",
+                        list(starts or []))
+
+
+def auto_alias_outputs(node, driver_attrs, driven_attrs, force=False):
+    u"""Generate human-readable aliases on the shape's input[]/output[]
+    multi plugs (Milestone 3.7).
+
+    Default-mode (``force=False``) preserves user-set aliases by only
+    clearing those classified as RBFtools-managed via
+    :func:`core_alias.is_rbftools_managed_alias` (E.1 contract).
+
+    Force-mode (``force=True``) wipes every alias on the shape before
+    regenerating \u2014 meant for the "Force Regenerate" Tools menu entry
+    behind a confirm dialog.
+
+    Quat-group leaders (output indices in ``outputQuaternionGroupStart[]``)
+    receive the ``<base>QX/QY/QZ/QW`` quartet instead of the standard
+    ``out_<x>`` form.
+
+    See addendum \u00a7M3.7 for the driven/driver write-boundary contract:
+    aliases are written to the **shape**'s plugs, NOT to the
+    driver/driven scene nodes themselves.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of the RBFtools node.
+    driver_attrs, driven_attrs : list[str]
+        Ordered attribute names \u2014 must match the input[]/output[]
+        index ordering. Pass empty list to skip a side.
+    force : bool, optional
+        Clear ALL aliases (managed + user-set) before regenerating.
+        Default False.
+
+    Returns
+    -------
+    dict
+        ``{"input": {idx: alias}, "output": {idx: alias}}``.
+    """
+    from RBFtools import core_alias
+
+    shape = get_shape(node)
+    if not _exists(shape):
+        return {"input": {}, "output": {}}
+
+    quat_starts = []
+    try:
+        ids = cmds.getAttr(
+            shape + ".outputQuaternionGroupStart",
+            multiIndices=True) or []
+        for i in ids:
+            quat_starts.append(int(cmds.getAttr(
+                "{}.outputQuaternionGroupStart[{}]".format(shape, i))))
+    except Exception:
+        quat_starts = []
+
+    with undo_chunk("RBFtools: auto-alias outputs"):
+        return core_alias.apply_aliases(
+            shape,
+            driver_attrs or [],
+            driven_attrs or [],
+            quat_group_starts=quat_starts,
+            force=force,
+        )
+
+
+def write_pose_swing_twist_cache(node, poses):
+    u"""Initialise the M2.5 per-pose SwingTwist decomposition cache
+    to its **unpopulated default** state for every pose.
+
+    M2.5 ships the cache **schema** plus this Apply-time
+    initialiser. The actual decomposition values are populated by
+    a follow-up commit (M2.5b / M5) once a mayapy benchmark
+    environment is available to verify both the C++ compute()
+    consumer and the Python decomposition path against real Maya
+    behaviour.
+
+    Defaults written per pose:
+
+      * ``poseSwingQuat``   = ``(0, 0, 0, 1)`` (identity quat)
+      * ``poseTwistAngle``  = 0.0
+      * ``poseSwingWeight`` = 1.0
+      * ``poseTwistWeight`` = 1.0
+      * ``poseSigma``       = -1.0 \u2014 sentinel meaning "cache NOT
+        populated" AND "use global radius" (v5 PART E.10
+        forward-compat). Future compute() consumer treats
+        ``poseSigma == -1.0`` as cache miss \u2192 falls back to live
+        :func:`decomposeSwingTwist`.
+
+    Cache vs Schema Boundary (addendum \u00a7M2.5.4):
+      Cache values are derived runtime state \u2014 **NOT** part of
+      the JSON schema. ``core_json.py`` never reads or writes
+      these fields; T_M2_5_CACHE_NOT_IN_SCHEMA permanent guard
+      scans core_json / core_mirror / core_alias to enforce the
+      boundary across all three "schema-adjacent" layers.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+
+    for seq_idx in range(len(poses)):
+        base = "{}.poses[{}].poseSwingTwistCache".format(shape, seq_idx)
+        try:
+            cmds.setAttr(base + ".poseSwingQuat",
+                         0.0, 0.0, 0.0, 1.0, type="double4")
+            cmds.setAttr(base + ".poseTwistAngle", 0.0)
+            cmds.setAttr(base + ".poseSwingWeight", 1.0)
+            cmds.setAttr(base + ".poseTwistWeight", 1.0)
+            cmds.setAttr(base + ".poseSigma", -1.0)  # sentinel
+        except Exception as exc:
+            cmds.warning(
+                "write_pose_swing_twist_cache: pose[{}] setAttr "
+                "failed: {} (cache stays unpopulated; compute() will "
+                "fall back to live decompose)".format(seq_idx, exc))
+
+
+def read_pose_swing_twist_cache(node):
+    """Read back per-pose SwingTwist cache. Returns a list of dicts:
+    ``[{"swing_quat": (sx,sy,sz,sw), "twist_angle": float,
+        "swing_weight": float, "twist_weight": float, "sigma": float}, ...]``.
+
+    Empty list when the node has no poses or is not a v5+ node.
+    Used by future M3.5 Profiler / M5 perf analysis; M2.5 itself
+    does not consume this read path."""
+    shape = get_shape(node)
+    if not _exists(shape):
+        return []
+    try:
+        ids = cmds.getAttr(shape + ".poses", multiIndices=True) or []
+    except Exception:
+        return []
+    out = []
+    for p in sorted(ids):
+        base = "{}.poses[{}].poseSwingTwistCache".format(shape, p)
+        try:
+            sq = cmds.getAttr(base + ".poseSwingQuat")[0]
+        except Exception:
+            sq = (0.0, 0.0, 0.0, 1.0)
+        out.append({
+            "swing_quat":   tuple(sq),
+            "twist_angle":  float(safe_get(base + ".poseTwistAngle", 0.0)),
+            "swing_weight": float(safe_get(base + ".poseSwingWeight", 1.0)),
+            "twist_weight": float(safe_get(base + ".poseTwistWeight", 1.0)),
+            "sigma":        float(safe_get(base + ".poseSigma", -1.0)),
+        })
+    return out
+
+
+def apply_poses(node, driver_node, driven_node,
+                driver_attrs, driven_attrs, poses):
+    """Write pose data onto the solver node (no connections).
+
+    This is the **Apply** button path.  It:
+
+    1. Clears all existing multi-instance data on the node.
+    2. Writes each :class:`PoseData` into ``shape.poses[p]``.
+    3. Triggers a solver evaluation cycle.
+
+    Connections are handled separately by :func:`connect_node`
+    via the **Connect** button.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of the ``RBFtools``.
+    driver_node, driven_node : str
+        The source and destination scene objects.
+    driver_attrs, driven_attrs : list[str]
+        Ordered attribute names on driver / driven.
+    poses : list[PoseData]
+        Ordered pose data from the UI table.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+
+    # v4 -> v5 upgrade notice: a node with poses but no baseline array is
+    # about to be re-applied under the v5 schema. Log only, never block.
+    had_poses = False
+    try:
+        had_poses = bool(cmds.getAttr(shape + ".poses", multiIndices=True) or [])
+    except Exception:
+        had_poses = False
+    if had_poses and not _node_has_baseline_schema(node):
+        cmds.warning(
+            "Upgrading node {} to v5 baseline schema".format(shape))
+
+    # M_P0_APPLY_NODESTATE_FIX (2026-04-30) -- D-path instrumentation:
+    # each fatal step (1, 2, 4, 5, 7) is wrapped in its own try/except
+    # that records `failed_step` then re-raises so partial-apply isn't
+    # masked. The advisory steps (3, 6) keep their original swallow-
+    # and-warn behaviour. Step 8 (nodeState 2 -> 0 unblock) is moved
+    # OUTSIDE the with-undo_chunk into a finally clause so it runs
+    # whether the body succeeded or raised -- without this the user-
+    # reported "Apply ? Node State ? Blocking + ? warning" repro
+    # surfaces because step 4/5 raised inside the original
+    # with-undo_chunk and the entire Step 8 block was unwound past.
+    apply_succeeded = False
+    failed_step = None
+    try:
+        # M_P0_APPLY_FREEZE_DURING_WRITE (2026-05-10): freeze the
+        # node's nodeState to HasNoEffect (1) for the duration of the
+        # multi-attribute write storm. apply_poses fires HUNDREDS of
+        # setAttr / removeMultiInstance calls (clear_node_data + per-
+        # pose poseInput/poseValue writes + baseline writes + local-
+        # transform replay). Without the freeze, EVERY single one of
+        # those triggers DG dirty -> compute() runs against partially-
+        # written matPoses / matValues -> array bounds violations or
+        # solver assertion failures inside the C++ kernel -> Maya CTD.
+        # The pre-existing connect_routed / disconnect_routed paths
+        # already use this pattern (cpp:4574); applying the same
+        # protocol here matches their crash-defense story.
+        with undo_chunk("RBFtools: apply poses"), \
+             _node_state_frozen(get_shape(node)):
+            # 0 -- M_P0_APPLY_FORCE_GENERIC (2026-05-10): defensive
+            # rbfMode=0 lock. The routed Apply flow signature
+            # (driver_node + driver_attrs + driven_node + driven_attrs)
+            # is Generic-mode-only by contract -- Matrix mode uses
+            # add_driver_source + driverList[] wiring, a completely
+            # different entry point. User-reported repro: Apply left
+            # rbfMode stranded at 1 (Matrix) by some upstream UI /
+            # signal path the scriptJob attributeChange monitor could
+            # not capture, the C++ kernel then took the Matrix path
+            # on input[] data -> solver garbage -> driver fails to drive
+            # driven. Hardcoding 0 here is safe: anyone WANTING Matrix
+            # mode would never reach this function (they'd build the
+            # node via add_driver_source). The scriptJob trace showed
+            # 4 setAttrs writing 0 during Apply -- adding this
+            # explicit 0 write makes the contract self-enforcing
+            # rather than dependent on the (currently unmapped) write
+            # path that flips it to 1.
+            try:
+                cmds.setAttr(shape + ".rbfMode", 0)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses: could not force rbfMode=0 "
+                    "(M_P0_APPLY_FORCE_GENERIC defense): {}".format(exc))
+
+            # 1 -- clear stale data (including any prior baseline arrays)
+            try:
+                clear_node_data(node)
+            except Exception:
+                failed_step = "1 (clear_node_data)"
+                raise
+
+            # 2 -- write pose data (packed sequential indices)
+            try:
+                for seq_idx, pose in enumerate(poses):
+                    _write_pose_to_node(shape, seq_idx, pose)
+            except Exception:
+                failed_step = "2 (_write_pose_to_node)"
+                raise
+
+            # 3 -- M2.5: per-pose SwingTwist decomposition cache.
+            # Populated for SwingTwist-encoded nodes (encoding == 4);
+            # other encodings write defaults (poseSigma = -1.0
+            # sentinel = "cache not populated"). Cache is derived
+            # state -- NOT in the JSON schema (addendum sec.M2.5 Cache
+            # vs Schema Boundary Contract). Failures emit warnings;
+            # cache miss falls back to live decompose in compute()
+            # (forward-compat to the M2.5b/M5 consumer).
+            try:
+                write_pose_swing_twist_cache(node, poses)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses step 3 (SwingTwist cache) failed: "
+                    u"{} (continuing \u2014 cache miss falls back to "
+                    "live decompose)".format(exc))
+
+            # 4 -- capture + write per-output baselines. pose[0] is
+            # the preferred source when it is a rest row (all driver
+            # inputs 0); otherwise the current scene value is used.
+            # Scale channels always anchor at 1.0. See v5 addendum
+            # 2026-04-24 sec.M1.2.
+            try:
+                baselines = capture_output_baselines(
+                    driven_node, driven_attrs, poses=poses)
+                write_output_baselines(node, baselines)
+            except Exception:
+                failed_step = "4 (capture/write_output_baselines)"
+                raise
+
+            # 5 -- M2.3: replay each pose through driven_node and
+            # snapshot its local Transform for engine-side
+            # consumption (PART D.5 / ?? B10). Single-sever /
+            # single-restore lifecycle keeps the scene clean.
+            # Non-driven channels are frozen at Apply-time scene
+            # state -- users should reset driven_node to rest before
+            # Apply. See v5 addendum 2026-04-24 sec.M2.3.
+            try:
+                local_xforms = capture_per_pose_local_transforms(
+                    driven_node, driven_attrs, poses)
+                write_pose_local_transforms(node, local_xforms)
+            except Exception:
+                failed_step = "5 (capture/write_pose_local_transforms)"
+                raise
+
+            # 6 -- M3.7: auto-generate human-readable aliases on
+            # input[] / output[] multi plugs. Preserves user-set
+            # aliases (E.1). Failures emit warnings but never break
+            # the Apply chain -- see core_alias module docstring for
+            # the write-boundary contract.
+            try:
+                auto_alias_outputs(node, driver_attrs, driven_attrs,
+                                   force=False)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses step 6 (auto-alias) failed: {} "
+                    u"(continuing \u2014 aliases are advisory)".format(exc))
+
+            # 7 -- trigger evaluation cycle
+            try:
+                cmds.setAttr(shape + ".evaluate", 0)
+                cmds.setAttr(shape + ".evaluate", 1)
+            except Exception:
+                failed_step = "7 (evaluate trigger)"
+                raise
+
+            # 7b -- M_P0_APPLY_FORCE_GENERIC belt-and-suspenders:
+            # re-pin rbfMode=0 right before exiting the apply chunk.
+            # If any step 2-6 path emitted a setAttr / connectAttr
+            # against rbfMode (the unmapped flip path), this catches
+            # it. The C++ has already trained against Generic-mode
+            # input[] semantics by the time we get here; a stranded
+            # rbfMode=1 would only confuse the next compute().
+            try:
+                cmds.setAttr(shape + ".rbfMode", 0)
+            except Exception:
+                pass  # Best-effort; step 7 already trained
+
+            apply_succeeded = True
+    finally:
+        # 8 -- M_BLOCKING_DEFAULT (2026-04-29) + M_P0_APPLY_NODESTATE_FIX
+        # (2026-04-30): unblock the node. create_node() forces
+        # nodeState=2 (Blocking) on creation so an untrained RBF cannot
+        # misdrive the rig; the FIRST Apply is the contract point that
+        # flips it to nodeState=0 (Normal). Idempotent on subsequent
+        # Applies. The finally placement guarantees the flip even if a
+        # prior step raised -- without that guarantee the user-reported
+        # repro surfaces (Apply raised silently inside the
+        # with-undo_chunk, Step 8 was unwound past, and the node stayed
+        # in Blocking with no UI cue). The success vs partial-apply
+        # warning text discriminates so the TD can act on the right
+        # signal.
+        try:
+            current_state = cmds.getAttr(shape + ".nodeState")
+        except Exception:
+            current_state = 0
+        if int(current_state) != 0:
+            try:
+                cmds.setAttr(shape + ".nodeState", 0)
+                if apply_succeeded:
+                    cmds.warning(
+                        "RBFtools: nodeState 2 (Blocking) -> 0 "
+                        "(Normal). RBF outputs now active on the "
+                        "driven channels.")
+                else:
+                    cmds.warning(
+                        u"RBFtools: Apply raised inside step {} \u2014 "
+                        "nodeState forced 2 -> 0 (Normal) so the "
+                        "node is live, but POSE STATE MAY BE "
+                        "PARTIAL. Review the Script Editor for the "
+                        "prior error and re-run Apply once the "
+                        "underlying issue is fixed.".format(
+                            failed_step or "<unknown>"))
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses: failed to flip nodeState to 0: "
+                    "{} (TD must set Normal manually).".format(exc))
+
+
+def apply_poses_routed(node, driver_targets, driven_targets, poses):
+    """M_P0_DRIVER_CONNECT_UX_REVAMP Part F.1 (2026-05-12) --
+    multi-driver-aware Apply that preserves input[] / output[] wiring.
+
+    Unlike legacy :func:`apply_poses` which calls
+    :func:`clear_node_data` (wiping every multi attr including
+    ``input[]`` and ``output[]`` and forcing a re-wire on the next
+    Connect click), this path calls :func:`_clear_poses_only` so the
+    user's ``add_driver_source`` / ``set_driver_source_attrs`` wiring
+    stays alive across Apply.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of the RBFtools node.
+    driver_targets : list[tuple[str, list[str]]]
+        ``[(driver_node, [attrs]), ...]`` preserving per-source
+        identity. Flatten order MUST match ``shape.input[]`` subscript
+        layout (driverSource[] append order).
+    driven_targets : list[tuple[str, list[str]]]
+        Same shape for the driven side.
+    poses : list[PoseData]
+        Ordered pose data from the UI table.
+
+    Math: identical to :func:`apply_poses` (same kernel, same pose
+    samples). The only difference is the Step 1 clear is partial --
+    pose multi attrs only, NOT the input[]/output[] connections.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+
+    # Flatten driver / driven attrs preserving the driverSource[]
+    # append order so shape.input[i] -> pose col i mapping stays
+    # consistent with the existing wiring.
+    flat_drv_attrs = [
+        a for _node, attrs in driver_targets for a in attrs]
+    flat_dvn_attrs = [
+        a for _node, attrs in driven_targets for a in attrs]
+    drv_node = driver_targets[0][0] if driver_targets else ""
+    dvn_node = driven_targets[0][0] if driven_targets else ""
+
+    # v4 -> v5 upgrade notice mirrors apply_poses; the routed path
+    # supports the same lifecycle.
+    had_poses = False
+    try:
+        had_poses = bool(
+            cmds.getAttr(shape + ".poses", multiIndices=True) or [])
+    except Exception:
+        had_poses = False
+    if had_poses and not _node_has_baseline_schema(node):
+        cmds.warning(
+            "Upgrading node {} to v5 baseline schema".format(shape))
+
+    # M_P0_APPLY_NODESTATE_FIX style: per-fatal-step instrumentation
+    # + try/finally Step 8. Step 1 is replaced with _clear_poses_only
+    # so input[]/output[] connections survive Apply.
+    apply_succeeded = False
+    failed_step = None
+    try:
+        with undo_chunk("RBFtools: apply poses (routed)"), \
+             _node_state_frozen(get_shape(node)):
+            # 0 -- M_P0_APPLY_FORCE_GENERIC mirror.
+            try:
+                cmds.setAttr(shape + ".rbfMode", 0)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses_routed: could not force rbfMode=0 "
+                    "(M_P0_APPLY_FORCE_GENERIC defense): {}".format(
+                        exc))
+
+            # 1 -- M_P0_DRIVER_CONNECT_UX_REVAMP Part F.1: clear
+            # pose data only. input[] / output[] connections stay.
+            try:
+                _clear_poses_only(node)
+            except Exception:
+                failed_step = "1 (_clear_poses_only)"
+                raise
+
+            # 2 -- write pose data (packed sequential indices).
+            try:
+                for seq_idx, pose in enumerate(poses):
+                    _write_pose_to_node(shape, seq_idx, pose)
+            except Exception:
+                failed_step = "2 (_write_pose_to_node)"
+                raise
+
+            # 3 -- SwingTwist cache (advisory).
+            try:
+                write_pose_swing_twist_cache(node, poses)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses_routed step 3 (SwingTwist cache) "
+                    "failed: {} (continuing -- cache miss falls back "
+                    "to live decompose)".format(exc))
+
+            # 4 -- per-output baselines.
+            try:
+                baselines = capture_output_baselines(
+                    dvn_node, flat_dvn_attrs, poses=poses)
+                write_output_baselines(node, baselines)
+            except Exception:
+                failed_step = "4 (capture/write_output_baselines)"
+                raise
+
+            # 5 -- per-pose local transforms.
+            try:
+                local_xforms = capture_per_pose_local_transforms(
+                    dvn_node, flat_dvn_attrs, poses)
+                write_pose_local_transforms(node, local_xforms)
+            except Exception:
+                failed_step = (
+                    "5 (capture/write_pose_local_transforms)")
+                raise
+
+            # 6 -- auto-aliases (advisory).
+            try:
+                auto_alias_outputs(
+                    node, flat_drv_attrs, flat_dvn_attrs, force=False)
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses_routed step 6 (auto-alias) failed: "
+                    "{} (continuing -- aliases are advisory)".format(
+                        exc))
+
+            # 7 -- trigger evaluation cycle.
+            try:
+                cmds.setAttr(shape + ".evaluate", 0)
+                cmds.setAttr(shape + ".evaluate", 1)
+            except Exception:
+                failed_step = "7 (evaluate trigger)"
+                raise
+
+            # 7b -- re-pin rbfMode=0 (belt-and-suspenders).
+            try:
+                cmds.setAttr(shape + ".rbfMode", 0)
+            except Exception:
+                pass
+
+            apply_succeeded = True
+    finally:
+        # 8 -- nodeState 2 -> 0 (Normal). Same as apply_poses.
+        try:
+            current_state = cmds.getAttr(shape + ".nodeState")
+        except Exception:
+            current_state = 0
+        if int(current_state) != 0:
+            try:
+                cmds.setAttr(shape + ".nodeState", 0)
+                if apply_succeeded:
+                    cmds.warning(
+                        "RBFtools: nodeState 2 (Blocking) -> 0 "
+                        "(Normal). RBF outputs now active on the "
+                        "driven channels.")
+                else:
+                    cmds.warning(
+                        "RBFtools: Apply (routed) raised inside "
+                        "step {} -- nodeState forced 2 -> 0 "
+                        "(Normal). POSE STATE MAY BE PARTIAL. "
+                        "Review Script Editor.".format(
+                            failed_step or "<unknown>"))
+            except Exception as exc:
+                cmds.warning(
+                    "apply_poses_routed: failed to flip nodeState "
+                    "to 0: {} (TD must set Normal manually).".format(
+                        exc))
+
+    # M_P0_DRIVER_CONNECT_UX_REVAMP Part F.1 post-apply audit: verify
+    # driverSource[] metadata is still consistent with driver_targets.
+    # If a sync glitch crept in, surface a cmds.warning so the user
+    # sees the drift in Script Editor (the indicator dots will also
+    # turn yellow / red).
+    try:
+        sources = read_driver_info_multi(node)
+    except Exception:
+        sources = []
+    if len(sources) != len(driver_targets):
+        cmds.warning(
+            "apply_poses_routed: driverSource[] count drift "
+            "(metadata={}, targets={})".format(
+                len(sources), len(driver_targets)))
+    for i, (target_node, target_attrs) in enumerate(driver_targets):
+        if i >= len(sources):
+            break
+        if (sources[i].node != target_node
+                or list(sources[i].attrs) != list(target_attrs)):
+            cmds.warning(
+                "apply_poses_routed: driverSource[{}] drift "
+                "(metadata={!r}, target={!r})".format(
+                    i, (sources[i].node, list(sources[i].attrs)),
+                    (target_node, list(target_attrs))))
+
+    return apply_succeeded
+
+
+def connect_poses(node, driver_node, driven_node,
+                  driver_attrs, driven_attrs, objects):
+    u"""Wire poses by **connecting** selected objects' attributes directly.
+
+    This is the **Connect** button path.  Instead of baking static
+    float values, each pose slot is live-connected to a scene object::
+
+        objects[p].driver_attr  \u2192  shape.poses[p].poseInput[i]
+        objects[p].driven_attr  \u2192  shape.poses[p].poseValue[i]
+
+    This enables live-updating setups where the solver re-reads pose
+    data every evaluation.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of the ``RBFtools``.
+    driver_node, driven_node : str
+        Source / destination objects for ``input[]`` / ``output[]`` wiring.
+    driver_attrs, driven_attrs : list[str]
+        Attribute names.
+    objects : list[str]
+        Selected scene objects \u2014 one per pose.
+    """
+    shape = get_shape(node)
+    if not _exists(shape) or not objects:
+        return
+
+    with undo_chunk("RBFtools: connect poses"):
+        # Clear existing data
+        clear_node_data(node)
+
+        # Wire driver inputs (same as apply)
+        wire_driver_inputs(node, driver_node, driver_attrs)
+
+        # Connect each object as a pose source
+        for p, obj in enumerate(objects):
+            if not _exists(obj):
+                cmds.warning("connect_poses: object '{}' does not exist, "
+                             "skipping pose {}".format(obj, p))
+                continue
+            for i, attr in enumerate(driver_attrs):
+                src = "{}.{}".format(obj, attr)
+                dst = "{}.poses[{}].poseInput[{}]".format(shape, p, i)
+                try:
+                    cmds.connectAttr(src, dst, force=True)
+                except Exception as exc:
+                    cmds.warning(u"connect_poses: {} \u2192 {} failed: {}".format(
+                        src, dst, exc))
+
+            for i, attr in enumerate(driven_attrs):
+                src = "{}.{}".format(obj, attr)
+                dst = "{}.poses[{}].poseValue[{}]".format(shape, p, i)
+                try:
+                    cmds.connectAttr(src, dst, force=True)
+                except Exception as exc:
+                    cmds.warning(u"connect_poses: {} \u2192 {} failed: {}".format(
+                        src, dst, exc))
+
+        # Wire driven outputs
+        wire_driven_outputs(node, driven_node, driven_attrs)
+
+        # Trigger evaluation
+        cmds.setAttr(shape + ".evaluate", 0)
+        cmds.setAttr(shape + ".evaluate", 1)
+
+
+_RBF_SUBSCRIPT_RE = re.compile(r"\[(\d+)\]$")
+
+
+def _occupied_input_subscripts(shape):
+    """Return the set of subscripts where ``shape.input[i]`` currently
+    has an incoming connection. Walked via ``cmds.listConnections``
+    on the parent multi-attr with ``connections=True, plugs=True``;
+    pairs come back as ``[shape.input[i], src_plug, ...]``."""
+    conns = cmds.listConnections(
+        shape + ".input", source=True, destination=False,
+        plugs=True, connections=True) or []
+    out = set()
+    for k in range(0, len(conns), 2):
+        m = _RBF_SUBSCRIPT_RE.search(conns[k])
+        if m:
+            out.add(int(m.group(1)))
+    return out
+
+
+def _occupied_output_subscripts(shape):
+    u"""Twin of :func:`_occupied_input_subscripts` for the driven side
+    \u2014 ``shape.output[i]`` driving an external attr."""
+    conns = cmds.listConnections(
+        shape + ".output", source=False, destination=True,
+        plugs=True, connections=True) or []
+    out = set()
+    for k in range(0, len(conns), 2):
+        m = _RBF_SUBSCRIPT_RE.search(conns[k])
+        if m:
+            out.add(int(m.group(1)))
+    return out
+
+
+def _next_free_subscript(occupied):
+    """Return the smallest non-negative int not in ``occupied``."""
+    i = 0
+    while i in occupied:
+        i += 1
+    return i
+
+
+def _subscript_of_existing_input(bone_plug, shape):
+    u"""If ``bone_plug`` is already connected to some
+    ``shape.input[i]``, return ``i``; else None.
+
+    M_UNITCONV_PURGE (2026-04-28): ``skipConversionNodes=True`` is
+    REQUIRED here. Maya silently inserts a ``unitConversion`` node
+    between rotation/dimensionless plug pairs (e.g. ``bone.rotateX``
+    in degrees -> ``input[i]`` in radians). Without skipConv,
+    ``listConnections`` returns the conversion node's input plug
+    instead of ``shape.input[i]`` \u2014 the prefix match misses, the
+    function falsely reports "not connected", and connect_routed
+    appends a NEW slot leaving a ghost wire at the old subscript.
+    Setting skipConv=True asks Maya to look THROUGH the conversion
+    node and surface the real downstream destination."""
+    conns = cmds.listConnections(
+        bone_plug, source=False, destination=True,
+        plugs=True, skipConversionNodes=True) or []
+    prefix = "{}.input[".format(shape)
+    for plug in conns:
+        if plug.startswith(prefix):
+            m = _RBF_SUBSCRIPT_RE.search(plug)
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def _subscript_of_existing_output(shape, dst_plug):
+    """Twin: if ``dst_plug`` is driven by some ``shape.output[i]``,
+    return ``i``; else None. Same skipConversionNodes contract as
+    :func:`_subscript_of_existing_input`."""
+    conns = cmds.listConnections(
+        dst_plug, source=True, destination=False,
+        plugs=True, skipConversionNodes=True) or []
+    prefix = "{}.output[".format(shape)
+    for plug in conns:
+        if plug.startswith(prefix):
+            m = _RBF_SUBSCRIPT_RE.search(plug)
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def _direct_node_at_subscript(shape, side, idx):
+    u"""Return the immediate (non-skipConv) connected node name at
+    ``shape.<side>[idx]`` \u2014 i.e. what is PHYSICALLY wired to that
+    multi slot, which may be a unitConversion node that the
+    skipConv-flavoured queries hide. Returns None when nothing is
+    connected (or on query failure)."""
+    plug = "{}.{}[{}]".format(shape, side, idx)
+    if side == "input":
+        nodes = cmds.listConnections(
+            plug, source=True, destination=False,
+            plugs=False, connections=False) or []
+    else:
+        nodes = cmds.listConnections(
+            plug, source=False, destination=True,
+            plugs=False, connections=False) or []
+    return nodes[0] if nodes else None
+
+
+def _disconnect_or_purge(shape, side, idx, other_plug):
+    u"""\u65a9\u8349\u9664\u6839 \u2014 sever the wire at ``shape.<side>[idx]`` AND drop
+    the multi-subscript itself so the array stays packed.
+
+    Three-step sever protocol:
+      1. If a ``unitConversion`` node sits between the bone and the
+         RBF multi (Maya's silent rotation-channel insertion),
+         ``cmds.delete()`` that conversion node \u2014 this severs both
+         legs of the conversion in one shot.
+      2. Otherwise issue a plain ``cmds.disconnectAttr`` on the
+         direct (bone <-> shape) pair.
+      3. M_REMOVE_MULTI (2026-04-28): regardless of which path
+         severed the wire, fire
+         ``cmds.removeMultiInstance(shape.<side>[idx], b=True)``
+         to physically destroy the multi-array slot. Without this,
+         the subscript lingers as an "empty index" \u2014 visually noisy
+         in Node Editor + future occupied-subscript queries can be
+         tricked into thinking the slot is still in use.
+
+    Returns True iff the wire was successfully torn down (either
+    via delete or disconnectAttr); the slot-removal step is best-
+    effort and never blocks the return value.
+    """
+    direct = _direct_node_at_subscript(shape, side, idx)
+    severed = False
+    if direct is not None:
+        try:
+            ntype = cmds.nodeType(direct)
+        except Exception:
+            ntype = ""
+        if ntype == "unitConversion":
+            cmds.warning(
+                "disconnect: deleting unitConversion {!r} at "
+                "{}.{}[{}]".format(direct, shape, side, idx))
+            try:
+                cmds.delete(direct)
+                severed = True
+            except Exception as exc:
+                cmds.warning(
+                    "disconnect: failed to delete unitConversion "
+                    "{!r}: {}".format(direct, exc))
+                # Fall through to plain disconnect attempt below.
+    if not severed:
+        # Direct wire -- straightforward disconnect.
+        if side == "input":
+            src_plug = other_plug
+            dst_plug = "{}.input[{}]".format(shape, idx)
+        else:
+            src_plug = "{}.output[{}]".format(shape, idx)
+            dst_plug = other_plug
+        cmds.warning(
+            "disconnect: trying {} -> {}".format(
+                src_plug, dst_plug))
+        try:
+            cmds.disconnectAttr(src_plug, dst_plug)
+            severed = True
+        except Exception as exc:
+            cmds.warning(
+                "disconnect: {} -> {} FAILED: {}".format(
+                    src_plug, dst_plug, exc))
+    # M_REMOVE_MULTI: physically drop the now-empty multi subscript
+    # so the array stays packed. b=True forces the removal even if
+    # Maya thinks the index still has stale connection bookkeeping
+    # (belt-and-suspenders against the unitConversion-delete path
+    # leaving partial state). Best-effort: a removeMultiInstance
+    # failure logs a warning but does NOT change the return value.
+    if severed:
+        target_plug = "{}.{}[{}]".format(shape, side, idx)
+        try:
+            cmds.removeMultiInstance(target_plug, b=True)
+            cmds.warning(
+                "disconnect: removeMultiInstance({}) cleared the "
+                "empty slot".format(target_plug))
+        except Exception as exc:
+            cmds.warning(
+                "disconnect: removeMultiInstance({}) failed: "
+                "{}".format(target_plug, exc))
+
+        # M_P0_DISCONNECT_SCALE_RESTORE (2026-05-10): the disconnect
+        # loop runs INSIDE _node_state_frozen (cpp:4574) which sets
+        # shape.nodeState=1; with compute() short-circuited, the
+        # solver's MFnNumericData::kDouble output plug returns 0.0
+        # (the kDouble default). DG propagates that 0 to driven.scaleX
+        # and disconnectAttr leaves it cached. Result: every scale
+        # channel disconnected during a routed Disconnect collapses
+        # to 0 -- t-pose mesh implodes. Defense: after severance,
+        # force any disconnected scale channel back to 1.0
+        # (multiplicative identity, matches v5 PART G.1 anchor).
+        # Other channels (translate / rotate / visibility) are not
+        # remediated here -- they default to 0 in Maya which is the
+        # natural rest pose for those attrs.
+        if side == "output" and other_plug:
+            attr_short = other_plug.rsplit(".", 1)[-1]
+            if attr_short in SCALE_ATTR_NAMES:
+                try:
+                    cmds.setAttr(other_plug, 1.0)
+                except Exception as exc:
+                    cmds.warning(
+                        "disconnect: failed to restore {} -> 1.0 "
+                        "after sever: {}".format(other_plug, exc))
+    return severed
+
+
+def _sweep_empty_subscripts(shape, side):
+    u"""M_SWEEP_EMPTY (2026-04-28): post-disconnect sweep.
+
+    Walks every allocated subscript of ``shape.<side>[]`` (via
+    ``cmds.getAttr(..., multiIndices=True)``) and compares against
+    the occupied set (subscripts that currently carry a wire). Any
+    subscript that exists in the multi-array but has NO connection
+    is a stale empty index \u2014 likely left behind by Maya's internal
+    bookkeeping after ``cmds.delete`` on a unitConversion or by a
+    prior tool's incomplete teardown. Each such subscript is
+    physically removed via ``cmds.removeMultiInstance(..., b=True)``.
+
+    Idempotent: safe to call any number of times. Returns the count
+    of subscripts cleaned for telemetry / status-bar reporting.
+    """
+    plug_root = "{}.{}".format(shape, side)
+    try:
+        all_indices = cmds.getAttr(plug_root, multiIndices=True) or []
+    except Exception as exc:
+        cmds.warning(
+            "_sweep_empty_subscripts: getAttr({} multiIndices) "
+            "failed: {}".format(plug_root, exc))
+        return 0
+    if side == "input":
+        occupied = _occupied_input_subscripts(shape)
+    else:
+        occupied = _occupied_output_subscripts(shape)
+    count = 0
+    for idx in all_indices:
+        if idx in occupied:
+            continue
+        target = "{}.{}[{}]".format(shape, side, idx)
+        try:
+            cmds.removeMultiInstance(target, b=True)
+            cmds.warning(
+                "sweep: removed empty subscript {}".format(target))
+            count += 1
+        except Exception as exc:
+            cmds.warning(
+                "sweep: removeMultiInstance({}) failed: {}".format(
+                    target, exc))
+    return count
+
+
+def _resolved_pairs_at(shape, side):
+    """For Scene-B "clear all wires for this bone": return
+    ``[(idx, other_node, other_plug), ...]`` for every occupied
+    subscript on ``shape.<side>[]``. ``skipConversionNodes=True``
+    so ``other_node`` is the actual driver/driven bone (not the
+    intermediate conversion node)."""
+    plug = "{}.{}".format(shape, side)
+    if side == "input":
+        conns = cmds.listConnections(
+            plug, source=True, destination=False,
+            plugs=True, connections=True,
+            skipConversionNodes=True) or []
+    else:
+        conns = cmds.listConnections(
+            plug, source=False, destination=True,
+            plugs=True, connections=True,
+            skipConversionNodes=True) or []
+    out = []
+    for k in range(0, len(conns), 2):
+        shape_plug = conns[k]
+        other_plug = conns[k + 1]
+        m = _RBF_SUBSCRIPT_RE.search(shape_plug)
+        if m:
+            idx = int(m.group(1))
+            other_node = other_plug.split(".")[0]
+            out.append((idx, other_node, other_plug))
+    return out
+
+
+def _src_already_drives_node(src_plug, target_node):
+    u"""2026-04-28 (M_IDEMPOTENT_CONNECT): True iff ``src_plug`` is
+    already connected (in any form) to ANY plug on the RBF target.
+    Walks ``cmds.listConnections(src, destination=True, plugs=True)``
+    and matches both the transform and shape names so an existing
+    wire to ``shape.input[X]`` blocks a fresh wire to
+    ``shape.input[Y]`` \u2014 same source must NEVER feed two slots."""
+    target_shape = get_shape(target_node) or target_node
+    conns = cmds.listConnections(
+        src_plug, source=False, destination=True, plugs=True) or []
+    for dst_plug in conns:
+        dst_node = dst_plug.split(".")[0]
+        if dst_node == target_node or dst_node == target_shape:
+            return True
+    return False
+
+
+def _node_already_drives_dst(target_node, dst_plug):
+    """2026-04-28 (M_IDEMPOTENT_CONNECT): True iff ``dst_plug``
+    (a driven attribute, e.g. ``boneX.rotateY``) is already driven
+    by ANY ``output[i]`` on the RBF target. Symmetric to
+    :func:`_src_already_drives_node` for the driven side."""
+    target_shape = get_shape(target_node) or target_node
+    conns = cmds.listConnections(
+        dst_plug, source=True, destination=False, plugs=True) or []
+    for src_plug in conns:
+        src_node = src_plug.split(".")[0]
+        if src_node == target_node or src_node == target_shape:
+            return True
+    return False
+
+
+def _flatten_targets(targets):
+    u"""Normalise ``[(node, [attr, ...]), ...]`` \u2192 flat list of
+    ``"node.attr"`` plug strings, **dropping pairs where the node /
+    attr does not actually exist on the scene**. Each rejection is
+    logged via cmds.warning so the failure is never silent."""
+    plugs = []
+    for entry in (targets or []):
+        if entry is None:
+            continue
+        node, attrs = entry
+        if not node or not _exists(node):
+            cmds.warning(
+                "M_BATCH_ROUTING: skipping target with missing "
+                "node {!r}".format(node))
+            continue
+        for a in (attrs or []):
+            if not cmds.attributeQuery(a, node=node, exists=True):
+                cmds.warning(
+                    "M_BATCH_ROUTING: {}.{} does not exist; "
+                    "skipping".format(node, a))
+                continue
+            plugs.append("{}.{}".format(node, a))
+    return plugs
+
+
+@contextlib.contextmanager
+def _node_state_frozen(shape):
+    """2026-04-28 (M_CRASH_FIX defense 2): freeze the solver node's
+    DG compute for the duration of a batch wire/unwire storm.
+
+    Setting ``nodeState`` to 1 (``HasNoEffect``) tells Maya to skip
+    ``compute()`` on the node entirely. Without this, every single
+    ``cmds.connectAttr`` against ``shape.input[i]`` /
+    ``shape.output[i]`` triggers DG dirty propagation, the C++
+    ``compute()`` runs with a half-wired ``input[]`` array, and any
+    array-bound assertion in the kernel build (M1.4 / M2.1a /
+    M2.2 paths) explodes -> CTD.
+
+    Restoration is in ``finally`` so an exception inside the loop
+    cannot leave a node permanently disabled. Failure to read or
+    restore the prior state surfaces via ``cmds.warning`` rather
+    than the silent state corruption it would be otherwise.
+    """
+    plug = "{}.nodeState".format(shape)
+    prev_state = 0
+    captured = False
+    try:
+        prev_state = int(cmds.getAttr(plug))
+        captured = True
+    except Exception as exc:
+        cmds.warning(
+            "_node_state_frozen: could not read {} ({}); proceeding "
+            "WITHOUT freeze (crash-risk path).".format(plug, exc))
+    if captured:
+        try:
+            cmds.setAttr(plug, 1)   # 1 == HasNoEffect
+        except Exception as exc:
+            cmds.warning(
+                "_node_state_frozen: could not set {}=1 ({}); "
+                "proceeding without freeze".format(plug, exc))
+            captured = False
+    try:
+        yield
+    finally:
+        if captured:
+            try:
+                cmds.setAttr(plug, prev_state)
+            except Exception as exc:
+                cmds.warning(
+                    "_node_state_frozen: failed to restore {} -> "
+                    "{}: {}".format(plug, prev_state, exc))
+
+
+def connect_routed(node, driver_targets, driven_targets):
+    u"""2026-04-28 (M_BATCH_ROUTING): tab-aware Connect.
+
+    ``driver_targets`` / ``driven_targets`` are lists of
+    ``(node_name, [attr, ...])`` produced by main_window's
+    :func:`_gather_routed_targets`. Each list is FLATTENED via
+    :func:`_flatten_targets` (with per-attr ``attributeQuery``
+    existence checks + ``cmds.warning`` on miss) before wiring.
+
+    Wires sequentially:
+
+      driver_plugs[i]  \u2500\u2500\u2192  shape.input[i]
+      shape.output[i]  \u2500\u2500\u2192  driven_plugs[i]
+
+    M_CRASH_FIX defense 2 (2026-04-28): the entire connectAttr loop
+    runs INSIDE :func:`_node_state_frozen` \u2014 the solver's nodeState
+    is forced to ``HasNoEffect`` so the half-wired ``input[]`` array
+    cannot trigger ``compute()`` mid-construction. Restoration is in
+    ``finally``; exceptions cannot leak a permanent freeze.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        cmds.warning("connect_routed: solver shape missing for "
+                     "{!r}".format(node))
+        return
+
+    drv_plugs = _flatten_targets(driver_targets)
+    dvn_plugs = _flatten_targets(driven_targets)
+
+    with undo_chunk("RBFtools: connect routed"), \
+         _node_state_frozen(shape):
+        # M_BREAK_REBUILD (2026-04-28): per-attr per-bone
+        # break-then-rebuild. For every (bone, attr) in the
+        # blueprint scope:
+        #   1. If bone.attr is already wired to shape.input[X],
+        #      cmds.warning + disconnect it (frees slot X).
+        #   2. Find the lowest-numbered free subscript on
+        #      shape.input[].
+        #   3. Connect bone.attr -> shape.input[free].
+        # The "break" step eliminates cross-click stacking
+        # (the same source CANNOT end up driving two slots);
+        # the "next free slot" step keeps the wires packed
+        # contiguously and matches user blueprint order.
+        for src in drv_plugs:
+            existing = _subscript_of_existing_input(src, shape)
+            if existing is not None:
+                cmds.warning(
+                    "connect_routed: {} already at {}.input[{}]; "
+                    "resetting (root-and-branch).".format(
+                        src, shape, existing))
+                # M_UNITCONV_PURGE: route the break through
+                # _disconnect_or_purge so any unitConversion is
+                # deleted, not left dangling.
+                _disconnect_or_purge(shape, "input", existing, src)
+            occupied = _occupied_input_subscripts(shape)
+            free_idx = _next_free_subscript(occupied)
+            dst = "{}.input[{}]".format(shape, free_idx)
+            try:
+                cmds.connectAttr(src, dst, force=True)
+            except Exception as exc:
+                cmds.warning(
+                    u"connect_routed: {} \u2192 {} failed: {}".format(
+                        src, dst, exc))
+
+        for dst in dvn_plugs:
+            existing = _subscript_of_existing_output(shape, dst)
+            if existing is not None:
+                cmds.warning(
+                    "connect_routed: {} already driven by "
+                    "{}.output[{}]; resetting (root-and-branch)."
+                    .format(dst, shape, existing))
+                _disconnect_or_purge(shape, "output", existing, dst)
+            occupied = _occupied_output_subscripts(shape)
+            free_idx = _next_free_subscript(occupied)
+            src = "{}.output[{}]".format(shape, free_idx)
+            try:
+                cmds.connectAttr(src, dst, force=True)
+            except Exception as exc:
+                cmds.warning(
+                    u"connect_routed: {} \u2192 {} failed: {}".format(
+                        src, dst, exc))
+    # nodeState restored by the context manager exit. Trigger a
+    # SINGLE consolidated re-evaluation outside the freeze window so
+    # the solver runs exactly once with the FINAL fully-wired array,
+    # not N partial computes during the storm.
+    try:
+        cmds.setAttr(shape + ".evaluate", 0)
+        cmds.setAttr(shape + ".evaluate", 1)
+    except Exception as exc:
+        cmds.warning(
+            "connect_routed: post-freeze evaluate toggle failed: "
+            "{}".format(exc))
+
+
+def _disconnect_bone_specific(shape, bone, attr, side):
+    """Scene-A precision disconnect of ``bone.attr`` from
+    ``shape.<side>[]``. Returns the count of edges actually broken
+    (0 or 1).
+
+    M_UNITCONV_PURGE (2026-04-28): subscript lookup uses
+    skipConversionNodes=True so a unitConversion-mediated rotation
+    channel is correctly identified; the actual sever runs through
+    :func:`_disconnect_or_purge` which DELETES the unitConversion
+    node when present (root-and-branch cleanup)."""
+    if not _exists(bone):
+        cmds.warning(
+            "disconnect: bone {!r} missing; skipping".format(bone))
+        return 0
+    if not cmds.attributeQuery(attr, node=bone, exists=True):
+        cmds.warning(
+            "disconnect: {}.{} does not exist; skipping".format(
+                bone, attr))
+        return 0
+    bone_plug = "{}.{}".format(bone, attr)
+    if side == "input":
+        idx = _subscript_of_existing_input(bone_plug, shape)
+    else:
+        idx = _subscript_of_existing_output(shape, bone_plug)
+    if idx is None:
+        return 0
+    return 1 if _disconnect_or_purge(shape, side, idx, bone_plug) else 0
+
+
+def _disconnect_bone_all(shape, bone, side):
+    """Scene-B: disconnect EVERY wire between ``bone`` and
+    ``shape.<side>[]``. Returns the count of edges actually broken.
+
+    M_UNITCONV_PURGE: walks ``_resolved_pairs_at`` (skipConversion
+    on) so each (idx, bone, plug) triple identifies the REAL bone
+    behind any unitConversion. Each matching idx is severed via
+    :func:`_disconnect_or_purge`, deleting orphan unitConversion
+    nodes along the way."""
+    if not _exists(bone):
+        cmds.warning(
+            "disconnect: bone {!r} missing; skipping".format(bone))
+        return 0
+    count = 0
+    for idx, other_node, other_plug in _resolved_pairs_at(shape, side):
+        if other_node != bone:
+            continue
+        if _disconnect_or_purge(shape, side, idx, other_plug):
+            count += 1
+    return count
+
+
+def disconnect_routed(node, driver_targets, driven_targets):
+    u"""2026-04-28 (M_BREAK_REBUILD): tab-aware Disconnect \u2014 Scene
+    A / B / C dispatch.
+
+      * Scene A \u2014 ``attrs`` is non-empty: precision-disconnect each
+        listed (bone, attr) pair from the RBF input/output multi.
+      * Scene B \u2014 ``attrs`` is empty: clear EVERY wire between this
+        bone and the RBF input/output multi (the "select tab, hit
+        Disconnect with no attrs highlighted" UX = clear the bone).
+      * Scene C \u2014 across the entire scope, zero wires are broken:
+        return ``{"disconnected_count": 0}`` so main_window can
+        surface a confirmDialog informing the user.
+
+    Returns ``{"disconnected_count": int}`` so callers can dispatch
+    the Scene-C UI dialog without coupling core to Qt.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        cmds.warning(
+            "disconnect_routed: solver shape missing for "
+            "{!r}".format(node))
+        return {"disconnected_count": 0}
+
+    total = 0
+    with undo_chunk("RBFtools: disconnect routed"), \
+         _node_state_frozen(shape):
+        for bone, attrs in (driver_targets or []):
+            if not bone:
+                continue
+            if attrs:
+                for attr in attrs:
+                    total += _disconnect_bone_specific(
+                        shape, bone, attr, "input")
+            else:
+                total += _disconnect_bone_all(
+                    shape, bone, "input")
+
+        for bone, attrs in (driven_targets or []):
+            if not bone:
+                continue
+            if attrs:
+                for attr in attrs:
+                    total += _disconnect_bone_specific(
+                        shape, bone, attr, "output")
+            else:
+                total += _disconnect_bone_all(
+                    shape, bone, "output")
+
+        # M_SWEEP_EMPTY (2026-04-28): final pass over both sides of
+        # the multi-array. Catches any orphan subscripts left behind
+        # by prior tools / unitConversion-delete bookkeeping that
+        # the per-slot cleanup in _disconnect_or_purge could miss.
+        # Idempotent -- empty when there are no orphans.
+        _sweep_empty_subscripts(shape, "input")
+        _sweep_empty_subscripts(shape, "output")
+
+    if total == 0:
+        cmds.warning(
+            "disconnect_routed: scope produced 0 disconnects "
+            u"(Scene C \u2014 caller should surface a UI hint).")
+    return {"disconnected_count": int(total)}
+
+
+def connect_node(node, driver_node, driven_node,
+                 driver_attrs, driven_attrs):
+    u"""Wire driver inputs and driven outputs on the solver node.
+
+    This is the **Connect** button path:
+
+    1. ``driver_node.attr \u2192 shape.input[i]``
+    2. ``shape.output[i] \u2192 driven_node.attr``
+    3. Triggers evaluation.
+
+    Call this after :func:`apply_poses` has written the pose data.
+
+    Parameters
+    ----------
+    node : str
+        Transform or shape of the ``RBFtools``.
+    driver_node, driven_node : str
+        The source and destination scene objects.
+    driver_attrs, driven_attrs : list[str]
+        Ordered attribute names on driver / driven.
+    """
+    shape = get_shape(node)
+    if not _exists(shape):
+        return
+
+    with undo_chunk("RBFtools: connect node"):
+        wire_driver_inputs(node, driver_node, driver_attrs)
+        wire_driven_outputs(node, driven_node, driven_attrs)
+        cmds.setAttr(shape + ".evaluate", 0)
+        cmds.setAttr(shape + ".evaluate", 1)
+
+
+# =====================================================================
+#  12. Pose recall -- restore a saved pose to the scene
+# =====================================================================
+
+def _safe_disconnect_incoming(plug):
+    u"""Disconnect any **incoming** connection to *plug*, return it.
+
+    Returns
+    -------
+    (str, str) or None
+        ``(source_plug, destination_plug)`` that was disconnected,
+        or ``None`` if no incoming connection existed.
+
+    Used by :func:`recall_pose` to temporarily break connections,
+    set the stored value, then reconnect.
+
+    Connection temporarily broken::
+
+        source_node.attr \u2500\u2715\u2192 target_node.attr
+                              \u2191
+                              setAttr(stored_value)
+        source_node.attr \u2500\u2500\u2192 target_node.attr   (re-connected)
+    """
+    conns = cmds.listConnections(
+        plug,
+        source=True, destination=False,
+        plugs=True, connections=True,
+        skipConversionNodes=True,
+    ) or []
+    if len(conns) >= 2:
+        dst, src = conns[0], conns[1]
+        try:
+            cmds.disconnectAttr(src, dst)
+        except Exception:
+            return None
+        return (src, dst)
+    return None
+
+
+def recall_pose(driver_node, driven_node,
+                driver_attrs, driven_attrs, pose):
+    u"""Restore driver and driven attributes to a saved pose snapshot.
+
+    For each attribute:
+
+    1. **Disconnect** any incoming connection (so ``setAttr`` succeeds).
+    2. **Set** the stored value from :class:`PoseData`.
+    3. **Reconnect** the original connection.
+
+    This allows the user to "preview" a recorded pose without
+    permanently breaking the rig.
+
+    Parameters
+    ----------
+    driver_node, driven_node : str
+        Scene objects.
+    driver_attrs, driven_attrs : list[str]
+        Attribute names (must match the pose dimensionality).
+    pose : PoseData
+        The pose to recall.
+
+    Math note \u2014 value injection under live connections
+    --------------------------------------------------
+    When a plug ``P`` has an incoming connection ``S \u2192 P``, Maya ignores
+    ``setAttr P`` because the DG overwrites it on the next evaluation.
+    We must temporarily sever ``S \u2192 P``, set the value, then restore:
+
+    .. math::
+
+        P_{value} = \\text{pose.inputs}[i] \\quad \\text{while } S \\not\\to P
+
+    Then ``S \u2192 P`` is restored.  The visible result persists until the
+    next DG evaluation propagates ``S`` again.
+    """
+    if not _exists(driver_node) or not _exists(driven_node):
+        return
+
+    with undo_chunk("RBFtools: recall pose {}".format(pose.index)):
+        # Driver attributes
+        for i, attr in enumerate(driver_attrs):
+            if i >= len(pose.inputs):
+                break
+            plug = "{}.{}".format(driver_node, attr)
+            saved = _safe_disconnect_incoming(plug)
+            try:
+                cmds.setAttr(plug, pose.inputs[i])
+            except Exception as exc:
+                cmds.warning("recall_pose: setAttr {} failed: {}".format(
+                    plug, exc))
+            if saved:
+                try:
+                    cmds.connectAttr(saved[0], saved[1])
+                except Exception as exc:
+                    cmds.warning("recall_pose: reconnect {} -> {} failed: {}".format(
+                        saved[0], saved[1], exc))
+
+        # Driven attributes
+        for i, attr in enumerate(driven_attrs):
+            if i >= len(pose.values):
+                break
+            plug = "{}.{}".format(driven_node, attr)
+            saved = _safe_disconnect_incoming(plug)
+            try:
+                cmds.setAttr(plug, pose.values[i])
+            except Exception as exc:
+                cmds.warning("recall_pose: setAttr {} failed: {}".format(
+                    plug, exc))
+            if saved:
+                try:
+                    cmds.connectAttr(saved[0], saved[1])
+                except Exception as exc:
+                    cmds.warning("recall_pose: reconnect {} -> {} failed: {}".format(
+                        saved[0], saved[1], exc))
+
+
+# =====================================================================
+#  13. BlendShape auto-fill vector generation
+# =====================================================================
+
+def is_blendshape(node):
+    """Return ``True`` if *node* is a ``blendShape`` deformer."""
+    return _exists(node) and cmds.nodeType(node) == "blendShape"
+
+
+def generate_rest_outputs(n_driven):
+    """Generate a zero-vector rest pose (all outputs = 0).
+
+    Used as ``pose[0]`` for BlendShape auto-fill.
+
+    Parameters
+    ----------
+    n_driven : int
+        Number of driven attributes.
+
+    Returns
+    -------
+    list[float]
+        ``[0.0, 0.0, ..., 0.0]`` of length *n_driven*.
+    """
+    return [0.0] * n_driven
+
+
+def generate_onehot_outputs(n_driven, pose_index, has_rest_pose):
+    r"""Generate a one-hot output vector for BlendShape auto-fill.
+
+    When driving a blendShape node, each pose after the rest pose
+    activates exactly one target at weight 1.0:
+
+    .. math::
+
+        \mathbf{v}[i] = \begin{cases}
+            1.0 & \text{if } i = p - \delta \\
+            0.0 & \text{otherwise}
+        \end{cases}
+
+    where :math:`p` is the ``pose_index`` and
+    :math:`\delta = 1` if a rest pose exists, else 0.
+
+    Parameters
+    ----------
+    n_driven : int
+        Number of driven (blendShape target) attributes.
+    pose_index : int
+        The pose number being added.
+    has_rest_pose : bool
+        Whether pose 0 (rest) already exists in the model.
+
+    Returns
+    -------
+    list[float]
+        One-hot vector of length *n_driven*.
+    """
+    position = pose_index - (1 if has_rest_pose else 0)
+    if position < 0 or position >= n_driven:
+        cmds.warning("generate_onehot_outputs: position {} out of range "
+                     "for {} driven attrs".format(position, n_driven))
+    return [1.0 if i == position else 0.0 for i in range(n_driven)]
+
+
+# =====================================================================
+#  14. Spatial matrix utilities  (OpenMaya 2 -- precision-critical)
+# =====================================================================
+
+
+def _dag_path(node):
+    """Return an ``om2.MDagPath`` for *node*, or ``None`` on failure."""
+    import maya.api.OpenMaya as om2
+    sel = om2.MSelectionList()
+    try:
+        sel.add(node)
+        return sel.getDagPath(0)
+    except Exception:
+        return None
+
+
+def get_world_matrix(node):
+    r"""Return the **world-space** transformation matrix of *node*.
+
+    Uses ``MDagPath.inclusiveMatrix()`` which corresponds to the
+    ``worldMatrix[0]`` plug but avoids DG evaluation overhead.
+
+    Returns
+    -------
+    om2.MMatrix
+        4x4 row-major transformation matrix.
+
+    Maya convention (row vectors, post-multiply)::
+
+        v' = v * M
+    """
+    import maya.api.OpenMaya as om2
+    dag = _dag_path(node)
+    if dag is None:
+        return om2.MMatrix()
+    return dag.inclusiveMatrix()
+
+
+def get_local_matrix(node):
+    r"""Return the **local-space** (parent-relative) matrix of *node*.
+
+    .. math::
+
+        M_{local} = M_{world} \times M_{parent}^{-1}
+
+    This is the matrix that, when applied to a point in parent space,
+    produces the same result as the node's translate / rotate / scale
+    channels combined.
+
+    Returns
+    -------
+    om2.MMatrix
+
+    Notes
+    -----
+    * For a root-level node (no parent), ``M_{parent} = I`` so
+      ``M_{local} = M_{world}``.
+    * Uses OpenMaya 2 (``maya.api.OpenMaya``) for double-precision
+      arithmetic.  ``cmds.getAttr("node.matrix")`` returns a flat
+      tuple that must be manually repacked """ u"\u2014" r""" ``MDagPath`` is both
+      cleaner and faster.
+    """
+    import maya.api.OpenMaya as om2
+    dag = _dag_path(node)
+    if dag is None:
+        return om2.MMatrix()
+
+    world = dag.inclusiveMatrix()
+
+    # Parent world matrix = exclusiveMatrix (everything *above* this node)
+    parent_world = dag.exclusiveMatrix()
+
+    # M_local = M_world * M_parent^{-1}
+    return world * parent_world.inverse()
+
+
+# M2.3: identity local-Transform fallback. Used for blendShape driven
+# nodes (no local Transform concept) and as the safe default when the
+# Apply-time replay is skipped entirely. Layout matches the C++
+# poseLocalTransform compound: t(3) + q(4, q_w >= 0 canonical) + s(3).
+IDENTITY_LOCAL_TRANSFORM = {
+    "translate": (0.0, 0.0, 0.0),
+    "quat":      (0.0, 0.0, 0.0, 1.0),
+    "scale":     (1.0, 1.0, 1.0),
+}
+
+
+def decompose_matrix_quat(matrix):
+    r"""Decompose an ``MMatrix`` into ``translate / quat / scale``.
+
+    Returns
+    -------
+    dict
+        ``{"translate": (tx, ty, tz),
+           "quat":      (qx, qy, qz, qw),   # q_w >= 0 canonical
+           "scale":     (sx, sy, sz)}``
+
+    Differs from :func:`decompose_matrix` in two ways:
+
+    * Rotation is returned as a **unit quaternion**, not Euler angles.
+      This is rotateOrder-independent by construction """ u"\u2014" r""" the caller
+      does NOT need to know the driven_node's rotateOrder (v5 addendum
+      """ u"\u00a7" r"""M2.3 A).
+    * The quaternion is canonicalised to the ``q_w >= 0`` hemisphere,
+      matching the sign convention used by M2.1b (SwingTwist encoding)
+      and M2.2 (QWA output).
+
+    Shear handling: ``MTransformationMatrix.scale()`` returns only the
+    3-D scale component; any shear in the input matrix is **silently
+    dropped**. M2.3 explicitly does not represent shear (v5 addendum
+    """ u"\u00a7" r"""M2.3 T7). Rigs that depend on driven-node shear should bake it
+    before Apply.
+    """
+    import maya.api.OpenMaya as om2
+    xform = om2.MTransformationMatrix(matrix)
+    t = xform.translation(om2.MSpace.kTransform)
+    q = xform.rotation(asQuaternion=True)
+    s = xform.scale(om2.MSpace.kTransform)
+    qx, qy, qz, qw = q.x, q.y, q.z, q.w
+    if qw < 0.0:
+        qx, qy, qz, qw = -qx, -qy, -qz, -qw
+    return {
+        "translate": (t.x, t.y, t.z),
+        "quat":      (qx, qy, qz, qw),
+        "scale":     (s[0], s[1], s[2]),
+    }
+
+
+def decompose_matrix(matrix):
+    r"""Decompose an ``MMatrix`` into translate / rotate / scale.
+
+    Uses ``MTransformationMatrix`` for numerically stable extraction.
+
+    Returns
+    -------
+    dict
+        ``{"translate": (tx, ty, tz),
+           "rotate":    (rx, ry, rz),   # radians, XYZ order
+           "scale":     (sx, sy, sz)}``
+
+    Math """ u"\u2014" r""" the decomposition factors ``M`` as:
+
+    .. math::
+
+        M = S \times R \times T
+
+    where *S* is a diagonal scale matrix, *R* is an orthogonal
+    rotation matrix, and *T* is a translation matrix.
+    Rotation is extracted as Euler angles in XYZ order (radians).
+    """
+    import maya.api.OpenMaya as om2
+    xform = om2.MTransformationMatrix(matrix)
+    t = xform.translation(om2.MSpace.kTransform)
+    r = xform.rotation(asQuaternion=False)   # MEulerRotation
+    s = xform.scale(om2.MSpace.kTransform)
+    return {
+        "translate": (t.x, t.y, t.z),
+        "rotate":    (r.x, r.y, r.z),
+        "scale":     (s[0], s[1], s[2]),
+    }
+
+
+# ============================================================================
+#  M_P0_DUPLICATE_POSE_DETECT (2026-05-01) -- Python pre-check before C++ kernel
+# ============================================================================
+
+def _detect_duplicate_pose_inputs(poses, tolerance=1e-7):
+    u"""Scan poses for input-vector duplicates within tolerance.
+
+    Returns list of ``(idx_a, idx_b)`` pairs where
+    ``pose[a].inputs`` is component-wise within ``tolerance`` of
+    ``pose[b].inputs``.
+
+    Rationale
+    ---------
+    The RBF kernel matrix ``K[i, j] = phi(||x_i - x_j||)`` becomes
+    singular when two pose input vectors coincide (or are within
+    numerical noise). Gaussian / Inverse-MQ kernels mask this via
+    ``lambda`` regularization (``phi(0) = 1`` keeps the diagonal
+    dominant). Multi-Quadratic Biharmonic / Inverse-MQB kernels have
+    ``phi(0) ~ 0``, so adding lambda still leaves rows linearly
+    dependent \u2014 the C++ Cholesky + GE two-tier solver
+    (``RBFtools.cpp:1900-1914``) detects the singularity and raises
+    ``MS::kFailure``, surfacing an opaque "RBF decomposition failed"
+    to the user.
+
+    Detecting in Python before any C++ call lets the controller tell
+    the user *exactly* which pose pair to merge or delete, instead of
+    leaving them to bisect 21 poses by hand.
+
+    Tolerance ``1e-7`` is roughly ``float32 eps * 10`` \u2014 aligned with
+    the precision the C++ kernel itself works in.
+    """
+    duplicates = []
+    n = len(poses)
+    for i in range(n):
+        for j in range(i + 1, n):
+            inputs_i = list(poses[i].inputs)
+            inputs_j = list(poses[j].inputs)
+            if len(inputs_i) != len(inputs_j):
+                continue
+            if all(abs(a - b) <= tolerance
+                   for a, b in zip(inputs_i, inputs_j)):
+                duplicates.append((i, j))
+    return duplicates
