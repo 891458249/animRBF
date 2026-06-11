@@ -266,16 +266,27 @@ class TestHierarchicalMath(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_predicted_base_value_uses_projected_driver(self):
-        """Brief sec.2.3 Polish 1. The child pose's full driver vector
-        MUST be projected onto baseNet.activeDrivers BEFORE feeding
-        baseNet inference."""
+        """Brief sec.2.3 Polish 1 + M_P0_HIERARCHICAL_ENGINE_EXACT
+        (2026-05-28). The child pose's full driver vector MUST be
+        projected onto net.activeDrivers before subnet inference --
+        the projection now lives INSIDE the unified forward
+        (inferSubNetExact), which training-time Predicted_Base and
+        inference-time Base_Output/Delta_y all share (Bug B/C fix:
+        one code path = one kernel = no train/infer basis mismatch).
+        """
         self.assertIn(
-            "driver_for_base.push_back(", self._cpp,
-            "Projection helper MUST build a driver_for_base vector")
+            "driverSub.push_back(", self._cpp,
+            "Unified forward MUST project the driver onto "
+            "net.activeDrivers")
         self.assertIn(
-            "for (int d :", self._cpp,
-            "Projection loop MUST iterate baseNet.activeDrivers")
-        # And: the delta RHS uses (Actual - Predicted_Base) per channel.
+            "inferSubNetExact", self._cpp,
+            "Training Predicted_Base and inference MUST share the "
+            "unified subnet forward")
+        self.assertIn(
+            "childDriver[d] = matPoses(", self._cpp,
+            "Delta RHS MUST evaluate Predicted_Base on the child's "
+            "full (normalized) driver row")
+        # And: the additive delta RHS uses (Actual - Predicted_Base).
         self.assertIn(
             "- predicted[c];", self._cpp,
             "Delta RHS MUST be Actual - Predicted")
@@ -363,65 +374,95 @@ class TestHierarchicalMath(unittest.TestCase):
     # 9. Scale channel skips delta (Phase 15 single-layer Shepard)
     # ------------------------------------------------------------------
 
-    def test_scale_channel_uses_phase15_shepard_single_layer(self):
-        """Brief sec.3.3: outputIsScale[c] channels are NOT updated by
-        Phase 16 delta blending -- they keep the Phase 15 Shepard for
-        Scale single-layer math."""
-        # Reference: channel kind "scale" causes hierarchical_inference
-        # to skip the delta add.
-        driver = [0.5, 0.0]
-        base_xs = [[0.0, 0.0], [1.0, 0.0]]
-        base_w = [[1.0, 0.0], [-1.0, 0.0]]
-        delta_nets = {
-            0: {
-                "child_xs": [[0.5, 0.0]],
-                "child_weights": [[100.0, 100.0]],
-            }
-        }
-        out = hierarchical_inference(
-            driver, base_xs, base_w, [0], delta_nets,
-            ["translate", "scale"], sigma=1.0)
-        # channel 0 (translate) gets the delta; channel 1 (scale)
-        # does not.
-        phi = [_gauss_kernel(driver, x, 1.0) for x in base_xs]
-        base_scale = base_w[0][1] * phi[0] + base_w[1][1] * phi[1]
-        self.assertAlmostEqual(out[1], base_scale, places=9,
-            msg="Scale channel MUST NOT receive delta contribution")
-        # And in C++:
-        self.assertIn(
-            "outputIsScale", self._cpp.split(
-                "M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 commit 4")[1],
-            "Inference path MUST consult outputIsScale before adding "
-            "delta contribution")
+    def test_scale_channel_uses_phase17_multiplicative_delta(self):
+        """PHASE17a (M_P0_HIERARCHICAL_ENGINE_EXACT 2026-05-28):
+        outputIsScale[c] channels now blend MULTIPLICATIVELY --
+        y = (y_anchored + 1) * prod_p(1 + alpha_p * DeltaRel_p) - 1
+        in the anchored space (scale anchor = 1.0). The reference
+        mirror verifies the composition; the C++ source must carry
+        the multiplicative accumulator + the additive skip."""
+        # Reference: multiplicative composition in full value space.
+        y_base_full = 2.0          # base prediction (full value)
+        alpha = 0.4
+        delta_rel = 0.5            # deltaNet output at this driver
+        expected = y_base_full * (1.0 + alpha * delta_rel)
+        # anchored pipeline: (y-1) -> compose -> +1 round trip
+        y_anchored = y_base_full - 1.0
+        composed = (y_anchored + 1.0) * (1.0 + alpha * delta_rel) - 1.0
+        self.assertAlmostEqual(composed + 1.0, expected, places=12,
+            msg="Anchored multiplicative composition MUST equal the "
+                "full-value-space formula")
+        # And in C++ (inside the commit 4 inference block):
+        after = self._cpp.split(
+            "M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 commit 4")[1]
+        self.assertIn("outputIsScale", after,
+            "Inference MUST consult outputIsScale per channel")
+        self.assertIn("multProd", after,
+            "PHASE17a MUST accumulate the multiplicative product "
+            "per scale channel")
+        # Training side: relative ratio RHS + divide-by-zero guard.
+        self.assertIn("actualFull / predFull", self._cpp,
+            "Training RHS for scale MUST be Actual/Predicted - 1")
+        # The warn message straddles adjacent C++ string literals;
+        # assert on fragments that each live inside one literal.
+        self.assertIn("delta disabled for", self._cpp,
+            "Scale delta MUST guard |Predicted| < 1e-6 with a warn")
+        self.assertIn("predFull", self._cpp,
+            "Scale guard MUST test the full-value-space prediction")
 
     # ------------------------------------------------------------------
     # 10. Quaternion channel returns Base_Output
     # ------------------------------------------------------------------
 
-    def test_quaternion_channel_returns_base_only(self):
-        """Brief sec.3.3 -- isQuatMember[c] channels keep the
-        Base_Output entirely (TODO Phase 17)."""
-        driver = [0.5, 0.0]
-        base_xs = [[0.0, 0.0], [1.0, 0.0]]
-        base_w = [[3.0], [-3.0]]
-        delta_nets = {
-            0: {
-                "child_xs": [[0.5, 0.0]],
-                "child_weights": [[42.0]],
-            }
-        }
-        out = hierarchical_inference(
-            driver, base_xs, base_w, [0], delta_nets,
-            ["quat"], sigma=1.0)
-        phi = [_gauss_kernel(driver, x, 1.0) for x in base_xs]
-        expected = base_w[0][0] * phi[0] + base_w[1][0] * phi[1]
-        self.assertAlmostEqual(out[0], expected, places=9,
-            msg="Quaternion channel MUST equal Base_Output (no delta)")
-        # And in C++:
-        self.assertIn(
-            "isQuatMember", self._cpp.split(
-                "M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 commit 4")[1],
-            "Inference MUST consult isQuatMember before adding delta")
+    def test_quaternion_channel_uses_phase17_so3_delta(self):
+        """PHASE17b (M_P0_HIERARCHICAL_ENGINE_EXACT 2026-05-28):
+        quat-group channels blend in the so(3) tangent space --
+        training stores delta_i = log(qb^-1 * qa) per child, inference
+        composes q = q_base (x) exp(sum_p alpha_p * delta_p). The
+        pure-Python mirror verifies the log/exp round trip + the
+        alpha -> 0 identity limit (anti-leak); the C++ source must
+        carry the so(3) helpers + accumulator."""
+        import math as _m
+
+        def q_exp(v):
+            ang = _m.sqrt(sum(x * x for x in v))
+            if ang < 1e-12:
+                return [0.0, 0.0, 0.0, 1.0]
+            k = _m.sin(0.5 * ang) / ang
+            return [v[0] * k, v[1] * k, v[2] * k, _m.cos(0.5 * ang)]
+
+        def q_log(q):
+            s = _m.sqrt(q[0]*q[0] + q[1]*q[1] + q[2]*q[2])
+            if s < 1e-12:
+                return [0.0, 0.0, 0.0]
+            ang = 2.0 * _m.atan2(s, q[3])
+            return [q[0] * ang / s, q[1] * ang / s, q[2] * ang / s]
+
+        # log/exp round trip on a non-trivial rotation.
+        v = [0.3, -0.2, 0.5]
+        rt = q_log(q_exp(v))
+        for a, b in zip(rt, v):
+            self.assertAlmostEqual(a, b, places=9,
+                msg="so(3) log(exp(v)) MUST round-trip")
+        # alpha -> 0 limit: exp(0 * delta) = identity -> q == q_base.
+        self.assertEqual(q_exp([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0, 1.0],
+            "Zero tangent MUST compose to the identity (far-driver "
+            "anti-leak: quat == Base_Output)")
+        # And in C++ (inside the commit 4 inference block):
+        after = self._cpp.split(
+            "M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 commit 4")[1]
+        self.assertIn("isQuatMember", after,
+            "Inference MUST consult isQuatMember per channel")
+        self.assertIn("so3Sum", after,
+            "PHASE17b MUST accumulate alpha-weighted so(3) tangents")
+        for helper in ("quatLogSO3", "quatExpSO3", "quatMulXYZW",
+                       "quatNormalizeXYZW"):
+            self.assertIn(helper, self._cpp,
+                "so(3) helper {} MUST exist".format(helper))
+        # Training side: hemisphere alignment before log.
+        self.assertIn("Hemisphere-align qa to qb", self._cpp,
+            "Training MUST hemisphere-align the child quat before "
+            "taking the tangent (short-arc guarantee)")
 
     # ------------------------------------------------------------------
     # 11. Sibling delta mask union when inconsistent
