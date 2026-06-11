@@ -410,6 +410,35 @@ public:
                                const BRMatrix &polyMatArg,
                                int polyDim);
 
+    // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28): unified sub-net
+    // forward pass -- the ONE code path shared by (a) training-time
+    // Predicted_Base for the delta RHS, and (b) inference-time
+    // Base_Output / Delta_y. Wraps getPoseWeights on the row/column
+    // subset described by net.poseIndices / net.activeDrivers, so
+    // the sub-net forward uses the exact same kernel + per-pose
+    // sigma + polynomial term as the legacy path. Passing an empty
+    // quatGroupStarts/isQuatMember runs every column through the
+    // scalar path (delta nets ARE pure scalar interpolants -- their
+    // quat columns hold so(3) tangent components, not quaternions).
+    // normsFull empty => driverFull is already in normalized space
+    // (normalizeVector no-ops on size mismatch).
+    static void inferSubNetExact(MDoubleArray &out,
+                                 const RBFSubNet &net,
+                                 const BRMatrix &posesFull,
+                                 const BRMatrix &valuesFull,
+                                 const std::vector<double> &driverFull,
+                                 const std::vector<double> &normsFull,
+                                 const std::vector<double> &widthsFull,
+                                 double widthFallback,
+                                 int distType,
+                                 int encoding,
+                                 short kernelType,
+                                 unsigned solveCount,
+                                 const std::vector<int> &quatGroupStarts,
+                                 const std::vector<bool> &isQuatMember,
+                                 bool &qwaAnyClippedOut,
+                                 bool &qwaAnyDegenerateOut);
+
     virtual double interpolateWeight(double value, int type);
     virtual double blendCurveWeight(double value);
     virtual void setOutputValues(MDoubleArray weightsArray, MDataBlock data, bool inactive);
@@ -642,6 +671,14 @@ private:
     RBFSubNet                          baseNet;
     std::unordered_map<int, RBFSubNet> deltaNets;
     bool                               subnetCacheDirty;
+    // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28): true when the last
+    // training pass found ANY explicit parent OR explicit driver mask
+    // -- the inference Pass 1 then routes through the baseNet subset
+    // forward (inferSubNetExact) instead of the legacy full-pose
+    // getPoseWeights call. false = Phase 15 fast path, numerically
+    // equivalent to pre-Phase-16. Runtime state, never persisted;
+    // recomputed by the first compute() after .ma load.
+    bool                               subnetEngaged;
 
     // M1.3: per-dimension raw-space bounds snapshot. Refilled inside the
     // evalInput==true training path in getPoseData / getPoseVectors, read

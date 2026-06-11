@@ -161,6 +161,77 @@ MObject RBFtools::exposeData;
 // creator
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28) -- so(3) / quaternion
+// helpers for Phase 17b delta blending. Quaternion component order is
+// (x, y, z, w) throughout, matching the QWA output / poseLocalQuat
+// convention (identity = 0,0,0,1).
+// ---------------------------------------------------------------------
+
+namespace {
+
+inline void quatNormalizeXYZW(double q[4])
+{
+    const double n = std::sqrt(q[0]*q[0] + q[1]*q[1]
+                               + q[2]*q[2] + q[3]*q[3]);
+    if (n > 1e-12) {
+        q[0] /= n; q[1] /= n; q[2] /= n; q[3] /= n;
+    } else {
+        q[0] = 0.0; q[1] = 0.0; q[2] = 0.0; q[3] = 1.0;
+    }
+}
+
+// Hamilton product r = a * b (xyzw layout).
+inline void quatMulXYZW(const double a[4], const double b[4],
+                        double r[4])
+{
+    const double ax = a[0], ay = a[1], az = a[2], aw = a[3];
+    const double bx = b[0], by = b[1], bz = b[2], bw = b[3];
+    r[0] = aw*bx + ax*bw + ay*bz - az*by;
+    r[1] = aw*by - ax*bz + ay*bw + az*bx;
+    r[2] = aw*bz + ax*by - ay*bx + az*bw;
+    r[3] = aw*bw - ax*bx - ay*by - az*bz;
+}
+
+// log: unit quaternion -> rotation vector (axis * full angle).
+// Grassia 1998 exponential-map parameterization.
+inline void quatLogSO3(const double q[4], double v[3])
+{
+    double qq[4] = { q[0], q[1], q[2], q[3] };
+    quatNormalizeXYZW(qq);
+    // Hemisphere: log(q) == log(-q) as a rotation; canonicalize w >= 0
+    // so the returned angle is the short way around.
+    if (qq[3] < 0.0) {
+        qq[0] = -qq[0]; qq[1] = -qq[1]; qq[2] = -qq[2]; qq[3] = -qq[3];
+    }
+    const double sinHalf = std::sqrt(qq[0]*qq[0] + qq[1]*qq[1]
+                                     + qq[2]*qq[2]);
+    if (sinHalf < 1e-12) {
+        v[0] = 0.0; v[1] = 0.0; v[2] = 0.0;
+        return;
+    }
+    const double angle = 2.0 * std::atan2(sinHalf, qq[3]);
+    const double k = angle / sinHalf;
+    v[0] = qq[0] * k; v[1] = qq[1] * k; v[2] = qq[2] * k;
+}
+
+// exp: rotation vector (axis * full angle) -> unit quaternion.
+inline void quatExpSO3(const double v[3], double q[4])
+{
+    const double angle = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+    if (angle < 1e-12) {
+        q[0] = 0.0; q[1] = 0.0; q[2] = 0.0; q[3] = 1.0;
+        return;
+    }
+    const double half = 0.5 * angle;
+    const double k = std::sin(half) / angle;
+    q[0] = v[0] * k; q[1] = v[1] * k; q[2] = v[2] * k;
+    q[3] = std::cos(half);
+}
+
+}  // anonymous namespace
+
+
 RBFtools::RBFtools()
     : lastSolveMethod(0),              // M1.4: Cholesky tried first on fresh node.
       prevSolverMethodVal(0),          // M1.4: Auto; matches solverMethod default.
@@ -186,7 +257,10 @@ RBFtools::RBFtools()
       // (re)trains, even when the node was just loaded from a .ma
       // with cached weights -- the new schema fields could have
       // been edited externally between save and load.
-      subnetCacheDirty(true)
+      subnetCacheDirty(true),
+      // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28): fast path until
+      // the first training pass proves a hierarchy / mask is present.
+      subnetEngaged(false)
 {}
 
 RBFtools::~RBFtools()
@@ -2808,6 +2882,11 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         baseNet.isActiveLinear.assign(
                             driverDimAll, true);
                         deltaNets.clear();
+                        // M_P0_HIERARCHICAL_ENGINE_EXACT: no explicit
+                        // parent, no explicit mask -- inference takes
+                        // the legacy full-pose path (Phase 15
+                        // numerically equivalent).
+                        subnetEngaged = false;
                         subnetCacheDirty = false;
                     }
                     else {
@@ -2929,11 +3008,22 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         };
 
                         // -- per-subnet trainer ----------------------
-                        // Build subPoses (rows = poseIndices subset
-                        // of matPoses, cols = activeDrivers subset),
-                        // build K = getDistances(subPoses) + lambda*I,
-                        // try Cholesky -> GE -> augmented GE (poly).
-                        // Stores wMat + polyMat + isActiveLinear.
+                        // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28):
+                        // exact subset trainer. Mirrors the legacy
+                        // training pipeline 1:1 on the row/column
+                        // subset:
+                        //   getDistances -> getActivations (REAL
+                        //   kernel + per-pose sigma_pair; Bug E fix
+                        //   -- the original ship solved against the
+                        //   raw distance matrix) -> +lambda*I ->
+                        //   polyDim == 0 ? Cholesky/GE
+                        //              : augmented saddle-point GE
+                        //   with C-lite degenerate-column drop
+                        //   (Bug G fix -- polyMat was a zero-filled
+                        //   placeholder; anchors #3/#4 now truly run
+                        //   per subnet).
+                        // RHS (targetValues) is prepared by the
+                        // caller in the ANCHORED space (Bug F fix).
                         // Returns true on success.
                         auto trainSubNet = [&](
                                 RBFSubNet &net,
@@ -2960,18 +3050,33 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                             (unsigned)
                                                 net.activeDrivers[c]);
                             }
-                            // Build K = getDistances on the subset.
-                            // Inherits the same kernel/distance type
-                            // as the legacy path.
+                            // Distances -> kernel activations. The
+                            // per-pose sigma subset keeps K[i,j]'s
+                            // sigma_pair identical to what the
+                            // unified forward (inferSubNetExact /
+                            // getPoseWeights) uses at evaluation.
                             BRMatrix linMatSub = getDistances(
                                 subPoses, distanceTypeVal,
                                 (int)effectiveEncoding,
                                 !genericMode);
+                            std::vector<double> subWidths;
+                            if (!perPoseWidths.empty()) {
+                                subWidths.reserve(nP);
+                                for (unsigned r = 0; r < nP; ++r) {
+                                    const int pIdx =
+                                        net.poseIndices[r];
+                                    subWidths.push_back(
+                                        ((size_t)pIdx <
+                                         perPoseWidths.size())
+                                        ? perPoseWidths[(size_t)pIdx]
+                                        : getRadiusValue());
+                                }
+                            }
+                            getActivations(linMatSub, subWidths,
+                                           getRadiusValue(),
+                                           kernelVal);
                             // lambda*I (regularization preserved per
-                            // net). regularizationVal is the user's
-                            // λ plug read at the top of compute();
-                            // userLambda inside the legacy training
-                            // block is the same value clamped to >= 0.
+                            // net).
                             const double netLambda =
                                 (regularizationVal > 0.0)
                                 ? regularizationVal : 0.0;
@@ -2979,10 +3084,9 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                 for (unsigned d = 0; d < nP; ++d)
                                     linMatSub(d, d) += netLambda;
                             }
-                            // RHS = targetValues[poseIndices, :].
-                            // For baseNet, targetValues = matValues.
-                            // For deltaNet, targetValues already
-                            // holds Actual - Predicted_Base.
+                            // RHS = targetValues[poseIndices, :]
+                            // (anchored space, quat columns zeroed /
+                            // so(3) tangent -- caller's contract).
                             std::vector<std::vector<double>> yCols(
                                 solveCount,
                                 std::vector<double>(nP, 0.0));
@@ -2994,56 +3098,153 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                             }
                             net.wMat = BRMatrix();
                             net.wMat.setSize(nP, solveCount);
-                            // Try Cholesky.
+                            const double singTol =
+                                (netLambda > 0.0)
+                                ? ((netLambda * 1e-3 < 1.0e-9)
+                                   ? 1.0e-9
+                                   : (netLambda * 1e-3 < 1.0e-4
+                                      ? netLambda * 1e-3
+                                      : 1.0e-4))
+                                : 1.0e-4;
                             bool solved = false;
-                            {
-                                BRMatrix chol = linMatSub;
-                                if (chol.cholesky()) {
-                                    std::vector<double> x;
+                            const int subPolyDim =
+                                getPolynomialDim(kernelVal,
+                                                 (int)nD);
+                            if (subPolyDim == 0) {
+                                // Strictly-PD kernel: Cholesky tier 1,
+                                // GE tier 2 (legacy dispatch).
+                                net.polyMat = BRMatrix();
+                                net.isActiveLinear.assign(nD, true);
+                                {
+                                    BRMatrix chol = linMatSub;
+                                    if (chol.cholesky()) {
+                                        std::vector<double> x;
+                                        for (unsigned c = 0;
+                                             c < solveCount; ++c)
+                                        {
+                                            chol.choleskySolve(
+                                                yCols[c], x);
+                                            for (unsigned i = 0;
+                                                 i < nP; ++i)
+                                                net.wMat(i, c) = x[i];
+                                        }
+                                        solved = true;
+                                    }
+                                }
+                                if (!solved) {
+                                    bool geOk = true;
                                     for (unsigned c = 0;
                                          c < solveCount; ++c)
                                     {
-                                        chol.choleskySolve(
-                                            yCols[c], x);
+                                        BRMatrix solveMat = linMatSub;
+                                        solveMat.setSingularThreshold(
+                                            singTol);
+                                        std::vector<double> w(nP, 0.0);
+                                        int singIdx = -1;
+                                        if (!solveMat.solve(
+                                                yCols[c], w.data(),
+                                                singIdx))
+                                        {
+                                            geOk = false;
+                                            break;
+                                        }
                                         for (unsigned i = 0;
                                              i < nP; ++i)
-                                            net.wMat(i, c) = x[i];
+                                            net.wMat(i, c) = w[i];
                                     }
-                                    solved = true;
+                                    if (geOk) solved = true;
                                 }
-                            }
-                            // Fallback: GE with adaptive singular
-                            // threshold (Phase 15 Part C.4).
-                            if (!solved) {
-                                const double singTol =
-                                    (netLambda > 0.0)
-                                    ? ((netLambda * 1e-3 < 1.0e-9)
-                                       ? 1.0e-9
-                                       : (netLambda * 1e-3 < 1.0e-4
-                                          ? netLambda * 1e-3
-                                          : 1.0e-4))
-                                    : 1.0e-4;
+                            } else {
+                                // CPD kernel: augmented saddle-point
+                                // system with C-lite reduced P
+                                // (anchors #3 + #4, same construction
+                                // as the legacy full-pose path).
+                                bool anyDeg = false;
+                                detectDegeneratePolyCols(
+                                    subPoses, 1.0e-8,
+                                    net.isActiveLinear, anyDeg);
+                                int activeLin = 0;
+                                for (size_t j = 0;
+                                     j < net.isActiveLinear.size(); ++j)
+                                    if (net.isActiveLinear[j])
+                                        ++activeLin;
+                                const int activePolyDim = 1 + activeLin;
+                                std::vector<int> activeToCol;
+                                activeToCol.push_back(-1);
+                                for (size_t j = 0;
+                                     j < net.isActiveLinear.size(); ++j)
+                                    if (net.isActiveLinear[j])
+                                        activeToCol.push_back((int)j);
+
+                                const unsigned augN =
+                                    nP + (unsigned)activePolyDim;
+                                BRMatrix A;
+                                A.setSize(augN, augN);
+                                for (unsigned ai = 0; ai < nP; ++ai)
+                                    for (unsigned aj = 0; aj < nP; ++aj)
+                                        A(ai, aj) = linMatSub(ai, aj);
+                                std::vector<double> pRow;
+                                for (unsigned ai = 0; ai < nP; ++ai) {
+                                    polyBasis(
+                                        subPoses.getRowVector(ai),
+                                        subPolyDim, pRow);
+                                    for (int pk = 0;
+                                         pk < activePolyDim; ++pk)
+                                    {
+                                        const int col =
+                                            activeToCol[(size_t)pk];
+                                        const double v =
+                                            (col < 0)
+                                            ? pRow[0]
+                                            : pRow[1 + (size_t)col];
+                                        A(ai, nP + (unsigned)pk) = v;
+                                        A(nP + (unsigned)pk, ai) = v;
+                                    }
+                                }
+                                net.polyMat = BRMatrix();
+                                net.polyMat.setSize(
+                                    (unsigned)subPolyDim, solveCount);
                                 bool geOk = true;
+                                std::vector<double> yAug(augN, 0.0);
+                                std::vector<double> wAug(augN, 0.0);
                                 for (unsigned c = 0;
                                      c < solveCount; ++c)
                                 {
-                                    BRMatrix solveMat = linMatSub;
+                                    BRMatrix solveMat = A;
                                     solveMat.setSingularThreshold(
                                         singTol);
-                                    std::vector<double> w(nP, 0.0);
+                                    for (unsigned ai = 0;
+                                         ai < nP; ++ai)
+                                        yAug[ai] = yCols[c][ai];
+                                    for (unsigned k = nP;
+                                         k < augN; ++k)
+                                        yAug[k] = 0.0;
+                                    std::fill(wAug.begin(),
+                                              wAug.end(), 0.0);
                                     int singIdx = -1;
                                     if (!solveMat.solve(
-                                            yCols[c], w.data(),
+                                            yAug, wAug.data(),
                                             singIdx))
                                     {
                                         geOk = false;
                                         break;
                                     }
-                                    for (unsigned i = 0;
-                                         i < nP; ++i)
-                                        net.wMat(i, c) = w[i];
+                                    for (unsigned i = 0; i < nP; ++i)
+                                        net.wMat(i, c) = wAug[i];
+                                    for (int pk = 0;
+                                         pk < activePolyDim; ++pk)
+                                    {
+                                        const int col =
+                                            activeToCol[(size_t)pk];
+                                        const unsigned fullRow =
+                                            (col < 0)
+                                            ? 0u
+                                            : (unsigned)(1 + col);
+                                        net.polyMat(fullRow, c) =
+                                            wAug[nP + (unsigned)pk];
+                                    }
                                 }
-                                if (geOk) solved = true;
+                                solved = geOk;
                             }
                             if (!solved) {
                                 MGlobal::displayError(
@@ -3054,112 +3255,44 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                     "legacy wMat (Phase 15 path).");
                                 return false;
                             }
-                            // polyMat per subnet (anchor 4).
-                            // Build only when polyDim > 0.
-                            const int subPolyDim =
-                                getPolynomialDim(kernelVal,
-                                                 (int)nD);
-                            if (subPolyDim > 0) {
-                                // C lite per subnet (anchor 3).
-                                bool anyDeg = false;
-                                detectDegeneratePolyCols(
-                                    subPoses, 1.0e-8,
-                                    net.isActiveLinear, anyDeg);
-                                // Build polyMat (subPolyDim x
-                                // solveCount). For this stage we
-                                // store the constant term + each
-                                // active linear coefficient zeroed
-                                // (Phase 15.5 augmented GE will
-                                // back-fill). The structural
-                                // anchor matters; the math runs
-                                // through inference's polynomial
-                                // term path.
-                                net.polyMat = BRMatrix();
-                                net.polyMat.setSize(
-                                    (unsigned)subPolyDim, solveCount);
-                                for (unsigned r = 0;
-                                     r < (unsigned)subPolyDim; ++r)
-                                    for (unsigned c = 0;
-                                         c < solveCount; ++c)
-                                        net.polyMat(r, c) = 0.0;
-                            } else {
-                                net.polyMat = BRMatrix();
-                                net.isActiveLinear.assign(nD, true);
-                            }
                             return true;
                         };
 
-                        // -- inference helper for Predicted_Base ----
-                        // Used by delta RHS computation: given the
-                        // baseNet and a driver vector projected onto
-                        // baseNet.activeDrivers, return the per-output
-                        // channel prediction. Phase 16 inference uses
-                        // a richer version of this in commit 4.
-                        auto inferSubNet = [&](
-                                const RBFSubNet &net,
-                                const std::vector<double> &driverSub)
-                                -> std::vector<double>
-                        {
-                            std::vector<double> out(solveCount, 0.0);
-                            const unsigned nP =
-                                (unsigned)net.poseIndices.size();
-                            if (nP == 0) return out;
-                            // Kernel evaluation: distance from
-                            // driverSub to each subset row of
-                            // matPoses, fed through the same
-                            // kernel as the legacy path. For
-                            // simplicity here we approximate with
-                            // Euclidean activation; the full path
-                            // uses getActivations which lives in
-                            // the inference call. For Predicted_
-                            // Base accuracy this is acceptable
-                            // because the delta RHS just needs a
-                            // self-consistent baseline.
-                            std::vector<double> phi(nP, 0.0);
-                            double phi_sum = 0.0;
-                            const double sigma =
-                                (perPoseWidths.empty()
-                                 || nP == 0)
-                                ? getRadiusValue()
-                                : perPoseWidths[0];
-                            const double safeSigma =
-                                (sigma > 1e-9) ? sigma : 1.0;
-                            for (unsigned r = 0; r < nP; ++r) {
-                                double sq = 0.0;
-                                int pIdx = net.poseIndices[r];
-                                for (size_t c = 0;
-                                     c < driverSub.size() &&
-                                     c < net.activeDrivers.size();
-                                     ++c)
-                                {
-                                    double dv =
-                                        driverSub[c] -
-                                        matPoses(
-                                            (unsigned)pIdx,
-                                            (unsigned)
-                                                net.activeDrivers[c]);
-                                    sq += dv * dv;
-                                }
-                                const double d_norm =
-                                    std::sqrt(sq) / safeSigma;
-                                // Gaussian as universal fallback
-                                // for Predicted_Base; the inference
-                                // path uses the user's kernel.
-                                double phi_v =
-                                    std::exp(-d_norm * d_norm);
-                                phi[r] = phi_v;
-                                phi_sum += phi_v;
-                            }
+                        // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28):
+                        // the old Gaussian-approximation inferSubNet
+                        // lambda is GONE -- training-time Predicted_
+                        // Base and inference-time Base_Output now
+                        // share inferSubNetExact (same kernel, same
+                        // sigma, same polynomial term; Bug B fix).
+
+                        // Anchored target space (Bug F fix): the
+                        // legacy solver trains on y - anchor and the
+                        // finalize loop adds the anchor back, so the
+                        // subnet RHS must live in the same space.
+                        // Quat-group columns are zeroed -- QWA owns
+                        // them, the scalar solve must not move them
+                        // (mirrors legacy yCols handling).
+                        BRMatrix anchoredValues;
+                        anchoredValues.setSize(poseCount, solveCount);
+                        for (unsigned r = 0; r < poseCount; ++r) {
                             for (unsigned c = 0;
                                  c < solveCount; ++c)
                             {
-                                double v = 0.0;
-                                for (unsigned r = 0; r < nP; ++r)
-                                    v += net.wMat(r, c) * phi[r];
-                                out[c] = v;
+                                if (c < isQuatMember.size()
+                                    && isQuatMember[c])
+                                {
+                                    anchoredValues(r, c) = 0.0;
+                                    continue;
+                                }
+                                double anchor = 0.0;
+                                if (genericMode
+                                    && c < outputIsScaleArr.size())
+                                    anchor = outputIsScaleArr[c]
+                                             ? 1.0 : baseValueArr[c];
+                                anchoredValues(r, c) =
+                                    matValues(r, c) - anchor;
                             }
-                            return out;
-                        };
+                        }
 
                         // -- TRAIN BASE NET (Stage 2.2) --------------
                         baseNet.poseIndices = basePoseIndices;
@@ -3168,11 +3301,16 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                    "baseNet");
                         if (basePoseIndices.empty()
                             || baseNet.activeDrivers.empty()
-                            || !trainSubNet(baseNet, matValues,
+                            || !trainSubNet(baseNet, anchoredValues,
                                             "baseNet"))
                         {
                             // No usable base -- fall back to legacy
-                            // wMat passthrough (Phase 15 path).
+                            // wMat passthrough (Phase 15 path). The
+                            // legacy wMat was ALSO solved against
+                            // anchored RHS, full pose set, full
+                            // driver set -- inferSubNetExact on this
+                            // passthrough is numerically the legacy
+                            // forward.
                             baseNet.wMat = wMat;
                             baseNet.polyMat = polyMat;
                             baseNet.poseIndices.clear();
@@ -3188,7 +3326,18 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         }
 
                         // -- TRAIN DELTA NETS (Stage 2.3) ------------
+                        // Per-channel RHS family (engine-exact brief
+                        // §2.2):
+                        //   translate/rotate: anchored Actual minus
+                        //     Predicted_Base (additive delta).
+                        //   scale (Phase 17a): Actual/Predicted - 1
+                        //     (multiplicative relative delta in FULL
+                        //     value space; anchor for scale is 1.0).
+                        //   quat group (Phase 17b): so(3) tangent
+                        //     log(qb^-1 * qa) into the group's first
+                        //     3 columns, 4th column 0.
                         deltaNets.clear();
+                        bool scaleDeltaDivZeroWarned = false;
                         for (auto &kv : childGroups) {
                             int parentId = kv.first;
                             std::vector<int> &childList = kv.second;
@@ -3200,10 +3349,6 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                        "deltaNet");
                             if (net.activeDrivers.empty()) continue;
 
-                            // Build RHS delta = Actual -
-                            // Predicted_Base. Predicted_Base uses the
-                            // child's driver vector projected onto
-                            // baseNet.activeDrivers (hard rail #7).
                             BRMatrix deltaTarget;
                             deltaTarget.setSize(poseCount, solveCount);
                             for (unsigned r = 0; r < poseCount; ++r)
@@ -3211,28 +3356,160 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                      c < solveCount; ++c)
                                     deltaTarget(r, c) = 0.0;
                             for (int childIdx : childList) {
-                                std::vector<double> driver_for_base;
-                                driver_for_base.reserve(
-                                    baseNet.activeDrivers.size());
-                                for (int d :
-                                     baseNet.activeDrivers)
-                                    driver_for_base.push_back(
-                                        matPoses(
-                                            (unsigned)childIdx,
-                                            (unsigned)d));
-                                std::vector<double> predicted =
-                                    inferSubNet(
-                                        baseNet, driver_for_base);
+                                // Child's full driver vector in the
+                                // NORMALIZED space (matPoses rows are
+                                // post-normalizeColumns); empty norms
+                                // tells the unified forward to skip
+                                // re-normalization. Projection onto
+                                // baseNet.activeDrivers happens
+                                // inside inferSubNetExact (hard
+                                // rail #7).
+                                std::vector<double> childDriver(
+                                    driverDimAll, 0.0);
+                                for (unsigned d = 0;
+                                     d < driverDimAll; ++d)
+                                    childDriver[d] = matPoses(
+                                        (unsigned)childIdx, d);
+                                MDoubleArray predicted;
+                                bool clipTmp = false;
+                                bool degenTmp = false;
+                                inferSubNetExact(
+                                    predicted, baseNet,
+                                    matPoses, matValues,
+                                    childDriver,
+                                    std::vector<double>(),  // already normalized
+                                    perPoseWidths,
+                                    getRadiusValue(),
+                                    distanceTypeVal,
+                                    (int)effectiveEncoding,
+                                    kernelVal, solveCount,
+                                    quatGroupStarts, isQuatMember,
+                                    clipTmp, degenTmp);
                                 for (unsigned c = 0;
                                      c < solveCount; ++c)
                                 {
-                                    deltaTarget(
-                                        (unsigned)childIdx, c) =
-                                        matValues(
-                                            (unsigned)childIdx, c)
-                                        - predicted[c];
+                                    if (c < isQuatMember.size()
+                                        && isQuatMember[c])
+                                        continue;  // groups below
+                                    if (genericMode
+                                        && c < outputIsScaleArr.size()
+                                        && outputIsScaleArr[c])
+                                    {
+                                        // Phase 17a multiplicative:
+                                        // predicted is anchored
+                                        // (y - 1); full value =
+                                        // pred + 1.
+                                        const double predFull =
+                                            predicted[c] + 1.0;
+                                        const double actualFull =
+                                            matValues(
+                                                (unsigned)childIdx, c);
+                                        if (std::fabs(predFull)
+                                                < 1e-6)
+                                        {
+                                            deltaTarget(
+                                                (unsigned)childIdx,
+                                                c) = 0.0;
+                                            if (!scaleDeltaDivZeroWarned)
+                                            {
+                                                MGlobal::displayWarning(
+                                                    MString(
+                                                        "M_P0_HIERARCHICAL"
+                                                        "_ENGINE_EXACT: "
+                                                        "scale channel ")
+                                                    + c + " predicted "
+                                                    "base magnitude < "
+                                                    "1e-6 at pose " +
+                                                    childIdx +
+                                                    " -- multiplicative "
+                                                    "delta disabled for "
+                                                    "this sample "
+                                                    "(PHASE17a).");
+                                                scaleDeltaDivZeroWarned
+                                                    = true;
+                                            }
+                                        }
+                                        else
+                                        {
+                                            deltaTarget(
+                                                (unsigned)childIdx,
+                                                c) =
+                                                actualFull / predFull
+                                                - 1.0;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // Additive channels: both
+                                        // sides in anchored space.
+                                        deltaTarget(
+                                            (unsigned)childIdx, c) =
+                                            anchoredValues(
+                                                (unsigned)childIdx, c)
+                                            - predicted[c];
+                                    }
+                                }
+                                // Phase 17b: per quat group, so(3)
+                                // tangent delta = log(qb^-1 * qa).
+                                for (size_t g = 0;
+                                     g < quatGroupStarts.size(); ++g)
+                                {
+                                    const int s = quatGroupStarts[g];
+                                    if (s < 0
+                                        || (unsigned)(s + 3)
+                                            >= solveCount)
+                                        continue;
+                                    double qb[4] = {
+                                        predicted[(unsigned)(s + 0)],
+                                        predicted[(unsigned)(s + 1)],
+                                        predicted[(unsigned)(s + 2)],
+                                        predicted[(unsigned)(s + 3)] };
+                                    quatNormalizeXYZW(qb);
+                                    double qa[4] = {
+                                        matValues((unsigned)childIdx,
+                                                  (unsigned)(s + 0)),
+                                        matValues((unsigned)childIdx,
+                                                  (unsigned)(s + 1)),
+                                        matValues((unsigned)childIdx,
+                                                  (unsigned)(s + 2)),
+                                        matValues((unsigned)childIdx,
+                                                  (unsigned)(s + 3)) };
+                                    quatNormalizeXYZW(qa);
+                                    // Hemisphere-align qa to qb so
+                                    // the tangent is the short arc.
+                                    if (qa[0]*qb[0] + qa[1]*qb[1]
+                                        + qa[2]*qb[2] + qa[3]*qb[3]
+                                            < 0.0)
+                                    {
+                                        qa[0] = -qa[0]; qa[1] = -qa[1];
+                                        qa[2] = -qa[2]; qa[3] = -qa[3];
+                                    }
+                                    const double qbInv[4] = {
+                                        -qb[0], -qb[1], -qb[2], qb[3] };
+                                    double dq[4];
+                                    quatMulXYZW(qbInv, qa, dq);
+                                    double v[3];
+                                    quatLogSO3(dq, v);
+                                    deltaTarget((unsigned)childIdx,
+                                                (unsigned)(s + 0)) = v[0];
+                                    deltaTarget((unsigned)childIdx,
+                                                (unsigned)(s + 1)) = v[1];
+                                    deltaTarget((unsigned)childIdx,
+                                                (unsigned)(s + 2)) = v[2];
+                                    deltaTarget((unsigned)childIdx,
+                                                (unsigned)(s + 3)) = 0.0;
                                 }
                             }
+                            // The delta net is a PURE SCALAR
+                            // interpolant (additive residuals /
+                            // multiplicative ratios / so(3) tangent
+                            // components are all linear spaces), so
+                            // its quat columns must be solved like
+                            // scalars: hand trainSubNet a target with
+                            // the so(3) rows in place. trainSubNet
+                            // does not special-case quat columns --
+                            // the caller-side zeroing above only
+                            // applies to anchoredValues (baseNet).
                             if (trainSubNet(net, deltaTarget,
                                             "deltaNet"))
                             {
@@ -3249,6 +3526,14 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                                     "back to base-only inference.");
                             }
                         }
+                        // Engine-exact marker (strings-grep anchor
+                        // for build verification).
+                        static const char *kEngineExactMarker =
+                            "RBFtools: PHASE17 engine-exact subnet "
+                            "training (multiplicative scale + so(3) "
+                            "quat delta).";
+                        (void)kEngineExactMarker;
+                        subnetEngaged = true;
                         subnetCacheDirty = false;
                     }
                 }
@@ -3268,25 +3553,63 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                 const int polyDimInfer =
                     getPolynomialDim(kernelVal,
                                      (int)matPoses.getColSize());
-                getPoseWeights(weightsArray,
-                               matPoses,
-                               inputNorms,
-                               driver,
-                               poseModes,
-                               wMat,
-                               perPoseWidths,         // Commit 0b
-                               getRadiusValue(),      // fallback
-                               distanceTypeVal,
-                               (int)effectiveEncoding,
-                               /*isMatrixMode*/ !genericMode,
-                               kernelVal,
-                               matValues,
-                               quatGroupStarts,
-                               isQuatMember,
-                               qwaAnyClipped,
-                               qwaAnyDegenerate,
-                               polyMat,             // M_P0_RBF_POLYNOMIAL_AUGMENTATION
-                               polyDimInfer);
+                // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28) -- Bug A
+                // fix: when the hierarchy / driver-mask engine is
+                // engaged, Pass 1's Base_Output MUST come from the
+                // baseNet subset (base poses only, masked driver
+                // subset), NOT the legacy full-pose wMat. The legacy
+                // call fed delta poses into the "base" output, which
+                // (a) leaked delta into quaternion channels (QWA over
+                // ALL poses -- e2e scenario D failure) and (b) double-
+                // counted deltas on additive channels (legacy output
+                // at a child pose already ≈ Actual, then + alpha*Δ on
+                // top, silently masked by the Output Clamp).
+                // Also fixes Bug H: a mask-only rig (no parents) now
+                // actually projects the driver subset.
+                // subnetEngaged == false -> legacy path, numerically
+                // equivalent to Phase 15.
+                if (subnetEngaged && genericMode
+                    && !baseNet.poseIndices.empty())
+                {
+                    inferSubNetExact(weightsArray,
+                                     baseNet,
+                                     matPoses,
+                                     matValues,
+                                     driver,
+                                     inputNorms,
+                                     perPoseWidths,
+                                     getRadiusValue(),
+                                     distanceTypeVal,
+                                     (int)effectiveEncoding,
+                                     kernelVal,
+                                     solveCount,
+                                     quatGroupStarts,
+                                     isQuatMember,
+                                     qwaAnyClipped,
+                                     qwaAnyDegenerate);
+                }
+                else
+                {
+                    getPoseWeights(weightsArray,
+                                   matPoses,
+                                   inputNorms,
+                                   driver,
+                                   poseModes,
+                                   wMat,
+                                   perPoseWidths,         // Commit 0b
+                                   getRadiusValue(),      // fallback
+                                   distanceTypeVal,
+                                   (int)effectiveEncoding,
+                                   /*isMatrixMode*/ !genericMode,
+                                   kernelVal,
+                                   matValues,
+                                   quatGroupStarts,
+                                   isQuatMember,
+                                   qwaAnyClipped,
+                                   qwaAnyDegenerate,
+                                   polyMat,             // M_P0_RBF_POLYNOMIAL_AUGMENTATION
+                                   polyDimInfer);
+                }
                 if (qwaAnyClipped && !qwaClippedWarningIssued)
                 {
                     MGlobal::displayWarning(thisName + MString(
@@ -3311,42 +3634,42 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                 // -----------------------------------------------
                 // M_P0_RBF_HIERARCHICAL_TWO_LEVEL Phase 16 commit 4
                 // (2026-05-18) -- Three-Pass Shepard-gated inference.
+                // M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28) --
+                // rewritten on the exact subnet engine + PHASE17a/b.
                 //
-                // weightsArray as returned by getPoseWeights is
-                // Base_Output (Phase 15 single-layer output, with
-                // Output Clamp NOT YET applied -- that lives in the
-                // per-channel finalize loop below).
+                // weightsArray entering this block is the TRUE
+                // Base_Output: when subnetEngaged, Pass 1 above
+                // routed through inferSubNetExact(baseNet) -- base
+                // poses only, masked driver subset, QWA over base
+                // poses only. (Output Clamp NOT YET applied -- that
+                // lives in the per-channel finalize loop below.)
                 //
-                // When deltaNets is empty (trivial hierarchy), this
-                // block is a no-op -- weightsArray flows directly
-                // into the finalize loop, identical to Phase 15.
+                // When deltaNets is empty (trivial hierarchy or
+                // mask-only rig), this block is a no-op.
                 //
                 // When deltaNets is non-empty:
-                //   Pass 1: compute phi_per_base_pose -- the kernel
-                //           scalar phi(||driver_for_base - x_i||,
-                //           sigma_i, kernelType) for each base pose
-                //           i in baseNet.poseIndices. STORED
-                //           SEPARATELY from weight contributions
-                //           (hard rail #10: phi_i is NOT w_i, NOT
-                //           w_i * phi).
-                //   Pass 2: for each parent_id in deltaNets, compute
-                //           Delta_y[c] = sum_{child in delta net}
-                //           wMat(child, c) * phi(child). Then
-                //           alpha_parent = phi_parent /
-                //                         sum_{k in baseNet} phi_k
-                //           (denominator is ALL base poses -- hard
-                //           rail Shepard math problem A).
-                //           sum phi_k < 1e-12 -> all alpha = 0,
-                //           fallback to pure Base_Output (extrapolation
-                //           safety far from any base anchor).
+                //   Gate:   phi_per_base_pose -- Gaussian gate kernel
+                //           (NOT the interpolation kernel: a gate
+                //           must decay monotonically from phi(0) =
+                //           max; TPS/MQ/Linear grow with distance
+                //           and would invert the anti-leak
+                //           guarantee -- engine-exact brief §2.4).
+                //           alpha_p = phi_p / sum_{k in base} phi_k,
+                //           partition of unity; sum < 1e-12 -> all
+                //           alpha = 0 (extrapolation safety).
+                //   Pass 2: Delta_p = inferSubNetExact(deltaNets[p])
+                //           -- same kernel/sigma/poly as training.
                 //   Pass 3: per output channel c:
-                //     * isQuatMember[c]: outputs[c] = Base_Output[c]
-                //       (TODO Phase 17 so(3) log-exp).
-                //     * outputIsScale[c]: Phase 15 Shepard single-
-                //       layer remains the math (no delta added;
-                //       TODO Phase 17 multiplicative delta).
-                //     * else: outputs[c] += sum_parent alpha_parent *
-                //       Delta_y_parent[c] (additive).
+                //     * additive (translate/rotate):
+                //         y_c += sum_p alpha_p * Delta_p[c]
+                //     * outputIsScale[c] (PHASE17a multiplicative,
+                //       anchored space, scale anchor = 1):
+                //         y_c <- (y_c + 1) * prod_p(1 + alpha_p *
+                //                DeltaRel_p[c]) - 1
+                //     * quat group (PHASE17b so(3) log-exp,
+                //       Grassia 1998):
+                //         v_g = sum_p alpha_p * delta_so3_p
+                //         q <- q_base (x) exp(v_g), renormalized
                 //
                 // Input clamp already ran upstream (line 1685 area)
                 // BEFORE getPoseWeights, so the driver vector used
@@ -3406,20 +3729,35 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                         }
                     }
 
-                    // Pass 2 + Pass 3 combined per parent: compute
-                    // Delta_y for each parent in deltaNets, then
-                    // Shepard alpha against phi_sum, then add the
-                    // weighted contribution to weightsArray for
-                    // non-scale / non-quat channels.
+                    // Pass 2 + Pass 3 (M_P0_HIERARCHICAL_ENGINE_EXACT
+                    // 2026-05-28): per-parent delta forward through
+                    // the SAME unified subnet evaluator used at
+                    // training time (Bug C fix -- the old inline
+                    // Gaussian loop evaluated a different basis than
+                    // the kernel the delta weights were solved
+                    // against, breaking interpolation at the child
+                    // poses). Channel composition:
+                    //   additive (translate/rotate):
+                    //       y += sum_p alpha_p * Delta_p
+                    //   multiplicative scale (PHASE17a), anchored
+                    //   space (scale anchor = 1):
+                    //       y <- (y + 1) * prod_p(1 + alpha_p *
+                    //            DeltaRel_p) - 1
+                    //   quat group (PHASE17b), so(3) tangent blend:
+                    //       v_g = sum_p alpha_p * delta_so3_p
+                    //       q <- q_base (x) exp(v_g)   [Grassia 98]
                     if (phi_sum > 1e-12) {
-                        // Build a lookup parent_pose_idx -> local r
-                        // in baseNet.poseIndices so we can find
-                        // phi_parent for Shepard.
                         std::unordered_map<int, int>
                             basePoseToLocal;
                         for (unsigned r = 0; r < nBase; ++r)
                             basePoseToLocal[
                                 baseNet.poseIndices[r]] = (int)r;
+
+                        std::vector<double> addSum(solveCount, 0.0);
+                        std::vector<double> multProd(solveCount, 1.0);
+                        std::vector<double> so3Sum(
+                            quatGroupStarts.size() * 3, 0.0);
+                        bool anyDelta = false;
 
                         for (const auto &kv : deltaNets) {
                             int parentPoseIdx = kv.first;
@@ -3434,82 +3772,116 @@ MStatus RBFtools::compute(const MPlug &plug, MDataBlock &data)
                             const double alpha =
                                 phi_parent / phi_sum;
                             if (alpha < 1e-12) continue;
-                            // Compute Delta_y via this net's
-                            // children -- Gaussian kernel fallback
-                            // mirrors Pass 1 to keep the math self-
-                            // consistent.
-                            const unsigned nChild =
-                                (unsigned)net.poseIndices.size();
-                            std::vector<double> phi_child(
-                                nChild, 0.0);
-                            double radius_fb2 = getRadiusValue();
-                            if (radius_fb2 <= 1e-9) radius_fb2 = 1.0;
-                            for (unsigned r = 0;
-                                 r < nChild; ++r)
-                            {
-                                int pIdx = net.poseIndices[r];
-                                double sq = 0.0;
-                                for (size_t cc = 0;
-                                     cc <
-                                         net.activeDrivers.size()
-                                     && cc < driver.size();
-                                     ++cc)
-                                {
-                                    int dIdx =
-                                        net.activeDrivers[cc];
-                                    if (dIdx < 0
-                                        || (unsigned)dIdx
-                                            >= driver.size())
-                                        continue;
-                                    double dv =
-                                        driver[(size_t)dIdx]
-                                        - matPoses(
-                                            (unsigned)pIdx,
-                                            (unsigned)dIdx);
-                                    sq += dv * dv;
-                                }
-                                double d_norm =
-                                    std::sqrt(sq) / radius_fb2;
-                                phi_child[r] =
-                                    std::exp(-d_norm * d_norm);
-                            }
-                            // Apply per-channel: Translate / Rotate
-                            // additive; outputIsScale + isQuatMember
-                            // skipped per hard rail #4.
+                            // Delta forward. EMPTY quat-group list:
+                            // every column takes the scalar path --
+                            // a delta net is a pure scalar
+                            // interpolant whose quat columns hold
+                            // so(3) tangent components, not
+                            // quaternions (no QWA).
+                            MDoubleArray deltaOut;
+                            bool clipTmp = false;
+                            bool degenTmp = false;
+                            inferSubNetExact(
+                                deltaOut, net, matPoses, matValues,
+                                driver, inputNorms, perPoseWidths,
+                                getRadiusValue(), distanceTypeVal,
+                                (int)effectiveEncoding, kernelVal,
+                                solveCount,
+                                std::vector<int>(),
+                                std::vector<bool>(),
+                                clipTmp, degenTmp);
+                            if (deltaOut.length() < solveCount)
+                                continue;
+                            anyDelta = true;
                             for (unsigned c = 0;
                                  c < solveCount; ++c)
                             {
                                 if (c < isQuatMember.size()
                                     && isQuatMember[c])
-                                    continue;  // Quat: TODO P17.
+                                    continue;  // per-group below
                                 if (c < outputIsScaleArr.size()
                                     && outputIsScaleArr[c])
-                                    continue;  // Scale: Phase 15
-                                               // Shepard single-
-                                               // layer (TODO P17
-                                               // multiplicative).
-                                double dy_c = 0.0;
-                                if (net.wMat.getRowSize() >=
-                                        nChild
-                                    && net.wMat.getColSize() >
-                                        c)
-                                {
-                                    for (unsigned r = 0;
-                                         r < nChild; ++r)
-                                        dy_c +=
-                                            net.wMat(r, c)
-                                            * phi_child[r];
-                                }
-                                if (c < weightsArray.length()) {
-                                    // additive blend (Stage 3.3):
-                                    // y_final[c] = Base_Output[c]
-                                    //   + alpha * Delta_y_parent[c]
-                                    double cur =
-                                        weightsArray[c];
+                                    multProd[c] *=
+                                        (1.0 + alpha * deltaOut[c]);
+                                else
+                                    addSum[c] +=
+                                        alpha * deltaOut[c];
+                            }
+                            for (size_t g = 0;
+                                 g < quatGroupStarts.size(); ++g)
+                            {
+                                const int s = quatGroupStarts[g];
+                                if (s < 0
+                                    || (unsigned)(s + 3)
+                                        >= solveCount)
+                                    continue;
+                                so3Sum[g*3 + 0] += alpha
+                                    * deltaOut[(unsigned)(s + 0)];
+                                so3Sum[g*3 + 1] += alpha
+                                    * deltaOut[(unsigned)(s + 1)];
+                                so3Sum[g*3 + 2] += alpha
+                                    * deltaOut[(unsigned)(s + 2)];
+                            }
+                        }
+
+                        if (anyDelta) {
+                            for (unsigned c = 0;
+                                 c < solveCount
+                                 && c < weightsArray.length(); ++c)
+                            {
+                                if (c < isQuatMember.size()
+                                    && isQuatMember[c])
+                                    continue;
+                                const double cur = weightsArray[c];
+                                if (c < outputIsScaleArr.size()
+                                    && outputIsScaleArr[c])
                                     weightsArray.set(
-                                        cur + alpha * dy_c,
-                                        c);
-                                }
+                                        (cur + 1.0) * multProd[c]
+                                        - 1.0, c);
+                                else
+                                    weightsArray.set(
+                                        cur + addSum[c], c);
+                            }
+                            // PHASE17b: rotate the QWA base
+                            // quaternion by the alpha-blended so(3)
+                            // tangent. ||v|| ~ 0 -> exp = identity
+                            // (far driver: quat == Base_Output,
+                            // anti-leak guarantee preserved).
+                            for (size_t g = 0;
+                                 g < quatGroupStarts.size(); ++g)
+                            {
+                                const int s = quatGroupStarts[g];
+                                if (s < 0
+                                    || (unsigned)(s + 3)
+                                        >= weightsArray.length())
+                                    continue;
+                                const double v[3] = {
+                                    so3Sum[g*3 + 0],
+                                    so3Sum[g*3 + 1],
+                                    so3Sum[g*3 + 2] };
+                                if (std::fabs(v[0]) < 1e-12
+                                    && std::fabs(v[1]) < 1e-12
+                                    && std::fabs(v[2]) < 1e-12)
+                                    continue;
+                                double qb[4] = {
+                                    weightsArray[(unsigned)(s + 0)],
+                                    weightsArray[(unsigned)(s + 1)],
+                                    weightsArray[(unsigned)(s + 2)],
+                                    weightsArray[(unsigned)(s + 3)] };
+                                quatNormalizeXYZW(qb);
+                                double dq[4];
+                                quatExpSO3(v, dq);
+                                double qf[4];
+                                quatMulXYZW(qb, dq, qf);
+                                quatNormalizeXYZW(qf);
+                                weightsArray.set(
+                                    qf[0], (unsigned)(s + 0));
+                                weightsArray.set(
+                                    qf[1], (unsigned)(s + 1));
+                                weightsArray.set(
+                                    qf[2], (unsigned)(s + 2));
+                                weightsArray.set(
+                                    qf[3], (unsigned)(s + 3));
                             }
                         }
                     }
@@ -6279,6 +6651,111 @@ void RBFtools::getPoseWeights(MDoubleArray &out,
         out[(unsigned)(s + 2)] = qOut[2];
         out[(unsigned)(s + 3)] = qOut[3];
     }
+}
+
+
+//
+// M_P0_HIERARCHICAL_ENGINE_EXACT (2026-05-28): unified sub-net forward.
+//
+// THE one code path for every sub-net evaluation -- training-time
+// Predicted_Base (delta RHS), inference-time Base_Output, and
+// inference-time Delta_y all flow through here, which is the
+// structural guarantee that training and inference use the same
+// kernel, the same per-pose sigma, the same polynomial term, and the
+// same driver-subset projection (Bug B / Bug C of the engine-exact
+// brief). Internally a thin subset adapter around getPoseWeights.
+//
+void RBFtools::inferSubNetExact(MDoubleArray &out,
+                                const RBFSubNet &net,
+                                const BRMatrix &posesFull,
+                                const BRMatrix &valuesFull,
+                                const std::vector<double> &driverFull,
+                                const std::vector<double> &normsFull,
+                                const std::vector<double> &widthsFull,
+                                double widthFallback,
+                                int distType,
+                                int encoding,
+                                short kernelType,
+                                unsigned solveCount,
+                                const std::vector<int> &quatGroupStarts,
+                                const std::vector<bool> &isQuatMember,
+                                bool &qwaAnyClippedOut,
+                                bool &qwaAnyDegenerateOut)
+{
+    qwaAnyClippedOut = false;
+    qwaAnyDegenerateOut = false;
+    out.setLength(solveCount);
+    for (unsigned c = 0; c < solveCount; ++c)
+        out.set(0.0, c);
+
+    const unsigned nP = (unsigned)net.poseIndices.size();
+    const unsigned nD = (unsigned)net.activeDrivers.size();
+    if (nP == 0 || nD == 0) return;
+    if (net.wMat.getRowSize() != nP || net.wMat.getColSize() != solveCount)
+        return;
+
+    // Row/column subset of the full (normalized) pose matrix.
+    BRMatrix subPoses;
+    subPoses.setSize(nP, nD);
+    BRMatrix valuesSub;
+    valuesSub.setSize(nP, solveCount);
+    std::vector<double> widthsSub;
+    widthsSub.reserve(nP);
+    for (unsigned r = 0; r < nP; ++r) {
+        const int pIdx = net.poseIndices[r];
+        if (pIdx < 0 || (unsigned)pIdx >= posesFull.getRowSize())
+            return;  // defensive: stale subnet vs re-read pose data
+        for (unsigned c = 0; c < nD; ++c) {
+            const int dIdx = net.activeDrivers[c];
+            subPoses(r, c) =
+                (dIdx >= 0 && (unsigned)dIdx < posesFull.getColSize())
+                ? posesFull((unsigned)pIdx, (unsigned)dIdx) : 0.0;
+        }
+        for (unsigned c = 0; c < solveCount; ++c)
+            valuesSub(r, c) =
+                (c < valuesFull.getColSize()
+                 && (unsigned)pIdx < valuesFull.getRowSize())
+                ? valuesFull((unsigned)pIdx, c) : 0.0;
+        widthsSub.push_back(
+            ((size_t)pIdx < widthsFull.size())
+            ? widthsFull[(size_t)pIdx] : widthFallback);
+    }
+    if (widthsFull.empty()) widthsSub.clear();
+
+    // Driver + norms projected onto the active driver subset. An
+    // empty normsFull means the caller's driver is ALREADY in the
+    // normalized space (training-time Predicted_Base reads rows of
+    // matPoses directly); normalizeVector no-ops on size mismatch.
+    std::vector<double> driverSub;
+    driverSub.reserve(nD);
+    std::vector<double> normsSub;
+    if (!normsFull.empty()) normsSub.reserve(nD);
+    for (unsigned c = 0; c < nD; ++c) {
+        const int dIdx = net.activeDrivers[c];
+        driverSub.push_back(
+            (dIdx >= 0 && (size_t)dIdx < driverFull.size())
+            ? driverFull[(size_t)dIdx] : 0.0);
+        if (!normsFull.empty())
+            normsSub.push_back(
+                (dIdx >= 0 && (size_t)dIdx < normsFull.size())
+                ? normsFull[(size_t)dIdx] : 1.0);
+    }
+
+    // Polynomial term: same polyDim formula as training; defensive
+    // shape check downgrades to 0 (no augmentation) on mismatch so a
+    // failed/legacy subnet can never feed garbage into inference.
+    int polyDim = getPolynomialDim(kernelType, (int)nD);
+    if (polyDim > 0
+        && (net.polyMat.getRowSize() != (unsigned)polyDim
+            || net.polyMat.getColSize() != solveCount))
+        polyDim = 0;
+
+    getPoseWeights(out, subPoses, normsSub, driverSub,
+                   MIntArray(), net.wMat, widthsSub, widthFallback,
+                   distType, encoding, /*isMatrixMode*/ false,
+                   kernelType, valuesSub, quatGroupStarts,
+                   isQuatMember, qwaAnyClippedOut,
+                   qwaAnyDegenerateOut, net.polyMat, polyDim);
 }
 
 
